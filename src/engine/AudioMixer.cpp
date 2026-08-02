@@ -1,6 +1,5 @@
 #include "AudioMixer.h"
 
-#include "AudioAtempo.h"
 #include "AudioEffectCatalog.h"
 #include "ClipReaderPool.h"
 #include "TransitionCatalog.h"
@@ -65,19 +64,36 @@ double transitionGainForClip(const drift::Track &track, const drift::Clip &clip,
 
 constexpr drift::TimeUs kTimelineGapToleranceUs = 2'000; // ~2 ms: allow frame rounding between blocks
 
+drift::TimeUs framesToUs(int frames, int sampleRate)
+{
+    return static_cast<drift::TimeUs>(static_cast<int64_t>(frames) * drift::kUsPerSecond / sampleRate);
+}
+
+// Everything about a clip that decides where a timeline position lands in its source. When one of
+// them moves, a running retimer's cursor is describing a mapping that no longer exists, so the
+// stream has to restart — that is what makes dragging the speed slider during playback safe.
+// The curve is sampled through speedAt(), which is const and allocation-free by design, rather
+// than by walking its point list while the GUI thread may be rewriting it.
+quint64 clipAudioIdentity(const drift::Clip &clip)
+{
+    return qHashMulti(0, clip.path, clip.srcIn, clip.srcOut, clip.timelineStart, clip.timelineDuration,
+                      clip.reverse, clip.speed, clip.speedCurve.isEmpty(), clip.speedCurve.speedAt(0.0),
+                      clip.speedCurve.speedAt(0.25), clip.speedCurve.speedAt(0.5),
+                      clip.speedCurve.speedAt(0.75), clip.speedCurve.speedAt(1.0));
+}
+
 } // namespace
 
 // Silence outside the clip means this is safe to call for a preroll window that runs off the
 // clip's front edge.
 QVector<float> AudioMixer::readClipAudio(const drift::Clip &clip, drift::TimeUs winStartUs, int outFrames,
-                                         int sampleRate)
+                                         int sampleRate, drift::ClipAudioRetimer *retimer)
 {
     QVector<float> out(outFrames * 2, 0.0f);
     if (outFrames <= 0)
         return out;
 
-    const drift::TimeUs winDurUs =
-        static_cast<drift::TimeUs>((static_cast<int64_t>(outFrames) * drift::kUsPerSecond) / sampleRate);
+    const drift::TimeUs winDurUs = framesToUs(outFrames, sampleRate);
     const drift::TimeUs winEndUs = winStartUs + winDurUs;
     if (winEndUs <= clip.timelineStart || winStartUs >= clip.timelineEnd())
         return out; // window is entirely outside the clip — pure silence
@@ -85,58 +101,74 @@ QVector<float> AudioMixer::readClipAudio(const drift::Clip &clip, drift::TimeUs 
     // Clamp the window to the clip; frames before the clip's start stay as the leading zeros above.
     const drift::TimeUs playStartUs = qMax(winStartUs, clip.timelineStart);
     const int leadFrames = static_cast<int>(((playStartUs - winStartUs) * sampleRate) / drift::kUsPerSecond);
-    const int wantFrames = qMax(1, outFrames - leadFrames);
-
-    // A ramp only means the rate changes from block to block; within one block it is read as
-    // constant, which is what atempo can express anyway. Taken from the curve rather than by
-    // differencing two mapped positions so the final, partly-overhanging block of a clip still
-    // reports its true rate.
-    const double speed =
-        clip.hasSpeedCurve()
-            ? clip.speedCurve.speedAtTimelineOffset(playStartUs - clip.timelineStart,
-                                                    clip.srcOut - clip.srcIn)
-            : clip.effectiveSpeed();
-
-    // Frame counts are derived in the sample domain, never by going through microseconds. A block
-    // whose duration is not a whole number of microseconds — 1024 frames at 48 kHz is 21333.33 —
-    // used to truncate twice, once into µs and once back out, and ask the decoder for 1023 frames
-    // to fill 1024. The frame left behind stayed at the buffer's initial zero, putting a
-    // single-sample dropout on every block boundary: a periodic impulse, which is a harmonic comb
-    // all the way to Nyquist.
-    const int sourceSampleCount = qMax(1, static_cast<int>(std::llround(wantFrames * speed)));
-    const drift::TimeUs sourceSpanUs = qMax<drift::TimeUs>(
-        1, static_cast<drift::TimeUs>((static_cast<int64_t>(sourceSampleCount) * drift::kUsPerSecond)
-                                      / sampleRate));
-
-    // Reverse reads the block ahead of the mapped position and flips it below.
-    const drift::TimeUs sourceStartUs =
-        clip.reverse ? qMax<drift::TimeUs>(0, clip.timelineToSourceUs(playStartUs) - sourceSpanUs)
-                     : clip.timelineToSourceUs(playStartUs);
-
-    QVector<float> sourceChunk(sourceSampleCount * 2);
-    const int got = ClipReaderPool::instance().readAudioInterleaved(clip.path, sourceStartUs, sourceSampleCount,
-                                                                    sampleRate, sourceChunk.data());
-    if (got <= 0)
+    const int wantFrames = outFrames - leadFrames;
+    if (wantFrames <= 0)
         return out;
 
-    if (clip.reverse && got > 1) {
-        for (int i = 0, j = got - 1; i < j; ++i, --j) {
-            std::swap(sourceChunk[i * 2], sourceChunk[j * 2]);
-            std::swap(sourceChunk[i * 2 + 1], sourceChunk[j * 2 + 1]);
+    // Whether a clip is retimed is a property of the clip, not of the moment. A ramp that happens
+    // to pass through 1.0 in this block still goes through the stretcher: bypassing it for one
+    // block would skip the source read, leave the retimer's cursor where it was, and re-enter the
+    // stream with a hole in it.
+    if (!clip.hasSpeedCurve() && qFuzzyCompare(clip.effectiveSpeed(), 1.0)) {
+        // Frame counts are derived in the sample domain, never by going through microseconds. A
+        // block whose duration is not a whole number of microseconds — 1024 frames at 48 kHz is
+        // 21333.33 — used to truncate twice, once into µs and once back out, and ask the decoder
+        // for 1023 frames to fill 1024. The frame left behind stayed at the buffer's initial zero,
+        // putting a single-sample dropout on every block boundary: a periodic impulse, which is a
+        // harmonic comb all the way to Nyquist.
+        const drift::TimeUs sourceSpanUs = qMax<drift::TimeUs>(1, framesToUs(wantFrames, sampleRate));
+        // Reverse reads the block ahead of the mapped position and flips it below.
+        const drift::TimeUs sourceStartUs =
+            clip.reverse ? qMax<drift::TimeUs>(0, clip.timelineToSourceUs(playStartUs) - sourceSpanUs)
+                         : clip.timelineToSourceUs(playStartUs);
+
+        const int got = ClipReaderPool::instance().readAudioInterleaved(
+            clip.path, sourceStartUs, wantFrames, sampleRate, out.data() + leadFrames * 2);
+        if (got > 1 && clip.reverse) {
+            for (int i = leadFrames, j = leadFrames + got - 1; i < j; ++i, --j) {
+                std::swap(out[i * 2], out[j * 2]);
+                std::swap(out[i * 2 + 1], out[j * 2 + 1]);
+            }
         }
+        return out;
     }
 
-    QVector<float> chunk;
-    if (qFuzzyCompare(speed, 1.0))
-        chunk = sourceChunk;
-    else
-        chunk = AudioAtempo::apply(sourceChunk.constData(), got, sampleRate, speed, wantFrames);
+    if (!retimer)
+        return out;
 
-    const int copyFrames = qMin(wantFrames, chunk.size() / 2);
-    for (int i = 0; i < copyFrames && (leadFrames + i) < outFrames; ++i) {
-        out[(leadFrames + i) * 2] = chunk[i * 2];
-        out[(leadFrames + i) * 2 + 1] = chunk[i * 2 + 1];
+    // Take the ramp's average over the block rather than its value at the left edge: differencing
+    // the mapping is the curve's integral, so the audio cannot slowly slide against the picture
+    // over a long ramp. The exception is the final, partly-overhanging block — timelineToSourceUs
+    // clamps at the clip's end, so differencing there would under-report the rate.
+    const drift::TimeUs blockEndUs = playStartUs + framesToUs(wantFrames, sampleRate);
+    double tempo = clip.effectiveSpeed();
+    if (clip.hasSpeedCurve()) {
+        tempo = blockEndUs <= clip.timelineEnd()
+                    ? static_cast<double>(clip.timelineToSourceUs(blockEndUs)
+                                          - clip.timelineToSourceUs(playStartUs))
+                          / static_cast<double>(blockEndUs - playStartUs)
+                    : clip.speedCurve.speedAtTimelineOffset(playStartUs - clip.timelineStart,
+                                                            clip.srcOut - clip.srcIn);
     }
+
+    drift::ClipAudioBlock block;
+    block.identity = clipAudioIdentity(clip);
+    block.sampleRate = sampleRate;
+    block.timelineStartUs = playStartUs;
+    // For a reversed clip this is already the source position of the first sample in playback
+    // order, which is exactly what the retimer's cursor means; it walks backwards from there.
+    block.sourceStartUs = clip.timelineToSourceUs(playStartUs);
+    block.tempo = tempo;
+    block.reverse = clip.reverse;
+
+    const QString path = clip.path;
+    retimer->process(
+        block,
+        [&path, sampleRate](drift::TimeUs sourceStartUs, int frames, float *dst) {
+            return ClipReaderPool::instance().readAudioInterleaved(path, sourceStartUs, frames, sampleRate,
+                                                                   dst);
+        },
+        wantFrames, out.data() + leadFrames * 2);
     return out;
 }
 
@@ -144,8 +176,8 @@ namespace {
 
 void accumulateClipAudio(const drift::Clip &clip, const drift::Track &track, drift::TimeUs timelineStartUs,
                          int sampleCount, int sampleRate, float *mixBuffer,
-                         QMutex &rackMutex,
-                         QHash<QString, std::shared_ptr<drift::AudioEffectRack>> &effectRacks)
+                         QMutex &stateMutex,
+                         QHash<QString, std::shared_ptr<ClipAudioState>> &clipAudio)
 {
     if (clip.path.isEmpty())
         return;
@@ -162,25 +194,30 @@ void accumulateClipAudio(const drift::Clip &clip, const drift::Track &track, dri
     const drift::TimeUs blockDurUs = static_cast<drift::TimeUs>(
         (static_cast<int64_t>(sampleCount) * drift::kUsPerSecond) / sampleRate);
 
+    // Hold a strong reference rather than pointing into the hash. mix() runs on the audio thread
+    // while resetClipAudioState() clears this hash from the GUI thread on every seek, play and
+    // pause: an unguarded operator[] can rehash underneath that clear(), and a reference into the
+    // hash dangles the moment clear() drops the last owner — the state's buffers are then freed
+    // while this thread is still processing into them.
+    //
+    // Looked up unconditionally, above the effects branch: a retimed clip needs its stretcher
+    // whether or not it also has an effect chain.
+    std::shared_ptr<ClipAudioState> statePtr;
+    {
+        QMutexLocker locker(&stateMutex);
+        statePtr = clipAudio.value(clip.id);
+        if (!statePtr) {
+            statePtr = std::make_shared<ClipAudioState>();
+            clipAudio.insert(clip.id, statePtr);
+        }
+    }
+    // Safe even if the hash is cleared right now: this copy keeps the state alive until the block
+    // finishes, and the next block simply builds a fresh one.
+    ClipAudioState &state = *statePtr;
+
     QVector<float> chunk;
     if (!clip.audioEffects.isEmpty()) {
-        // Hold a strong reference rather than pointing into the hash. mix() runs on the audio
-        // thread while resetEffectRacks() clears this hash from the GUI thread on every seek, play
-        // and pause: an unguarded operator[] can rehash underneath that clear(), and a reference
-        // into the hash dangles the moment clear() drops the last owner — the rack's buffers are
-        // then freed while this thread is still processing into them.
-        std::shared_ptr<drift::AudioEffectRack> rackPtr;
-        {
-            QMutexLocker locker(&rackMutex);
-            rackPtr = effectRacks.value(clip.id);
-            if (!rackPtr) {
-                rackPtr = std::make_shared<drift::AudioEffectRack>();
-                effectRacks.insert(clip.id, rackPtr);
-            }
-        }
-        // Safe even if the hash is cleared right now: this copy keeps the rack alive until the
-        // block finishes, and the next block simply builds a fresh one.
-        drift::AudioEffectRack &rack = *rackPtr;
+        drift::AudioEffectRack &rack = state.rack;
 
         const drift::TimeUs lastEndUs = rack.lastTimelineEndUs();
         const bool continuous = lastEndUs >= 0
@@ -198,18 +235,20 @@ void accumulateClipAudio(const drift::Clip &clip, const drift::Track &track, dri
                     timelineStartUs
                     - static_cast<drift::TimeUs>((static_cast<int64_t>(primeFrames) * drift::kUsPerSecond)
                                                  / sampleRate);
+                // The preroll window ends exactly where this block starts, so the retimer sees one
+                // continuous stream across the two reads and does not restart between them.
                 const QVector<float> preroll =
-                    AudioMixer::readClipAudio(clip, primeStartUs, primeFrames, sampleRate);
+                    AudioMixer::readClipAudio(clip, primeStartUs, primeFrames, sampleRate, &state.retimer);
                 rack.warmUp(preroll.constData(), primeFrames);
             }
         }
 
-        chunk = AudioMixer::readClipAudio(clip, timelineStartUs, sampleCount, sampleRate);
+        chunk = AudioMixer::readClipAudio(clip, timelineStartUs, sampleCount, sampleRate, &state.retimer);
         if (active)
             rack.process(chunk.data(), sampleCount);
         rack.setLastTimelineEndUs(timelineStartUs + blockDurUs);
     } else {
-        chunk = AudioMixer::readClipAudio(clip, timelineStartUs, sampleCount, sampleRate);
+        chunk = AudioMixer::readClipAudio(clip, timelineStartUs, sampleCount, sampleRate, &state.retimer);
     }
 
     const int frames = qMin(sampleCount, chunk.size() / 2);
@@ -229,16 +268,16 @@ void accumulateClipAudio(const drift::Clip &clip, const drift::Track &track, dri
 void AudioMixer::setProject(const drift::Project *project)
 {
     if (m_project != project) {
-        QMutexLocker locker(&m_effectRackMutex);
-        m_effectRacks.clear();
+        QMutexLocker locker(&m_clipAudioMutex);
+        m_clipAudio.clear();
     }
     m_project = project;
 }
 
-void AudioMixer::resetEffectRacks()
+void AudioMixer::resetClipAudioState()
 {
-    QMutexLocker locker(&m_effectRackMutex);
-    m_effectRacks.clear();
+    QMutexLocker locker(&m_clipAudioMutex);
+    m_clipAudio.clear();
 }
 
 void AudioMixer::mix(drift::TimeUs timelineStartUs, int sampleCount, int sampleRate,
@@ -256,12 +295,12 @@ void AudioMixer::mix(drift::TimeUs timelineStartUs, int sampleCount, int sampleR
         if (track.type == drift::TrackType::Audio) {
             for (const drift::Clip &clip : track.clips)
                 accumulateClipAudio(clip, track, timelineStartUs, sampleCount, sampleRate,
-                                      interleavedStereoOut, m_effectRackMutex, m_effectRacks);
+                                      interleavedStereoOut, m_clipAudioMutex, m_clipAudio);
         } else if (track.type == drift::TrackType::Video) {
             for (const drift::Clip &clip : track.clips) {
                 if (clip.type == drift::ClipType::Video && !clip.suppressEmbeddedAudio)
                     accumulateClipAudio(clip, track, timelineStartUs, sampleCount, sampleRate,
-                                          interleavedStereoOut, m_effectRackMutex, m_effectRacks);
+                                          interleavedStereoOut, m_clipAudioMutex, m_clipAudio);
             }
         }
     }

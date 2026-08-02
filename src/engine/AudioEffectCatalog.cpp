@@ -224,6 +224,8 @@ QVector<drift::AudioEffectSpec> audioEffectSpecsFor(const QList<drift::Effect> &
     specs.reserve(effects.size());
 
     for (const drift::Effect &effect : effects) {
+        if (!effect.enabled)
+            continue;
         const AudioEffectEntry *def = audioEffectDefForId(effect.catalogId);
         if (!def)
             continue; // addon not installed — pass the audio through untouched

@@ -33,7 +33,7 @@ struct AudioEffectEntry
     int prerollMs = 0;
     QList<drift::EffectParamSpec> parameters;
     QString packageDir; // where it was loaded from; traces the entry back to its addon
-    // Lucide file name (no extension) for the Sounds browser card / inspector chip.
+    // Lucide file name (no extension) for the Audio FX browser card / inspector chip.
     QString icon;
     // Absolute path to package thumbnail.png (or an explicit "thumbnail" asset), if present.
     QString thumbnailPath;
