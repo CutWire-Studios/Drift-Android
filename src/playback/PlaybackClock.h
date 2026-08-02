@@ -1,0 +1,50 @@
+#pragma once
+
+#include "core/Time.h"
+
+#include <QMutex>
+#include <atomic>
+#include <chrono>
+
+// Timeline clock for audio-master playback. Two positions are tracked:
+//   * the produce position advances as audio is mixed into the sink buffer and
+//     tells the mixer which samples to generate next;
+//   * the playback position is anchored to the sink's actually-played audio
+//     (processedUSecs) and drives what the viewer sees/hears, so video stays in
+//     sync with audio instead of leading it by the buffer depth.
+class PlaybackClock
+{
+public:
+    void reset(drift::TimeUs playheadUs, int sampleRate);
+    void start();
+    void pause();
+    void stop();
+
+    bool isRunning() const { return m_running.load(std::memory_order_acquire); }
+    drift::TimeUs pausedAt() const { return m_pausedAtUs; }
+
+    // Produce side: where the mixer should generate the next buffer.
+    drift::TimeUs produceTimeUs() const;
+    void onAudioSamplesRendered(int sampleCount);
+
+    // Playback side: the position currently audible, wall-interpolated between
+    // sink updates for smoothness. This is the timeline's visible playhead.
+    void syncPlaybackUs(drift::TimeUs playedUs);
+    drift::TimeUs currentTimeUs() const;
+
+private:
+    static qint64 nowNs();
+
+    drift::TimeUs m_startPlayheadUs = 0;
+    drift::TimeUs m_pausedAtUs = 0;
+    std::atomic<int64_t> m_audioSamplesRendered{0};
+    std::atomic<bool> m_running{false};
+    int m_sampleRate = 48000;
+
+    // Playback anchor (guarded together so time never tears across the two).
+    mutable QMutex m_anchorMutex;
+    drift::TimeUs m_anchorPlayedUs = 0;
+    qint64 m_anchorWallNs = 0; // 0 until the first sink sync arrives
+    qint64 m_startWallNs = 0;  // wall time at start(), for the pre-sync fallback
+    mutable drift::TimeUs m_lastReportedUs = 0; // monotonic guard on the visible playhead
+};

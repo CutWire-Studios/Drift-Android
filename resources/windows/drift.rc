@@ -1,0 +1,3 @@
+// Windows application icon (title bar / taskbar / Explorer).
+// Path is relative to this .rc file.
+IDI_ICON1 ICON "drift.ico"

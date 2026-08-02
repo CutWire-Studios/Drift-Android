@@ -1,0 +1,289 @@
+import QtQuick
+import QtQuick.Controls.Basic
+import Drift
+import "components"
+
+// Modal bottom sheet host for Assets / Properties on phone.
+// Drag the header (or any non-scrolling empty area) up to expand, down to
+// collapse or dismiss.
+Popup {
+    id: root
+
+    // Children of AndroidBottomSheet land in the sheet panel, not the full-screen scrim.
+    default property alias sheetContent: contentHost.data
+    property string title: ""
+    property real sheetHeightFraction: Theme.androidSheetHeightFraction
+    property real sheetExpandedFraction: Theme.androidSheetExpandedFraction
+    property bool expanded: false
+
+    modal: true
+    dim: false
+    focus: true
+    padding: 0
+    margins: 0
+    // Scrim / area above the panel dismisses; empty sheet area must not.
+    closePolicy: Popup.CloseOnEscape
+    parent: Overlay.overlay
+    width: Overlay.overlay ? Overlay.overlay.width : 0
+    height: Overlay.overlay ? Overlay.overlay.height : 0
+    x: 0
+    y: 0
+
+    readonly property real collapsedHeight: Math.round(height * sheetHeightFraction)
+    readonly property real expandedHeight: Math.round(height * sheetExpandedFraction)
+    readonly property real dismissHeight: Math.round(height * Theme.androidSheetDismissFraction)
+
+    // Source of truth for panel height (drag + snap both write here).
+    property real panelHeight: 0
+    property bool _dragging: false
+
+    function expand() {
+        expanded = true
+        animateTo(expandedHeight)
+    }
+
+    function collapse() {
+        expanded = false
+        animateTo(collapsedHeight)
+    }
+
+    function animateTo(h) {
+        heightAnimation.stop()
+        heightAnimation.from = root.panelHeight
+        heightAnimation.to = Math.max(0, h)
+        heightAnimation.start()
+    }
+
+    function beginDrag(globalY) {
+        heightAnimation.stop()
+        root._dragging = true
+        return { startGlobalY: globalY, startHeight: root.panelHeight }
+    }
+
+    function updateDrag(startGlobalY, startHeight, globalY) {
+        const dy = globalY - startGlobalY
+        const next = startHeight - dy
+        const lo = Math.round(root.height * 0.12)
+        const hi = root.expandedHeight
+        root.panelHeight = Math.max(lo, Math.min(hi, next))
+    }
+
+    function finishDrag(finalHeight, velocityY) {
+        // Snap by resting height first. Velocity only tips the decision when the
+        // sheet is already clearly moving toward a neighbour state — a fast drag
+        // alone must not dismiss (that was closing on quick expand/collapse).
+        const mid = (collapsedHeight + expandedHeight) * 0.5
+        const nearCollapsed = finalHeight <= collapsedHeight * 1.08
+        const clearlyBelowCollapsed = finalHeight < dismissHeight
+        const flungDown = velocityY > 1600
+        const flungUp = velocityY < -1600
+
+        if (clearlyBelowCollapsed)
+            return root.close()
+        // Downward fling only dismisses when already at/under the collapsed size.
+        if (flungDown && nearCollapsed && finalHeight < collapsedHeight * 0.95)
+            return root.close()
+
+        if (flungUp || finalHeight >= mid)
+            return expand()
+
+        collapse()
+    }
+
+    onAboutToShow: {
+        expanded = false
+        _dragging = false
+        heightAnimation.stop()
+        panelHeight = collapsedHeight
+    }
+
+    onHeightChanged: {
+        if (!opened || _dragging || heightAnimation.running)
+            return
+        panelHeight = expanded ? expandedHeight : collapsedHeight
+    }
+
+    NumberAnimation {
+        id: heightAnimation
+        target: root
+        property: "panelHeight"
+        duration: Theme.durationBase + 40
+        easing.type: Theme.easing
+    }
+
+    // Shared vertical-drag tracker used by the header and empty body chrome.
+    // Tracks overlay coordinates so moving the panel does not cancel the gesture.
+    component SheetDragArea: MouseArea {
+        id: dragArea
+        property bool stealTouches: false
+        property real startGlobalY: 0
+        property real startHeight: 0
+        property real lastGlobalY: 0
+        property real lastT: 0
+        property real velocityY: 0
+
+        preventStealing: stealTouches
+        acceptedButtons: Qt.LeftButton
+
+        function globalY(mouse) {
+            return mapToItem(Overlay.overlay, mouse.x, mouse.y).y
+        }
+
+        onPressed: (mouse) => {
+            const state = root.beginDrag(globalY(mouse))
+            startGlobalY = state.startGlobalY
+            startHeight = state.startHeight
+            lastGlobalY = startGlobalY
+            lastT = Date.now()
+            velocityY = 0
+        }
+
+        onPositionChanged: (mouse) => {
+            if (!pressed)
+                return
+            const gy = globalY(mouse)
+            const now = Date.now()
+            const dt = Math.max(1, now - lastT)
+            root.updateDrag(startGlobalY, startHeight, gy)
+            velocityY = (gy - lastGlobalY) / dt * 1000
+            lastGlobalY = gy
+            lastT = now
+        }
+
+        onReleased: {
+            root._dragging = false
+            root.finishDrag(root.panelHeight, velocityY)
+        }
+
+        onCanceled: {
+            root._dragging = false
+            root.collapse()
+        }
+    }
+
+    background: Rectangle {
+        color: Qt.rgba(0, 0, 0, 0.45)
+        opacity: {
+            if (!root.opened || root.height <= 0)
+                return 0
+            const span = Math.max(1, root.expandedHeight - root.dismissHeight)
+            const t = (root.panelHeight - root.dismissHeight) / span
+            return 0.35 + 0.65 * Math.max(0, Math.min(1, t))
+        }
+        MouseArea {
+            anchors.fill: parent
+            onClicked: root.close()
+        }
+    }
+
+    contentItem: Item {
+        anchors.fill: parent
+
+        MouseArea {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: panel.top
+            onClicked: root.close()
+        }
+
+        Rectangle {
+            id: panel
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: root.panelHeight
+            color: Theme.panelBackground
+            radius: Theme.radiusMd
+
+            // Catch presses on empty (non-scrolling) sheet chrome and drag the sheet.
+            // Flickables / buttons sit above this and keep their own gestures.
+            SheetDragArea {
+                anchors.fill: parent
+                stealTouches: false
+            }
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: Theme.radiusMd
+                color: Theme.panelBackground
+            }
+
+            // Prominent drag header: handle + title + close.
+            Rectangle {
+                id: header
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: Theme.androidSheetHeaderHeight
+                color: Theme.panelBackground
+                z: 2
+
+                Rectangle {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: parent.top
+                    anchors.topMargin: 10
+                    width: 44
+                    height: 5
+                    radius: 2.5
+                    color: Theme.panelBorder
+                }
+
+                Text {
+                    anchors.left: parent.left
+                    anchors.leftMargin: Theme.pagePadding
+                    anchors.right: closeBtn.left
+                    anchors.rightMargin: Theme.spacingMd
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 10
+                    text: root.title.length > 0 ? root.title : qsTr("Sheet")
+                    color: Theme.panelForeground
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSizeBase
+                    font.weight: Font.DemiBold
+                    elide: Text.ElideRight
+                }
+
+                IconButton {
+                    id: closeBtn
+                    anchors.right: parent.right
+                    anchors.rightMargin: Theme.spacingSm
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 4
+                    buttonSize: Theme.androidIconButtonSize
+                    iconSize: Theme.iconSizeLg
+                    glyph: Theme.icons.x
+                    variant: "text"
+                    tooltip: qsTr("Close")
+                    onClicked: root.close()
+                }
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    height: Theme.borderWidth
+                    color: Theme.panelBorder
+                }
+
+                // Whole header is the primary drag affordance (except close).
+                SheetDragArea {
+                    anchors.fill: parent
+                    anchors.rightMargin: closeBtn.width + Theme.spacingSm
+                    stealTouches: true
+                }
+            }
+
+            Item {
+                id: contentHost
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: header.bottom
+                anchors.bottom: parent.bottom
+                clip: true
+            }
+        }
+    }
+}

@@ -1,0 +1,53 @@
+# Build outputs
+/build/
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+*.so
+*.o
+*.a
+*.dylib
+*.dll
+*.exe
+*.qmlc
+*.jsc
+
+# Native dependency trees (cloned/built by third_party/build-android.sh)
+/third_party/src/
+/third_party/prebuilt/
+
+# Local machine / IDE
+/local.properties
+.idea/
+*.user
+*.user.*
+CMakeUserPresets.json
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Secrets and installer clutter — never commit
+/auth
+.env
+.env.*
+*.keystore
+*.jks
+aqtinstall.log
+*.log
+
+# Android / Gradle leftovers outside /build
+.gradle/
+captures/
+.externalNativeBuild/
+.cxx/
+*.iml
+
+# Qt Creator / moc noise if generated in-tree
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*_autogen/
