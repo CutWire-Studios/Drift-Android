@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls.Basic
-import QtQuick.Window
 import Drift
 import ".."
 
@@ -105,22 +104,24 @@ Item {
 
         ThemedSlider {
             id: speedSlider
+            label: qsTr("Speed")
             visible: root.clipKind === "video" || root.clipKind === "audio"
             enabled: !speedColumn.hasSpeedCurve
             width: parent.width
             from: 0.25
             to: 4.0
             stepSize: 0.05
-            value: root.clipData.speed || 1.0
+            Binding on value {
+                when: !speedSlider.pressed
+                value: root.clipData.speed || 1.0
+            }
             onMoved: EditorState.previewSetClipSpeed(
                          EditorState.selectedTrack, EditorState.selectedClip, value)
             onPressedChanged: {
-                if (pressed) {
+                if (pressed)
                     EditorState.beginPreviewDrag(qsTr("Speed changed"))
-                } else {
+                else
                     EditorState.commitPreviewDrag()
-                    value = Qt.binding(() => root.clipData.speed || 1.0)
-                }
             }
         }
 
@@ -142,124 +143,43 @@ Item {
                 void root.clipDataRevision
                 return !!root.clipData.reverse
             }
-            onClicked: EditorState.setClipReverse(
-                           EditorState.selectedTrack, EditorState.selectedClip,
-                           !root.clipData.reverse)
+            // Turning reverse off is free. Turning it on may need a rendered copy first, which
+            // requestClipReverse decides and confirms through ReverseProgressDialog.
+            onClicked: {
+                if (root.clipData.reverse)
+                    EditorState.setClipReverse(EditorState.selectedTrack,
+                                               EditorState.selectedClip, false)
+                else
+                    EditorState.requestClipReverse(EditorState.selectedTrack,
+                                                   EditorState.selectedClip)
+            }
         }
 
-        Rectangle {
-            width: parent.width
-            height: 1
-            color: Theme.panelBorder
-            opacity: 0.5
-        }
-
-        Text {
-            text: root.clipKind === "audio" ? "Fade in / out (volume)" : "Fade in / out"
-            color: Theme.mutedForeground
-            font.family: Theme.fontFamily
-            font.pixelSize: Theme.fontSizeXs
-        }
-
-        property real fadeMax: Math.max(0.1, root.clipData.duration || 1)
-
+        // Shown when a reversed video clip has no rendered copy covering it — after a cancelled
+        // render, or after a trim pushed the clip past the range that was rendered.
         Row {
             width: parent.width
-            spacing: 6
+            spacing: Theme.spacingLg
+            visible: {
+                void root.clipDataRevision
+                void EditorState.reverseRendering
+                return root.clipKind === "video" && !!root.clipData.reverse
+                       && !EditorState.clipHasReverseProxy(EditorState.selectedTrack,
+                                                           EditorState.selectedClip)
+            }
+
+            ThemedLabel {
+                width: parent.width - renderReversedButton.width - Theme.spacingLg
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("Not rendered — playback may stutter")
+            }
 
             ThemedButton {
-                text: qsTr("Fade in")
-                variant: "secondary"
-                onClicked: EditorState.setClipFade(
-                               EditorState.selectedTrack, EditorState.selectedClip,
-                               0.5, root.clipData.fadeOut || 0)
+                id: renderReversedButton
+                text: qsTr("Render")
+                onClicked: EditorState.requestClipReverse(EditorState.selectedTrack,
+                                                          EditorState.selectedClip)
             }
-            ThemedButton {
-                text: qsTr("Fade out")
-                variant: "secondary"
-                onClicked: EditorState.setClipFade(
-                               EditorState.selectedTrack, EditorState.selectedClip,
-                               root.clipData.fadeIn || 0, 0.5)
-            }
-            ThemedButton {
-                text: qsTr("Clear")
-                variant: "ghost"
-                enabled: (root.clipData.fadeIn || 0) > 0 || (root.clipData.fadeOut || 0) > 0
-                onClicked: EditorState.setClipFade(
-                               EditorState.selectedTrack, EditorState.selectedClip, 0, 0)
-            }
-        }
-
-        Text {
-            text: "Fade in: " + (root.clipData.fadeIn || 0).toFixed(2) + "s"
-            color: Theme.mutedForeground
-            font.family: Theme.monoFontFamily
-            font.pixelSize: Theme.fontSizeXs
-        }
-
-        ThemedSlider {
-            id: fadeInSlider
-            width: parent.width
-            from: 0
-            to: parent.fadeMax
-            stepSize: 0.05
-            value: root.clipData.fadeIn || 0
-            onMoved: EditorState.previewSetClipFade(
-                         EditorState.selectedTrack, EditorState.selectedClip,
-                         value, root.clipData.fadeOut || 0)
-            onPressedChanged: {
-                if (pressed) {
-                    EditorState.beginPreviewDrag(qsTr("Adjust fade"))
-                } else {
-                    EditorState.commitPreviewDrag()
-                    value = Qt.binding(() => root.clipData.fadeIn || 0)
-                }
-            }
-        }
-
-        Text {
-            text: "Fade out: " + (root.clipData.fadeOut || 0).toFixed(2) + "s"
-            color: Theme.mutedForeground
-            font.family: Theme.monoFontFamily
-            font.pixelSize: Theme.fontSizeXs
-        }
-
-        ThemedSlider {
-            id: fadeOutSlider
-            width: parent.width
-            from: 0
-            to: parent.fadeMax
-            stepSize: 0.05
-            value: root.clipData.fadeOut || 0
-            onMoved: EditorState.previewSetClipFade(
-                         EditorState.selectedTrack, EditorState.selectedClip,
-                         root.clipData.fadeIn || 0, value)
-            onPressedChanged: {
-                if (pressed) {
-                    EditorState.beginPreviewDrag(qsTr("Adjust fade"))
-                } else {
-                    EditorState.commitPreviewDrag()
-                    value = Qt.binding(() => root.clipData.fadeOut || 0)
-                }
-            }
-        }
-
-        Text {
-            text: qsTr("Fade style")
-            color: Theme.mutedForeground
-            font.family: Theme.fontFamily
-            font.pixelSize: Theme.fontSizeXs
-        }
-
-        ThemedComboBox {
-            id: fadeCurveCombo
-            width: parent.width
-            model: [qsTr("Linear"), qsTr("Smooth"), qsTr("Natural")]
-            readonly property var curveIds: ["linear", "smooth", "equalPower"]
-            currentIndex: Math.max(0, curveIds.indexOf(root.clipData.fadeCurve || "smooth"))
-            onActivated: (index) => EditorState.setClipFadeCurve(
-                             EditorState.selectedTrack, EditorState.selectedClip,
-                             curveIds[index])
         }
     }
 }

@@ -74,26 +74,4 @@ BlendMode blendModeFromString(const QString &mode)
     return BlendMode::Normal;
 }
 
-QString fadeCurveToString(FadeCurve curve)
-{
-    switch (curve) {
-    case FadeCurve::Linear:
-        return QStringLiteral("linear");
-    case FadeCurve::Smooth:
-        return QStringLiteral("smooth");
-    case FadeCurve::EqualPower:
-        return QStringLiteral("equalPower");
-    }
-    return QStringLiteral("smooth");
-}
-
-FadeCurve fadeCurveFromString(const QString &curve)
-{
-    if (curve == QStringLiteral("linear"))
-        return FadeCurve::Linear;
-    if (curve == QStringLiteral("equalPower"))
-        return FadeCurve::EqualPower;
-    return FadeCurve::Smooth;
-}
-
 } // namespace drift

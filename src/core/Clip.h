@@ -1,6 +1,8 @@
 #pragma once
 
+#include "ClipAnimation.h"
 #include "Effect.h"
+#include "FadeShape.h"
 #include "Keyframe.h"
 #include "Mask.h"
 #include "MediaAsset.h"
@@ -13,8 +15,6 @@
 #include <QList>
 #include <QString>
 
-#include <cmath>
-
 namespace drift {
 
 enum class ClipType { Video, Audio, Image, Text, Subtitle, Shape };
@@ -26,14 +26,6 @@ enum class BlendMode { Normal, Multiply, Screen, Overlay, Add, Darken, Lighten }
 
 QString blendModeToString(BlendMode mode);
 BlendMode blendModeFromString(const QString &mode);
-
-// Shape applied to fade-in / fade-out ramps. Linear is constant-rate, Smooth
-// eases both ends (nicer for visuals), EqualPower keeps perceived loudness
-// constant (nicer for audio).
-enum class FadeCurve { Linear, Smooth, EqualPower };
-
-QString fadeCurveToString(FadeCurve curve);
-FadeCurve fadeCurveFromString(const QString &curve);
 
 struct Clip
 {
@@ -87,6 +79,12 @@ struct Clip
     TimeUs fadeInUs = 0;
     TimeUs fadeOutUs = 0;
     FadeCurve fadeCurve = FadeCurve::Smooth;
+    // Used when fadeCurve == Custom; shared by fade-in and fade-out.
+    FadeShape fadeShape;
+
+    // CapCut-style body intro/outro (whole-clip opacity/transform motion).
+    ClipAnimation animIn;
+    ClipAnimation animOut;
 
     // Layout on the project canvas in pixels: top-left origin, size in px.
     // Empty tracks use defaults (0,0,projectW,projectH) at evaluate time.
@@ -156,40 +154,38 @@ struct Clip
         return time >= timelineStart && time < timelineEnd();
     }
 
-    // Fade gain in [0,1] at a timeline time, combining fade-in and fade-out
-    // through the selected curve. 1.0 when no fades are set.
+    // Fade gain in [0,1] at a timeline time. CapCut Fade In/Out animations own
+    // the ramp when set; otherwise edge fadeInUs/Out + clip fadeCurve apply
+    // (audio, timeline handles, legacy projects).
     double fadeMultiplier(TimeUs timelineUs) const
     {
-        if (fadeInUs <= 0 && fadeOutUs <= 0)
+        const bool animFadeIn = animIn.kind == ClipAnimKind::Fade && animIn.durationUs > 0;
+        const bool animFadeOut = animOut.kind == ClipAnimKind::Fade && animOut.durationUs > 0;
+        if (!animFadeIn && !animFadeOut && fadeInUs <= 0 && fadeOutUs <= 0)
             return 1.0;
 
         const TimeUs rel = qBound(TimeUs{0}, timelineUs - timelineStart, timelineDuration);
+        const TimeUs fromEnd = timelineDuration - rel;
 
         double in = 1.0;
-        if (fadeInUs > 0 && rel < fadeInUs)
-            in = static_cast<double>(rel) / static_cast<double>(fadeInUs);
+        if (animFadeIn && rel < animIn.durationUs) {
+            const double t = static_cast<double>(rel) / static_cast<double>(animIn.durationUs);
+            in = shapedProgress(t, animIn.curve, animIn.shape);
+        } else if (fadeInUs > 0 && rel < fadeInUs) {
+            in = shapedProgress(static_cast<double>(rel) / static_cast<double>(fadeInUs),
+                                fadeCurve, fadeShape);
+        }
 
         double out = 1.0;
-        const TimeUs fromEnd = timelineDuration - rel;
-        if (fadeOutUs > 0 && fromEnd < fadeOutUs)
-            out = static_cast<double>(fromEnd) / static_cast<double>(fadeOutUs);
-
-        return shapeFade(in) * shapeFade(out);
-    }
-
-private:
-    double shapeFade(double p) const
-    {
-        p = p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p);
-        switch (fadeCurve) {
-        case FadeCurve::Linear:
-            return p;
-        case FadeCurve::Smooth:
-            return p * p * (3.0 - 2.0 * p);
-        case FadeCurve::EqualPower:
-            return std::sin(p * 1.5707963267948966); // p * pi/2
+        if (animFadeOut && fromEnd < animOut.durationUs) {
+            const double t = static_cast<double>(fromEnd) / static_cast<double>(animOut.durationUs);
+            out = shapedProgress(t, animOut.curve, animOut.shape);
+        } else if (fadeOutUs > 0 && fromEnd < fadeOutUs) {
+            out = shapedProgress(static_cast<double>(fromEnd) / static_cast<double>(fadeOutUs),
+                                 fadeCurve, fadeShape);
         }
-        return p;
+
+        return in * out;
     }
 };
 

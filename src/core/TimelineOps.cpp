@@ -71,6 +71,70 @@ TimeUs resolveClipStart(const Project &project, const Track &track, int excludeC
     return qMax<TimeUs>(0, start);
 }
 
+TimeUs clampClipStartNoOverlap(const Track &track, const QSet<QString> &excludeIds,
+                               TimeUs desiredStart, TimeUs duration)
+{
+    TimeUs start = qMax<TimeUs>(0, desiredStart);
+
+    struct Interval {
+        TimeUs begin;
+        TimeUs end;
+    };
+    QList<Interval> intervals;
+    intervals.reserve(track.clips.size());
+    for (const Clip &clip : track.clips) {
+        if (excludeIds.contains(clip.id))
+            continue;
+        intervals.append({clip.timelineStart, clip.timelineEnd()});
+    }
+    std::sort(intervals.begin(), intervals.end(),
+              [](const Interval &a, const Interval &b) { return a.begin < b.begin; });
+
+    bool adjusted = true;
+    while (adjusted) {
+        adjusted = false;
+        for (const Interval &interval : intervals) {
+            if (start < interval.end && start + duration > interval.begin) {
+                start = interval.end;
+                adjusted = true;
+            }
+        }
+    }
+
+    return start;
+}
+
+TimeUs clampClipStartAgainstLeftNeighbors(const Track &track, const QSet<QString> &excludeIds,
+                                          TimeUs currentStart, TimeUs desiredStart)
+{
+    TimeUs start = qMax<TimeUs>(0, desiredStart);
+    TimeUs minStart = 0;
+    for (const Clip &clip : track.clips) {
+        if (excludeIds.contains(clip.id))
+            continue;
+        // Only blockers that sit fully to the left of the current edge (gap or abut).
+        if (clip.timelineEnd() <= currentStart)
+            minStart = qMax(minStart, clip.timelineEnd());
+    }
+    return qMax(start, minStart);
+}
+
+TimeUs clampClipEndNoOverlap(const Track &track, const QSet<QString> &excludeIds, TimeUs currentEnd,
+                             TimeUs desiredEnd)
+{
+    TimeUs end = qMax(currentEnd, desiredEnd);
+    for (const Clip &clip : track.clips) {
+        if (excludeIds.contains(clip.id))
+            continue;
+        // Only blockers that sit fully to the right of the current edge (gap or abut).
+        if (clip.timelineStart < currentEnd)
+            continue;
+        if (end > clip.timelineStart)
+            end = clip.timelineStart;
+    }
+    return end;
+}
+
 TrackType trackTypeForClipType(ClipType type)
 {
     switch (type) {
@@ -294,6 +358,7 @@ void syncLinkedTiming(Clip &dst, const Clip &src)
     dst.fadeInUs = src.fadeInUs;
     dst.fadeOutUs = src.fadeOutUs;
     dst.fadeCurve = src.fadeCurve;
+    dst.fadeShape = src.fadeShape;
 }
 
 QString assignSplitLinkIds(Clip &head, Clip &tail)

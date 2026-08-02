@@ -3,6 +3,8 @@
 #include "Project.h"
 #include "Time.h"
 
+#include <QSet>
+
 namespace drift {
 
 constexpr TimeUs kImageClipDurationUs = 5 * kUsPerSecond;
@@ -20,6 +22,21 @@ TimeUs snapTime(const Project &project, TimeUs time, bool snapEnabled, TimeUs pl
 TimeUs resolveClipStart(const Project &project, const Track &track, int excludeClipIndex,
                         TimeUs desiredStart, TimeUs duration, bool snapEnabled, TimeUs playheadUs,
                         const QList<TimeUs> &extraTargets = {});
+
+// Push `desiredStart` forward until [start, start+duration) does not intersect any clip on
+// `track` whose id is not in `excludeIds`. Abutting (end == next start) is allowed.
+TimeUs clampClipStartNoOverlap(const Track &track, const QSet<QString> &excludeIds,
+                               TimeUs desiredStart, TimeUs duration);
+
+// Cap a left-edge extend so it cannot cross into clips that currently end at/before
+// `currentStart`. Already-overlapping clips are ignored (toggle must not un-overlap).
+TimeUs clampClipStartAgainstLeftNeighbors(const Track &track, const QSet<QString> &excludeIds,
+                                          TimeUs currentStart, TimeUs desiredStart);
+
+// Cap a right-edge extend so it cannot cross into clips that currently start at/after
+// `currentEnd`. Already-overlapping clips are ignored.
+TimeUs clampClipEndNoOverlap(const Track &track, const QSet<QString> &excludeIds, TimeUs currentEnd,
+                             TimeUs desiredEnd);
 
 TrackType trackTypeForClipType(ClipType type);
 
