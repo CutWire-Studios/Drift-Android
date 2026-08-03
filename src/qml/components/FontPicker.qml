@@ -248,6 +248,10 @@ Item {
                                               : (row.name === root.family ? Theme.panelSecondaryBg
                                                                           : "transparent")
 
+                Behavior on color {
+                    ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                }
+
                 Text {
                     anchors.left: parent.left
                     anchors.leftMargin: 8

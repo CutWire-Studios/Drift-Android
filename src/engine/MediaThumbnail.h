@@ -3,6 +3,10 @@
 #include <QList>
 #include <QString>
 
+struct AVCodecContext;
+struct AVFormatContext;
+struct SwsContext;
+
 class MediaThumbnail
 {
 public:
@@ -20,11 +24,44 @@ public:
     // so zooming picks a finer level and panning reuses everything already cached.
     static QString tilePath(const QString &sourcePath, int level, qint64 index);
 
-    // Decodes the missing tiles among `indices` with one open decoder, in ascending time
-    // order so seeking stays near-sequential. Returns the indices that are now on disk.
-    static QList<qint64> generateTiles(const QString &sourcePath, int level,
-                                       const QList<qint64> &indices);
-
     // Drops the oldest tile files until the tile cache fits in `maxBytes`.
     static void pruneTileCache(qint64 maxBytes);
+
+    // A decoder held open across batches of tiles.
+    //
+    // Opening a decoder is the expensive part: even at 1080p libavcodec allocates a full
+    // decoded-picture buffer, and doing that per batch — on a different pool thread each
+    // time, so glibc cannot reuse the arena the last one freed — is what makes panning the
+    // timeline ratchet RSS up. One instance, pinned to one thread, holds a single working
+    // set for as long as tiles keep coming.
+    //
+    // Not thread-safe: own it from a single thread.
+    class TileDecoder
+    {
+    public:
+        TileDecoder() = default;
+        ~TileDecoder();
+
+        TileDecoder(const TileDecoder &) = delete;
+        TileDecoder &operator=(const TileDecoder &) = delete;
+
+        // Decodes the missing tiles among `indices`, in ascending time order so seeking stays
+        // near-sequential. Returns the indices that are now on disk. Reopens only when
+        // `sourcePath` differs from the file already open.
+        QList<qint64> generateTiles(const QString &sourcePath, int level,
+                                    const QList<qint64> &indices);
+
+        // Releases the decoder and its scaler. Safe to call when nothing is open; the next
+        // generateTiles() reopens on demand.
+        void close();
+
+    private:
+        bool ensureOpen(const QString &absolutePath);
+
+        QString m_path;
+        AVFormatContext *m_fmt = nullptr;
+        AVCodecContext *m_codecCtx = nullptr;
+        SwsContext *m_sws = nullptr;
+        int m_videoStreamIndex = -1;
+    };
 };

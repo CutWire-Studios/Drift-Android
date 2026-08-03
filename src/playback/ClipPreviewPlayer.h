@@ -4,6 +4,7 @@
 #include "core/Clip.h"
 #include "core/SpeedCurve.h"
 #include "core/Time.h"
+#include "engine/audio/ClipAudioRetimer.h"
 
 #include <QAudioFormat>
 #include <QIODevice>
@@ -55,7 +56,7 @@ signals:
 // effects, no other tracks — which is exactly what the speed-curve editor wants to show.
 //
 // Audio comes from AudioMixer::readClipAudio, so what you hear here is the very same retiming
-// the timeline will produce once the curve is applied, pitch-preserved through AudioAtempo.
+// the timeline will produce once the curve is applied, pitch-preserved through ClipAudioRetimer.
 // The clock is audio-master, like the main engine, so picture follows sound.
 //
 // ClipReaderPool's workers are shared with the timeline, so the caller must stop main playback
@@ -102,6 +103,12 @@ private:
 
     drift::Clip m_clip;
     mutable QMutex m_clipMutex; // m_clip is read on the audio thread while the GUI edits it
+
+    // Touched only from the audio thread. Nothing resets it from the GUI side on purpose: seek()
+    // does not stop the sink, so a reset from there would race fillAudio(). A seek shows up as a
+    // timeline discontinuity and a new clip or curve as a new identity, and the retimer restarts
+    // itself on either.
+    drift::ClipAudioRetimer m_retimer;
 
     PlaybackClock m_clock;
     QAudioFormat m_format;

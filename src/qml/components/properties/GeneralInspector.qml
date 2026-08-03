@@ -40,6 +40,8 @@ Item {
     function refreshFields() {
         if (!root.hasSelection)
             return
+        if (nameField && !nameField.activeFocus)
+            nameField.text = root.clipData.name || ""
         if (startField && !startField.activeFocus)
             startField.value = root.clipData.start
         if (durationField && !durationField.activeFocus)
@@ -64,14 +66,21 @@ Item {
         width: root.width
         spacing: Theme.spacingXl
 
-        Text {
-            text: root.clipData.name || "Untitled clip"
-            color: Theme.panelForeground
+        ThemedTextField {
+            id: nameField
+            width: parent.width
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontSizeBase
             font.weight: Font.Medium
-            width: parent.width
-            elide: Text.ElideRight
+            placeholderText: qsTr("Untitled clip")
+            onEditingFinished: {
+                const label = text.trim()
+                if (label.length === 0 || !root.hasSelection)
+                    return
+                if (label === (root.clipData.name || ""))
+                    return
+                EditorState.setClipName(EditorState.selectedTrack, EditorState.selectedClip, label)
+            }
         }
 
         Column {

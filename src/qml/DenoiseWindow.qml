@@ -29,6 +29,12 @@ Window {
     title: qsTr("Remove noise")
     color: Theme.appBackground
 
+    // Android hands a secondary top-level window the whole display and gives it no
+    // frame, so the desktop size above would leave it laid out for a screen it does
+    // not have. Asked for on show rather than bound, because show() drives visibility
+    // itself and would overwrite a binding.
+    onVisibleChanged: if (visible && Qt.platform.os === "android") visibility = Window.FullScreen
+
     function openFor(track, clip, durationSeconds) {
         root.trackIndex = track
         root.clipIndex = clip
@@ -261,6 +267,7 @@ Window {
 
             ThemedSlider {
                 id: windowSlider
+                label: qsTr("Preview from")
                 width: parent.width - 260
                 anchors.verticalCenter: parent.verticalCenter
                 from: 0

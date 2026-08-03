@@ -11,6 +11,8 @@ Item {
     id: root
 
     property string glyph: Theme.icons.info
+    // Set alongside a loader glyph so it actually turns.
+    property bool glyphSpinning: false
     property string title: ""
     property string hint: ""
     // Leave empty to omit the button.
@@ -47,6 +49,7 @@ Item {
                 glyph: root.glyph
                 iconSize: Theme.iconSizeXl
                 iconColor: Theme.mutedForeground
+                spinning: root.glyphSpinning
             }
         }
 

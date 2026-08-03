@@ -2,7 +2,9 @@ import QtQuick
 import Drift
 import "components"
 
-// CapCut-style tool strip above the timeline: select/blade/delete/snap left, zoom right.
+// CapCut-style tool strip above the timeline: mode tools and clip actions on the left,
+// zoom on the right. Everything here is one tap away because the phone has no toolbar,
+// no menu bar and no keyboard to reach any of it another way.
 Item {
     id: root
 
@@ -13,7 +15,13 @@ Item {
         return EditorState.selectedTrack >= 0 && EditorState.selectedClip >= 0
     }
 
-    readonly property bool bladeActive: panel && panel.timelineTool === "split"
+    readonly property string tool: panel ? panel.timelineTool : ""
+
+    function setTool(id) {
+        if (!panel)
+            return
+        panel.timelineTool = panel.timelineTool === id ? "" : id
+    }
 
     height: Theme.androidEditActionsHeight
     width: parent ? parent.width : 0
@@ -28,6 +36,21 @@ Item {
         anchors.bottom: parent.bottom
         width: parent.width
         height: 1
+        color: Theme.panelBorder
+    }
+
+    // Reusable strip button so the row stays uniform and every target is rail-sized.
+    component ActionButton: IconButton {
+        anchors.verticalCenter: parent.verticalCenter
+        buttonSize: Theme.androidIconButtonSize
+        iconSize: Theme.iconSizeLg
+        variant: "text"
+    }
+
+    component Divider: Rectangle {
+        anchors.verticalCenter: parent.verticalCenter
+        width: Theme.borderWidth
+        height: Theme.spacing3xl
         color: Theme.panelBorder
     }
 
@@ -50,60 +73,110 @@ Item {
             rightPadding: Theme.spacingSm
             spacing: Theme.spacingXs
 
-            IconButton {
-                anchors.verticalCenter: parent.verticalCenter
-                buttonSize: Theme.androidIconButtonSize
-                iconSize: Theme.iconSizeLg
+            ActionButton {
                 glyph: Theme.icons.mousePointer
-                variant: "text"
                 tooltip: qsTr("Select")
-                active: root.panel && root.panel.timelineTool === ""
+                active: root.tool === ""
                 onClicked: if (root.panel) root.panel.timelineTool = ""
             }
 
-            IconButton {
-                anchors.verticalCenter: parent.verticalCenter
-                buttonSize: Theme.androidIconButtonSize
-                iconSize: Theme.iconSizeLg
+            ActionButton {
                 glyph: Theme.icons.scissors
-                variant: "text"
                 tooltip: qsTr("Blade — tap a clip to split")
-                active: root.bladeActive
-                onClicked: {
-                    if (!root.panel)
-                        return
-                    root.panel.timelineTool =
-                        root.panel.timelineTool === "split" ? "" : "split"
-                }
+                active: root.tool === "split"
+                onClicked: root.setTool("split")
             }
 
-            IconButton {
-                anchors.verticalCenter: parent.verticalCenter
-                buttonSize: Theme.androidIconButtonSize
-                iconSize: Theme.iconSizeLg
+            ActionButton {
+                glyph: Theme.icons.trimStart
+                tooltip: qsTr("Trim start — tap a clip to drop everything before the cut")
+                active: root.tool === "trimStart"
+                onClicked: root.setTool("trimStart")
+            }
+
+            ActionButton {
+                glyph: Theme.icons.trimEnd
+                tooltip: qsTr("Trim end — tap a clip to drop everything after the cut")
+                active: root.tool === "trimEnd"
+                onClicked: root.setTool("trimEnd")
+            }
+
+            Divider { }
+
+            ActionButton {
+                glyph: Theme.icons.copyPlus
+                tooltip: qsTr("Duplicate clip")
+                enabled: root.hasSelection
+                onClicked: EditorState.duplicateSelectedClip()
+            }
+
+            ActionButton {
+                glyph: Theme.icons.snowflake
+                tooltip: qsTr("Freeze frame at current time")
+                onClicked: EditorState.freezeFrameAtPlayhead()
+            }
+
+            ActionButton {
+                glyph: Theme.icons.audioLines
+                tooltip: qsTr("Separate audio from video")
+                enabled: EditorState.separateAudioAvailable
+                onClicked: EditorState.separateAudioFromSelection()
+            }
+
+            ActionButton {
                 glyph: Theme.icons.trash
-                variant: "text"
                 tooltip: qsTr("Delete")
                 enabled: root.hasSelection
                 onClicked: EditorState.deleteSelectedClip()
             }
 
-            Rectangle {
-                width: Theme.borderWidth
-                height: Theme.spacing3xl
-                color: Theme.panelBorder
-                anchors.verticalCenter: parent.verticalCenter
+            Divider { }
+
+            // Bookmarks were backend-only on the phone: no way to set one, and no way
+            // to reach one that a desktop session had left in the project.
+            ActionButton {
+                glyph: Theme.icons.bookmark
+                tooltip: qsTr("Add or remove a bookmark here")
+                onClicked: EditorState.toggleBookmarkAtPlayhead()
             }
 
-            IconButton {
-                anchors.verticalCenter: parent.verticalCenter
-                buttonSize: Theme.androidIconButtonSize
-                iconSize: Theme.iconSizeLg
+            ActionButton {
+                glyph: Theme.icons.chevronLeft
+                tooltip: qsTr("Previous bookmark")
+                enabled: EditorState.bookmarks.length > 0
+                onClicked: EditorState.goToPreviousBookmark()
+            }
+
+            ActionButton {
+                glyph: Theme.icons.chevronsRight
+                tooltip: qsTr("Next bookmark")
+                enabled: EditorState.bookmarks.length > 0
+                onClicked: EditorState.goToNextBookmark()
+            }
+
+            Divider { }
+
+            ActionButton {
                 glyph: Theme.icons.magnet
-                variant: "text"
                 tooltip: qsTr("Toggle snapping")
                 active: EditorState.snapEnabled
                 onClicked: EditorState.snapEnabled = !EditorState.snapEnabled
+            }
+
+            ActionButton {
+                glyph: Theme.icons.foldHorizontal
+                tooltip: qsTr("Close gaps when trimming")
+                active: EditorState.rippleEnabled
+                onClicked: EditorState.rippleEnabled = !EditorState.rippleEnabled
+            }
+
+            // Overlapping two clips is how a transition is created; without this the
+            // phone could apply a transition but never make room for one.
+            ActionButton {
+                glyph: Theme.icons.option
+                tooltip: qsTr("Allow clip overlap")
+                active: EditorState.allowClipOverlap
+                onClicked: EditorState.allowClipOverlap = !EditorState.allowClipOverlap
             }
         }
     }
@@ -115,55 +188,28 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         spacing: Theme.spacingXs
 
-        IconButton {
-            anchors.verticalCenter: parent.verticalCenter
-            buttonSize: Theme.androidIconButtonSize
-            iconSize: Theme.iconSizeLg
+        ActionButton {
             glyph: Theme.icons.zoomOut
-            variant: "text"
             tooltip: qsTr("Zoom out")
             enabled: !!root.panel
-            onClicked: {
-                if (!root.panel)
-                    return
-                root.panel.zoom = Math.max(root.panel.minZoom, root.panel.zoom / 1.5)
-                root.panel.filmstripRefreshEpoch++
-            }
+            onClicked: if (root.panel) root.panel.setZoom(root.panel.zoom / 1.5)
         }
 
-        Text {
-            anchors.verticalCenter: parent.verticalCenter
-            width: 40
-            text: root.panel ? (root.panel.zoom.toFixed(1) + "×") : "1.0×"
-            color: Theme.mutedForeground
-            font.family: Theme.monoFontFamily
-            font.pixelSize: Theme.fontSizeTick
-            horizontalAlignment: Text.AlignHCenter
-            MouseArea {
-                anchors.fill: parent
-                onClicked: {
-                    if (!root.panel)
-                        return
-                    root.panel.zoom = 1.0
-                    root.panel.filmstripRefreshEpoch++
-                }
-            }
-        }
-
-        IconButton {
-            anchors.verticalCenter: parent.verticalCenter
-            buttonSize: Theme.androidIconButtonSize
-            iconSize: Theme.iconSizeLg
+        ActionButton {
             glyph: Theme.icons.zoomIn
-            variant: "text"
             tooltip: qsTr("Zoom in")
             enabled: !!root.panel
-            onClicked: {
-                if (!root.panel)
-                    return
-                root.panel.zoom = Math.min(root.panel.maxZoom, root.panel.zoom * 1.5)
-                root.panel.filmstripRefreshEpoch++
-            }
+            onClicked: if (root.panel) root.panel.setZoom(root.panel.zoom * 1.5)
+        }
+
+        // Replaces the zoom readout: a percentage is not something to act on, and
+        // "show me the whole project" is the one zoom request a phone cannot satisfy
+        // by pinching — the range is too wide for a single gesture.
+        ActionButton {
+            glyph: Theme.icons.zoomFit
+            tooltip: qsTr("Fit timeline in view")
+            enabled: !!root.panel
+            onClicked: if (root.panel) root.panel.fitZoom()
         }
     }
 }

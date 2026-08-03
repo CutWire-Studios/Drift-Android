@@ -26,6 +26,14 @@ AbstractButton {
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
 
+    // Press feedback — see the note in ThemedButton.qml for why this sits on the
+    // root rather than on `background`.
+    scale: root.down ? Theme.pressScale : 1.0
+
+    Behavior on scale {
+        NumberAnimation { duration: Theme.durationPress; easing.type: Theme.easing }
+    }
+
     Accessible.role: Accessible.Button
     Accessible.name: tooltip.length > 0 ? tooltip : glyph
     Accessible.onPressAction: root.clicked()

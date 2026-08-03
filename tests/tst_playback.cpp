@@ -15,6 +15,8 @@ private slots:
     void playbackTracksSinkPosition();
     void seekWhileRunningKeepsClockAlive();
     void avSyncWithinTolerance();
+    void rateScalesProduceAndPlayback();
+    void renderedFramesIgnoreRate();
 };
 
 void PlaybackTest::clockPausedPosition()
@@ -122,6 +124,39 @@ void PlaybackTest::avSyncWithinTolerance()
     const drift::TimeUs a = clock.currentTimeUs();
     const drift::TimeUs b = clock.currentTimeUs();
     QVERIFY(qAbs(a - b) <= 40'000);
+}
+
+void PlaybackTest::rateScalesProduceAndPlayback()
+{
+    PlaybackClock clock;
+    clock.setRate(2.0);
+    clock.reset(drift::secondsToUs(1.0), 48000);
+    clock.start();
+
+    // The sink still runs at 48 kHz; a rate of 2 only changes how much timeline each sample covers.
+    clock.onAudioSamplesRendered(4800);
+    QCOMPARE(clock.produceTimeUs(), drift::secondsToUs(1.2));
+
+    clock.syncPlaybackUs(drift::secondsToUs(0.1));
+    const drift::TimeUs played = clock.currentTimeUs();
+    QVERIFY(played >= drift::secondsToUs(1.2));
+    QVERIFY(played < drift::secondsToUs(1.4));
+
+    // Still monotonic under a rate: a repeated read can only stay put or move forward.
+    QVERIFY(clock.currentTimeUs() >= played);
+}
+
+void PlaybackTest::renderedFramesIgnoreRate()
+{
+    PlaybackClock clock;
+    clock.setRate(0.5);
+    clock.reset(0, 48000);
+    clock.start();
+
+    clock.onAudioSamplesRendered(4800);
+    // Sink domain, so no rate: this is what the post-mix retimer's output cursor advances by.
+    QCOMPARE(clock.renderedFramesUs(), drift::secondsToUs(0.1));
+    QCOMPARE(clock.produceTimeUs(), drift::secondsToUs(0.05));
 }
 
 QTEST_MAIN(PlaybackTest)

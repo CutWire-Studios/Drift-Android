@@ -21,7 +21,9 @@ ApplicationWindow {
     property bool forceClose: false
 
     onClosing: function (close) {
-        if (window.forceClose || !EditorState.hasUnsavedChanges)
+        // Opt-in reopen: skip Save/Don't Save — dirty work is snapshotted to the
+        // recovery file on aboutToQuit without overwriting the user's .drift.
+        if (window.forceClose || EditorState.reopenLastProject || !EditorState.hasUnsavedChanges)
             return
         close.accepted = false
         editorHeader.confirmIfDirty(function () {
@@ -66,12 +68,29 @@ ApplicationWindow {
         projectSetupDialog.openForAsset(assetIndex, runner)
     }
 
+    // "Decide later" closes the first-run chooser without settling on a canvas size.
+    // Tracked separately from EditorState.projectLayoutChosen — which means "the canvas
+    // size is decided" and gates ProjectSetupDialog — so the chooser can move on while
+    // the first video/image clip still gets offered a setup step. Session-only,
+    // matching projectLayoutChosen itself.
+    property bool layoutPromptDismissed: false
+
+    // Header Extras icon pulses while true; never auto-opens a dialog.
+    readonly property alias addonAttentionNeeded: addonStartupDialog.needsAttention
+
     function promptLayoutChooserIfNeeded() {
         if (EditorState.recoveryAvailable || EditorState.projectLayoutChosen)
+            return
+        if (window.layoutPromptDismissed)
             return
         if (layoutChooserDialog.visible || recoveryDialog.visible)
             return
         layoutChooserDialog.openChooser()
+    }
+
+    // Quiet catalog refresh for the header attention indicator.
+    function refreshAddonAttention() {
+        addonStartupDialog.refreshAttention()
     }
 
     // Settings / header: reopen platform layout picker anytime.
@@ -85,6 +104,9 @@ ApplicationWindow {
 
     LayoutChooserDialog {
         id: layoutChooserDialog
+        // rejected() fires before closed(), so the flag is already set by the time
+        // callers check it.
+        onFirstRunDismissed: window.layoutPromptDismissed = true
     }
 
     RecoveryDialog {
@@ -96,8 +118,16 @@ ApplicationWindow {
         id: subtitleProgressDialog
     }
 
+    ReverseProgressDialog {
+        id: reverseProgressDialog
+    }
+
     AddonManagerDialog {
         id: addonManagerDialog
+    }
+
+    AddonStartupDialog {
+        id: addonStartupDialog
     }
 
     MissingAddonsDialog {
@@ -127,6 +157,10 @@ ApplicationWindow {
         id: speedCurveWindow
     }
 
+    FadeCurveWindow {
+        id: fadeCurveWindow
+    }
+
     // Opened from the clip inspector; a window rather than a dialog so the timeline stays visible.
     function openSegmentation(track, clip, startSeconds, durationSeconds) {
         segmentationWindow.openFor(track, clip, startSeconds, durationSeconds)
@@ -140,12 +174,24 @@ ApplicationWindow {
         speedCurveWindow.openFor(track, clip)
     }
 
+    function openFadeCurve(track, clip) {
+        fadeCurveWindow.openFor(track, clip)
+    }
+
     // Opened from the header, and from every empty state that a missing addon causes.
     function openAddonManager(kind) {
         if (kind === undefined)
             addonManagerDialog.open()
         else
             addonManagerDialog.openForKind(kind)
+    }
+
+    // Header Extras button: open the essential/update nudge when the icon is pulsing,
+    // otherwise the full manager — same idea as the update badge vs silent check.
+    function openExtras() {
+        if (addonStartupDialog.openForAttention())
+            return
+        openAddonManager()
     }
 
     // Opened from the header badge, which only exists while there is something to show.
@@ -155,6 +201,9 @@ ApplicationWindow {
 
     function promptRecoveryIfNeeded() {
         if (!EditorState.recoveryAvailable || recoveryDialog.visible)
+            return
+        // Opt-in reopen handles recovery (and last .drift) without asking.
+        if (EditorState.reopenLastProject)
             return
         recoveryDialog.open()
     }
@@ -188,6 +237,9 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        // Opt-in: restore unsaved recovery or the last clean project silently.
+        if (EditorState.restoreLastSessionIfEnabled())
+            return
         if (EditorState.recoveryAvailable)
             recoveryOpenTimer.start()
         else
@@ -195,22 +247,30 @@ ApplicationWindow {
     }
 
     onVisibilityChanged: {
-        if (visible && EditorState.recoveryAvailable)
+        if (visible && EditorState.recoveryAvailable && !EditorState.reopenLastProject)
             recoveryOpenTimer.start()
     }
 
     Connections {
         target: EditorState
         function onRecoveryChanged() {
-            if (EditorState.recoveryAvailable)
+            if (EditorState.reopenLastProject)
+                return
+            if (EditorState.recoveryAvailable) {
                 recoveryOpenTimer.start()
-            else
+            } else {
                 Qt.callLater(window.promptLayoutChooserIfNeeded)
+            }
         }
 
         function onProjectLayoutChosenChanged() {
-            if (!EditorState.projectLayoutChosen)
+            if (!EditorState.projectLayoutChosen) {
+                // New Project reasserts this even when already false, so the layout
+                // question is genuinely open again — including for a user who chose
+                // "Decide later" last time round.
+                window.layoutPromptDismissed = false
                 layoutChooserOpenTimer.restart()
+            }
         }
 
         // --- Error and status surfacing -------------------------------------
@@ -256,11 +316,16 @@ ApplicationWindow {
             const message = EditorState.lastMessage
             if (message.length === 0)
                 return
-            // The backend has no severity channel, so infer it from the wording.
-            if (/fail|error|could not|unable|invalid|denied/i.test(message))
-                Toasts.error(message)
-            else
-                Toasts.info(message)
+            // Severity comes from the backend. This used to infer it by regexing the
+            // message prose, which matched none of the real failure strings — a
+            // corrupt-project open read as a neutral info toast that auto-dismissed
+            // in five seconds, identical to "Project saved".
+            switch (EditorState.lastMessageSeverity) {
+            case "error":   Toasts.error(message); break
+            case "warning": Toasts.warning(message); break
+            case "success": Toasts.success(message); break
+            default:        Toasts.info(message); break
+            }
         }
 
         // Raised when an edit is refused (e.g. transforming a locked clip).
@@ -268,6 +333,32 @@ ApplicationWindow {
         // the timeline was silent.
         function onTransformBlocked(reason) {
             Toasts.warning(reason)
+        }
+    }
+
+    Connections {
+        target: Addons
+        function onRefreshingChanged() {
+            if (!Addons.refreshing)
+                Qt.callLater(window.refreshAddonAttention)
+        }
+        function onCatalogChanged() {
+            Qt.callLater(window.refreshAddonAttention)
+        }
+        function onRemindEssentialChanged() {
+            Qt.callLater(window.refreshAddonAttention)
+        }
+        function onRemindUpdatesChanged() {
+            Qt.callLater(window.refreshAddonAttention)
+        }
+
+        // A download or signature failure only reached the addon manager dialog's
+        // status line, so a pack that failed to install while that dialog was closed
+        // — the normal case for the attention nudge — failed completely silently.
+        function onTransferFailed(id, reason) {
+            if (reason === "Cancelled")
+                return
+            Toasts.error(qsTr("Couldn’t install “%1”: %2").arg(id).arg(reason))
         }
     }
 
@@ -290,9 +381,33 @@ ApplicationWindow {
                         timelinePanel.timelineTool = ""
                         return
                     }
+                    // Tool modes are QML state, so they are dispatched here rather
+                    // than by triggerAction.
+                    if (modelData.id === "selectTool") {
+                        timelinePanel.timelineTool = ""
+                        return
+                    }
+                    if (modelData.id === "bladeTool") {
+                        timelinePanel.timelineTool = "split"
+                        return
+                    }
                     EditorState.triggerAction(modelData.id)
                 }
             }
+        }
+    }
+
+    // There is no menu bar and no help overlay, so the only route to the shortcut
+    // list was an unlabelled icon in a vertical rail that can itself be scrolled out
+    // of view on a short window. F1 is the conventional way in and reuses the tab
+    // that already exists.
+    Shortcut {
+        sequence: "F1"
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (window.previewFullscreen)
+                window.togglePreviewFullscreen()
+            assetsPanel.showTab("shortcuts")
         }
     }
 

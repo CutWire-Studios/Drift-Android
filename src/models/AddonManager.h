@@ -22,6 +22,13 @@ class AddonManager : public QObject
     Q_PROPERTY(QVariantList catalog READ catalog NOTIFY catalogChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool refreshing READ refreshing NOTIFY refreshingChanged)
+    // Header attention nudge: offer the core video / transitions / audio packs when they are not
+    // yet installed as addons (bundled copies still work; installing unlocks the update channel).
+    Q_PROPERTY(bool remindEssential READ remindEssential WRITE setRemindEssential
+                   NOTIFY remindEssentialChanged)
+    // Header attention nudge: mention installed packs that have a newer version on the store.
+    Q_PROPERTY(bool remindUpdates READ remindUpdates WRITE setRemindUpdates
+                   NOTIFY remindUpdatesChanged)
 
 public:
     explicit AddonManager(QObject *parent = nullptr);
@@ -33,6 +40,11 @@ public:
     QVariantList catalog() const;
     QString status() const;
     bool refreshing() const;
+
+    bool remindEssential() const;
+    void setRemindEssential(bool remind);
+    bool remindUpdates() const;
+    void setRemindUpdates(bool remind);
 
     // Uses the on-disk copy of the index when it is younger than six hours unless forced, so
     // launching offline is quiet rather than an error.
@@ -46,6 +58,12 @@ public:
     // FontPicker, the stickers tab and subtitle generation.
     Q_INVOKABLE bool hasKind(const QString &kind) const;
     Q_INVOKABLE QString firstAddonForKind(const QString &kind) const;
+
+    // Essential packs (effects / transitions / audio) that exist on the store but are not in
+    // installed.json. Empty when the index has not been loaded or every essential is present.
+    Q_INVOKABLE QVariantList missingEssentialAddons() const;
+    // Installed packs with a newer version on the store.
+    Q_INVOKABLE QVariantList updatableAddons() const;
 
     // --- Acceleration ------------------------------------------------------------------
     // Whether an ONNX Runtime is installed at all. Every AI feature needs one, so this gates
@@ -66,11 +84,18 @@ signals:
     void catalogChanged();
     void statusChanged();
     void refreshingChanged();
+    void remindEssentialChanged();
+    void remindUpdatesChanged();
     // Emitted continuously during download and extraction; the dialog binds this rather than
     // rebuilding the whole catalogue list several times a second.
     void progressChanged(const QString &id, double fraction, const QString &phase);
     // A kind's content changed on disk and its catalog has already been reloaded.
     void kindChanged(const QString &kind);
+    // Per-transfer outcome. `status` is a mixed-purpose display string — it carries
+    // store errors, per-transfer failures and the empty success state alike — so
+    // these exist to let callers react to an outcome without reading its prose.
+    void transferFailed(const QString &id, const QString &reason);
+    void transferSucceeded(const QString &id);
 
 private:
     struct Transfer;

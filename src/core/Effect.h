@@ -25,6 +25,10 @@ struct Effect
     // label/sliders. Rendering uses catalog metadata in the engine layer.
     QString catalogId;
 
+    // When false the effect stays on the clip (params/keyframes preserved) but is
+    // skipped at render/mix time. Default true so older projects load as enabled.
+    bool enabled = true;
+
     QString filterGraphString() const;
 
     // parameters[key], overridden by paramKeyframes[key] evaluated at clipTimeUs.

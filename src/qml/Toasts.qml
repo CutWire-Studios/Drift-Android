@@ -29,7 +29,8 @@ QtObject {
         // of stacking duplicates (transform-blocked fires repeatedly on drag).
         if (model.count > 0) {
             const last = model.get(model.count - 1)
-            if (last.message === message && last.severity === severity) {
+            // Never fold a repeat into a toast that is already animating out.
+            if (last.message === message && last.severity === severity && !last.exiting) {
                 model.setProperty(model.count - 1, "repeats", last.repeats + 1)
                 return last.toastId
             }
@@ -41,6 +42,7 @@ QtObject {
             severity: severity,
             message: message,
             repeats: 1,
+            exiting: false,
             timeout: timeout !== undefined ? timeout
                                            : (severity === "error" ? 0 : defaultTimeout)
         })
@@ -56,7 +58,22 @@ QtObject {
     function warning(message, timeout) { return post("warning", message, timeout) }
     function error(message, timeout) { return post("error", message, timeout) }
 
+    // Dismissal is two-stage: this flags the row, the host animates it out, and
+    // the host calls remove() when the animation finishes. Removing the row here
+    // would destroy the delegate mid-frame, so a dismissed toast simply vanished.
+    // A Column positioner has add/move/populate but no `remove` transition, so
+    // there is no declarative way to do this from the host alone.
     function dismiss(toastId) {
+        for (var i = 0; i < model.count; ++i) {
+            if (model.get(i).toastId === toastId) {
+                if (!model.get(i).exiting)
+                    model.setProperty(i, "exiting", true)
+                return
+            }
+        }
+    }
+
+    function remove(toastId) {
         for (var i = 0; i < model.count; ++i) {
             if (model.get(i).toastId === toastId) {
                 model.remove(i)

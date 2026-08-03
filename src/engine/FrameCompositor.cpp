@@ -8,9 +8,11 @@
 #include "GpuCompositor.h"
 #include "GpuEffectExecutor.h"
 #include "MaskApplier.h"
+#include "ReverseProxyCache.h"
 #include "TextRaster.h"
 #include "TransitionCatalog.h"
 #include "core/Clip.h"
+#include "core/ClipAnimation.h"
 #include "core/ShapePath.h"
 #include "core/SubtitleCue.h"
 #include "core/Time.h"
@@ -58,8 +60,11 @@ void collectActivePaths(const drift::Project *project, drift::TimeUs timelineUs,
                 continue;
 
             if ((track.type == drift::TrackType::Video || track.type == drift::TrackType::Shape)
-                && clip.type != drift::ClipType::Text)
-                videoPaths.insert(clip.path);
+                && clip.type != drift::ClipType::Text) {
+                // The reversed proxy, when there is one, is what the composite actually reads —
+                // retaining clip.path instead would tear down the proxy's worker every frame.
+                videoPaths.insert(drift::videoReadPath(clip));
+            }
             if (track.type == drift::TrackType::Audio
                 || (track.type == drift::TrackType::Video && clip.type == drift::ClipType::Video)) {
                 audioPaths.insert(clip.path);
@@ -99,8 +104,9 @@ QList<ClipReaderPool::VideoRequest> collectVideoRequests(const drift::Project *p
             if (clip.type != drift::ClipType::Video || clip.path.isEmpty())
                 continue;
 
-            requests.append(ClipReaderPool::VideoRequest{clip.path, clip.timelineToSourceUs(timelineUs),
-                                                         maxWidth, maxHeight});
+            const drift::VideoRead read = drift::resolveVideoRead(clip, timelineUs);
+            requests.append(
+                ClipReaderPool::VideoRequest{read.path, read.sourceUs, maxWidth, maxHeight});
         }
     }
     return requests;
@@ -109,6 +115,8 @@ QList<ClipReaderPool::VideoRequest> collectVideoRequests(const drift::Project *p
 const drift::Effect *findTimeEchoEffect(const QList<drift::Effect> &effects)
 {
     for (const drift::Effect &effect : effects) {
+        if (!effect.enabled)
+            continue;
         if (effect.catalogId == QStringLiteral("time_echo"))
             return &effect;
     }
@@ -120,6 +128,8 @@ const drift::Effect *findTimeEchoEffect(const QList<drift::Effect> &effects)
 bool chainNeedsFace(const QList<drift::Effect> &effects)
 {
     for (const drift::Effect &effect : effects) {
+        if (!effect.enabled)
+            continue;
         const EffectPresetEntry *def =
             effect.catalogId.isEmpty() ? nullptr : effectDefForId(effect.catalogId);
         if (def && def->needsFace)
@@ -152,6 +162,8 @@ QList<drift::Effect> resolvedClipEffects(const drift::Clip &clip, drift::TimeUs 
     QList<drift::Effect> filtered;
     filtered.reserve(clip.effects.size());
     for (const drift::Effect &effect : clip.effects) {
+        if (!effect.enabled)
+            continue;
         if (effect.catalogId != QStringLiteral("time_echo"))
             filtered.append(effect.resolvedAt(clipTimeUs));
     }
@@ -228,8 +240,8 @@ QImage decodeClipMediaFrame(const drift::Clip &clip, drift::TimeUs timelineUs, i
         return decodedStillImage(clip.path, maxWidth, maxHeight);
 
     if (clip.type == drift::ClipType::Video) {
-        const drift::TimeUs sourceUs = clip.timelineToSourceUs(timelineUs);
-        return ClipReaderPool::instance().readVideoFrame(clip.path, sourceUs, maxWidth, maxHeight);
+        const drift::VideoRead read = drift::resolveVideoRead(clip, timelineUs);
+        return ClipReaderPool::instance().readVideoFrame(read.path, read.sourceUs, maxWidth, maxHeight);
     }
 
     return {};
@@ -511,9 +523,9 @@ void fillGpuLayerPixels(GpuLayer &layer, const drift::Clip &clip, drift::TimeUs 
 
     const drift::Effect *timeEcho = findTimeEchoEffect(clip.effects);
     if (!timeEcho && clip.type == drift::ClipType::Video) {
-        const drift::TimeUs sourceUs = clip.timelineToSourceUs(timelineUs);
+        const drift::VideoRead read = drift::resolveVideoRead(clip, timelineUs);
         const Nv12Frame nv12 =
-            ClipReaderPool::instance().readVideoFrameNv12(clip.path, sourceUs, maxWidth, maxHeight);
+            ClipReaderPool::instance().readVideoFrameNv12(read.path, read.sourceUs, maxWidth, maxHeight);
         if (nv12.isValid()) {
             layer.nv12 = nv12.data;
             layer.nv12Width = nv12.width;
@@ -542,6 +554,30 @@ int karaokeWordIndex(const drift::Clip &clip, const drift::SubtitleCue &cue, dri
     if (clip.textStyle.accent.rule != drift::WordAccentRule::Karaoke)
         return -1;
     return drift::activeWordIndexAt(cue.text, cue.startUs, cue.endUs, localUs);
+}
+
+// CapCut-style body intro/outro: opacity/offset/scale/rotation on top of fades and text anims.
+void applyClipBodyAnimation(const drift::Clip &clip, drift::TimeUs timelineUs, double layoutW,
+                            double layoutH, QRectF *destRect, double *opacity, double *rotation)
+{
+    if (!destRect || !opacity || !rotation)
+        return;
+    if (clip.type == drift::ClipType::Audio || clip.type == drift::ClipType::Subtitle)
+        return;
+    if (clip.animIn.kind == drift::ClipAnimKind::None && clip.animOut.kind == drift::ClipAnimKind::None)
+        return;
+
+    const drift::ClipAnimSample body =
+        drift::evaluateClipAnimation(clip.timelineStart, clip.timelineDuration, clip.animIn,
+                                     clip.animOut, timelineUs, layoutW, layoutH);
+    *opacity *= body.opacity;
+    destRect->translate(body.dx, body.dy);
+    if (!qFuzzyCompare(body.scale, 1.0)) {
+        const QPointF centre = destRect->center();
+        destRect->setSize(destRect->size() * body.scale);
+        destRect->moveCenter(centre);
+    }
+    *rotation += body.rotationDeg;
 }
 
 GpuLayer buildGpuLayer(const drift::Clip &clip, drift::TimeUs timelineUs, int projectWidth,
@@ -639,6 +675,8 @@ GpuLayer buildGpuLayer(const drift::Clip &clip, drift::TimeUs timelineUs, int pr
     if (!layer.hasPixels())
         return layer;
 
+    applyClipBodyAnimation(clip, timelineUs, w, h, &destRect, &opacity, &rotation);
+
     layer.mask = clip.mask;
     if (clip.mask.shape == drift::MaskShape::Matte && !clip.mask.mattePath.isEmpty()) {
         // The matte covers the segmented source range, so it starts at matteSrcOffsetUs.
@@ -735,10 +773,15 @@ QList<GpuItem> buildTextSpanItems(const drift::Clip &clip, drift::TimeUs timelin
                 continue; // a span that has not entered (or has fully exited) draws nothing
         }
 
+        double spanRotation = rotation;
+        applyClipBodyAnimation(clip, timelineUs, w, h, &destRect, &opacity, &spanRotation);
+        if (opacity <= 0.001)
+            continue;
+
         // Clip masks are layer-relative, so applying one here would stamp the whole shape onto every
         // span. Kinetic text + mask is rare; spans are left unmasked rather than mask each glyph.
         layer.rect = destRect;
-        layer.rotation = rotation;
+        layer.rotation = spanRotation;
         layer.flipH = clip.flipH;
         layer.flipV = clip.flipV;
         layer.opacity = opacity;

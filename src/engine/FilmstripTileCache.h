@@ -1,10 +1,15 @@
 #pragma once
 
+#include "MediaThumbnail.h"
+
 #include <QHash>
 #include <QList>
 #include <QObject>
 #include <QSet>
 #include <QString>
+#include <QThread>
+
+class QTimer;
 
 // On-demand filmstrip tiles for the timeline.
 //
@@ -15,16 +20,28 @@
 // The queue is served newest-first and capped, because scrolling a long timeline asks for far
 // more tiles than it keeps on screen — the ones that scrolled away fall off the back rather
 // than blocking the ones under the cursor.
+//
+// Decoding runs on one thread this class owns, and the decoder stays open between batches. Both
+// matter for memory: opening a decoder per batch allocates a fresh decoded-picture buffer, and
+// doing it on a rotating set of pool threads leaves each of their allocator arenas holding on
+// to a copy, so panning ratchets RSS up and never gives it back.
 class FilmstripTileCache : public QObject
 {
     Q_OBJECT
 
 public:
     explicit FilmstripTileCache(QObject *parent = nullptr);
+    ~FilmstripTileCache() override;
 
     // Cached tile file for `2^level`-second tile number `index` of `sourcePath`, or an empty
     // string if it still needs decoding — tileReady() fires for the source when it lands.
     QString tile(const QString &sourcePath, int level, qint64 index);
+
+    // Forgets everything: memoized paths, the failure blacklist and anything still queued.
+    // Call when the timeline's sources change wholesale — a new project, or a relink — so a
+    // source that was missing gets another chance instead of staying blacklisted for the rest
+    // of the session.
+    void clear();
 
 signals:
     void tileReady(const QString &sourcePath);
@@ -53,4 +70,13 @@ private:
     bool m_busy = false;
     bool m_batchScheduled = false;
     int m_producedSincePrune = 0;
+
+    QThread m_decodeThread;
+    // Lives on m_decodeThread; the target every decode is posted to.
+    QObject *m_decodeContext = nullptr;
+    // Closes the decoder once the timeline has been still for a while, so a paused editor
+    // doesn't sit on a decoder's working set. Owned by m_decodeContext.
+    QTimer *m_idleTimer = nullptr;
+    // Decode thread only.
+    MediaThumbnail::TileDecoder m_decoder;
 };

@@ -2,18 +2,60 @@
 
 #include <QList>
 #include <QString>
+#include <QVariant>
 
 namespace drift {
+
+// Colour is a distinct type rather than three float sliders because a shade is picked, not dialled,
+// and because the GPU runtime already binds a "#rrggbb" string as a vec3.
+enum class EffectParamType {
+    Float,
+    Bool,
+    Color,
+};
 
 // User-adjustable parameter metadata for an effect preset (GUI-free).
 struct EffectParamSpec
 {
     QString key;
     QString label;
+    EffectParamType type = EffectParamType::Float;
     double min = 0.0;
     double max = 1.0;
     double defaultValue = 0.0;
-    bool isBoolean = false;
+    QString defaultColorHex = QStringLiteral("#ffffff"); // normalized to 6 digits at parse time
+
+    bool isBoolean() const { return type == EffectParamType::Bool; }
+    bool isColor() const { return type == EffectParamType::Color; }
+
+    // The catalog default as the QVariant a parameter map wants. Every caller used to spell this
+    // out as a ternary, and each one was a place to forget a new type.
+    QVariant defaultVariant() const
+    {
+        switch (type) {
+        case EffectParamType::Bool:
+            return QVariant(defaultValue > 0.5);
+        case EffectParamType::Color:
+            return QVariant(defaultColorHex);
+        case EffectParamType::Float:
+            break;
+        }
+        return QVariant(defaultValue);
+    }
+
+    // What effectToMap and the QML inspectors switch on.
+    QString typeName() const
+    {
+        switch (type) {
+        case EffectParamType::Bool:
+            return QStringLiteral("bool");
+        case EffectParamType::Color:
+            return QStringLiteral("color");
+        case EffectParamType::Float:
+            break;
+        }
+        return QStringLiteral("float");
+    }
 };
 
 // Stable catalog entry describing an effect preset without FFmpeg details.

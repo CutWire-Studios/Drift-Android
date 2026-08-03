@@ -14,12 +14,24 @@ Window {
     property real clipStartSeconds: 0
     property real clipDurationSeconds: 0
 
+    // Phone form factor. The desktop layout reserves a fixed 260px sidebar beside the
+    // stage, which on a 360dp screen leaves the frame about 80px to be prompted on.
+    readonly property bool compact: width < 640
+    // Touch has no second mouse button, so include/exclude becomes an explicit mode.
+    property bool includeMode: true
+
     width: 1100
     height: 720
     minimumWidth: 780
     minimumHeight: 520
     title: qsTr("Cut out subject")
     color: Theme.appBackground
+
+    // Android hands a secondary top-level window the whole display and gives it no
+    // frame, so the desktop size above would leave it laid out for a screen it does
+    // not have. Asked for on show rather than bound, because show() drives visibility
+    // itself and would overwrite a binding.
+    onVisibleChanged: if (visible && Qt.platform.os === "android") visibility = Window.FullScreen
 
     function openFor(track, clip, startSeconds, durationSeconds, sessionAlreadyStarted) {
         root.trackIndex = track
@@ -44,15 +56,21 @@ Window {
         }
     }
 
-    Row {
+    Grid {
         anchors.fill: parent
         anchors.margins: Theme.spacingLg
         spacing: Theme.spacingLg
+        // One column stacks stage over controls on a phone; two puts them side by side.
+        columns: root.compact ? 1 : 2
+        rows: root.compact ? 2 : 1
 
         // ----- Frame + prompt overlay ------------------------------------------------------
         Column {
-            width: parent.width - sidebar.width - Theme.spacingLg
-            height: parent.height
+            width: root.compact ? parent.width
+                                : parent.width - sidebar.width - Theme.spacingLg
+            height: root.compact
+                    ? Math.max(0, parent.height - sidebar.height - Theme.spacingLg)
+                    : parent.height
             spacing: Theme.spacingMd
 
             Item {
@@ -116,7 +134,9 @@ Window {
                         const ny = (mouse.y - stage.fitY) / stage.fitH
                         if (nx < 0 || nx > 1 || ny < 0 || ny > 1)
                             return
-                        EditorState.addSegmentationPoint(nx, ny, mouse.button === Qt.LeftButton)
+                        EditorState.addSegmentationPoint(
+                            nx, ny,
+                            root.compact ? root.includeMode : mouse.button === Qt.LeftButton)
                     }
                 }
 
@@ -138,6 +158,8 @@ Window {
 
                         MouseArea {
                             anchors.fill: parent
+                            // The 14px dot is the mark, not the target.
+                            anchors.margins: Theme.touchUi ? -13 : 0
                             enabled: !EditorState.segmenting
                             onClicked: EditorState.removeSegmentationPoint(parent.index)
                         }
@@ -172,7 +194,8 @@ Window {
 
                 ThemedSlider {
                     id: frameSlider
-                    width: parent.width - 220
+                    label: qsTr("Frame")
+                    width: Math.max(80, parent.width - (root.compact ? 120 : 220))
                     anchors.verticalCenter: parent.verticalCenter
                     from: 0
                     to: Math.max(0.001, root.clipDurationSeconds)
@@ -192,103 +215,144 @@ Window {
         }
 
         // ----- Controls --------------------------------------------------------------------
-        Column {
+        // Compact mode caps the sidebar so the stage above stays usable, which means
+        // the controls no longer all fit — unscrolled, Cut out and Cancel were simply
+        // clipped off the bottom.
+        Flickable {
             id: sidebar
-            width: 260
-            height: parent.height
-            spacing: Theme.spacingLg
-
-            ThemedLabel {
-                width: parent.width
-                wrapMode: Text.WordWrap
-                text: qsTr("Left-click marks the subject, right-click marks what to exclude. Click a marker to remove it.")
-            }
-
-            ThemedLabel {
-                width: parent.width
-                text: qsTr("AI: %1").arg(EditorState.segmentationModelVariant() || qsTr("not installed"))
+            width: root.compact ? parent.width : 260
+            height: root.compact
+                    ? Math.min(sidebarColumn.implicitHeight, parent.height * 0.42)
+                    : parent.height
+            contentWidth: width
+            contentHeight: sidebarColumn.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+            ScrollBar.vertical: AppScrollBar {
+                policy: sidebar.contentHeight > sidebar.height
+                        ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
             }
 
             Column {
+                id: sidebarColumn
+                // Height comes from the content; the Flickable caps and scrolls it, because
+                // in compact mode the stage above still needs most of the screen.
                 width: parent.width
-                spacing: Theme.spacingSm
-
-                ThemedLabel { text: qsTr("Result") }
-
-                ThemedComboBox {
-                    id: outputBox
-                    width: parent.width
-                    visible: !EditorState.segmentationForTemplate
-                    enabled: !EditorState.segmenting
-                    textRole: "label"
-                    valueRole: "value"
-                    model: [
-                        { label: qsTr("Two clips (subject + background)"), value: "clips" },
-                        { label: qsTr("Hide everything except the subject"), value: "mask" }
-                    ]
-                }
+                spacing: Theme.spacingLg
 
                 ThemedLabel {
                     width: parent.width
                     wrapMode: Text.WordWrap
-                    visible: EditorState.segmentationForTemplate
-                    text: qsTr("The cutout is only for this effect — no extra tracks are added.")
+                    text: root.compact
+                          ? qsTr("Pick Subject or Exclude, then tap the frame. Tap a marker to remove it.")
+                          : qsTr("Left-click marks the subject, right-click marks what to exclude. Click a marker to remove it.")
                 }
-            }
 
-            ThemedButton {
-                width: parent.width
-                variant: "secondary"
-                text: qsTr("Clear points")
-                enabled: EditorState.segmentPoints.length > 0 && !EditorState.segmenting
-                onClicked: EditorState.clearSegmentationPoints()
-            }
+                // Touch equivalent of the two mouse buttons.
+                Row {
+                    width: parent.width
+                    visible: root.compact
+                    spacing: Theme.spacingMd
 
-            ThemedButton {
-                width: parent.width
-                variant: "primary"
-                text: EditorState.segmenting
-                      ? qsTr("Cutting out… %1%").arg(Math.round(EditorState.segmentProgress * 100))
-                      : (EditorState.segmentationForTemplate
-                         ? qsTr("Cut out & apply effect")
-                         : qsTr("Cut out subject"))
-                enabled: EditorState.segmentPoints.length > 0 && !EditorState.segmenting
-                         && !EditorState.segmentEncoding
-                onClicked: EditorState.runSegmentationSession(
-                    EditorState.segmentationForTemplate ? "template" : outputBox.currentValue)
-            }
-
-            Column {
-                width: parent.width
-                spacing: Theme.spacingSm
-                visible: EditorState.segmenting
-
-                LabelledProgressRing {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    value: EditorState.segmentProgress
-                    indeterminate: EditorState.segmentProgress <= 0
+                    ThemedButton {
+                        text: qsTr("Subject")
+                        variant: root.includeMode ? "primary" : "secondary"
+                        onClicked: root.includeMode = true
+                    }
+                    ThemedButton {
+                        text: qsTr("Exclude")
+                        variant: root.includeMode ? "secondary" : "destructive"
+                        onClicked: root.includeMode = false
+                    }
                 }
 
                 ThemedLabel {
                     width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.WordWrap
-                    text: EditorState.segmentStatus
+                    text: qsTr("AI: %1").arg(EditorState.segmentationModelVariant() || qsTr("not installed"))
+                }
+
+                Column {
+                    width: parent.width
+                    spacing: Theme.spacingSm
+
+                    ThemedLabel { text: qsTr("Result") }
+
+                    ThemedComboBox {
+                        id: outputBox
+                        width: parent.width
+                        visible: !EditorState.segmentationForTemplate
+                        enabled: !EditorState.segmenting
+                        textRole: "label"
+                        valueRole: "value"
+                        model: [
+                            { label: qsTr("Two clips (subject + background)"), value: "clips" },
+                            { label: qsTr("Hide everything except the subject"), value: "mask" }
+                        ]
+                    }
+
+                    ThemedLabel {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        visible: EditorState.segmentationForTemplate
+                        text: qsTr("The cutout is only for this effect — no extra tracks are added.")
+                    }
                 }
 
                 ThemedButton {
                     width: parent.width
-                    variant: "destructive"
-                    text: qsTr("Cancel")
-                    onClicked: EditorState.cancelSegmentation()
+                    variant: "secondary"
+                    text: qsTr("Clear points")
+                    enabled: EditorState.segmentPoints.length > 0 && !EditorState.segmenting
+                    onClicked: EditorState.clearSegmentationPoints()
                 }
-            }
 
-            ThemedLabel {
-                width: parent.width
-                wrapMode: Text.WordWrap
-                visible: !EditorState.segmenting
-                text: qsTr("Each moment is processed, so longer clips take longer.")
+                ThemedButton {
+                    width: parent.width
+                    variant: "primary"
+                    text: EditorState.segmenting
+                          ? qsTr("Cutting out… %1%").arg(Math.round(EditorState.segmentProgress * 100))
+                          : (EditorState.segmentationForTemplate
+                             ? qsTr("Cut out & apply effect")
+                             : qsTr("Cut out subject"))
+                    enabled: EditorState.segmentPoints.length > 0 && !EditorState.segmenting
+                             && !EditorState.segmentEncoding
+                    onClicked: EditorState.runSegmentationSession(
+                        EditorState.segmentationForTemplate ? "template" : outputBox.currentValue)
+                }
+
+                Column {
+                    width: parent.width
+                    spacing: Theme.spacingSm
+                    visible: EditorState.segmenting
+
+                    LabelledProgressRing {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        value: EditorState.segmentProgress
+                        indeterminate: EditorState.segmentProgress <= 0
+                    }
+
+                    ThemedLabel {
+                        width: parent.width
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
+                        text: EditorState.segmentStatus
+                    }
+
+                    ThemedButton {
+                        width: parent.width
+                        variant: "destructive"
+                        text: qsTr("Cancel")
+                        onClicked: EditorState.cancelSegmentation()
+                    }
+                }
+
+                ThemedLabel {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    visible: !EditorState.segmenting
+                    text: qsTr("Each moment is processed, so longer clips take longer.")
+                }
             }
         }
     }

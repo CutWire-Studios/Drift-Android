@@ -117,28 +117,126 @@ Item {
             id: transport
             width: parent.width
             height: Theme.androidPreviewTransportHeight
+            // Backstop: in a narrow landscape pane the centred transport can extend past
+            // both edges, and nothing above this sets clip.
+            clip: true
+
+            // Width the full five-button row needs, plus the margins either side of it.
+            readonly property real fullTransportWidth:
+                5 * Theme.androidIconButtonSize + 4 * Theme.spacingXs + 2 * Theme.spacingMd
+            // The ±1s skips are the first thing to go: stepping and play/pause cannot be
+            // reached any other way, and jumping has the timeline scrubber as a fallback.
+            readonly property bool showSkips: width >= fullTransportWidth
+
+            // Transport first, timecode second: on a phone the centre of the strip is the
+            // easiest place to hit, and the readout only has to stay legible.
+            Row {
+                id: transportRow
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Theme.spacingXs
+
+                IconButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    buttonSize: Theme.androidIconButtonSize
+                    iconSize: Theme.iconSizeBase
+                    glyph: Theme.icons.rewind
+                    variant: "text"
+                    visible: transport.showSkips
+                    width: visible ? buttonSize : 0
+                    tooltip: qsTr("Back 1 second")
+                    onClicked: EditorState.jumpSeconds(-1)
+                }
+
+                IconButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    buttonSize: Theme.androidIconButtonSize
+                    iconSize: Theme.iconSizeBase
+                    glyph: Theme.icons.stepBack
+                    variant: "text"
+                    tooltip: qsTr("Previous frame")
+                    onClicked: EditorState.stepFrames(-1)
+                }
+
+                IconButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    buttonSize: Theme.androidIconButtonSize
+                    iconSize: Theme.iconSizeLg
+                    glyph: root.playing ? Theme.icons.pause : Theme.icons.play
+                    variant: "text"
+                    tooltip: root.playing ? qsTr("Pause") : qsTr("Play")
+                    onClicked: EditorState.togglePlayback()
+                }
+
+                IconButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    buttonSize: Theme.androidIconButtonSize
+                    iconSize: Theme.iconSizeBase
+                    glyph: Theme.icons.stepForward
+                    variant: "text"
+                    tooltip: qsTr("Next frame")
+                    onClicked: EditorState.stepFrames(1)
+                }
+
+                IconButton {
+                    anchors.verticalCenter: parent.verticalCenter
+                    buttonSize: Theme.androidIconButtonSize
+                    iconSize: Theme.iconSizeBase
+                    glyph: Theme.icons.fastForward
+                    variant: "text"
+                    visible: transport.showSkips
+                    width: visible ? buttonSize : 0
+                    tooltip: qsTr("Forward 1 second")
+                    onClicked: EditorState.jumpSeconds(1)
+                }
+            }
 
             Text {
                 id: timecodeLabel
                 anchors.left: parent.left
-                anchors.leftMargin: Theme.spacingXl
+                anchors.leftMargin: Theme.spacingMd
+                anchors.right: transportRow.left
+                anchors.rightMargin: Theme.spacingXs
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.formatTimecode(root.currentSeconds) + " / "
-                      + root.formatTimecode(root.durationSeconds)
+                // The transport is centred and the quality chip is pinned right, so on a
+                // narrow phone this is the strip's smallest column. Drop the total rather
+                // than elide the current time, which is the half worth reading — and drop
+                // the readout entirely once the column would go negative.
+                readonly property string full: root.formatTimecode(root.currentSeconds)
+                                               + " / " + root.formatTimecode(root.durationSeconds)
+                readonly property string short: root.formatTimecode(root.currentSeconds)
+                visible: width > 0
+                text: width >= fullMetrics.width ? full : short
                 color: Theme.mutedForeground
                 font.family: Theme.monoFontFamily
-                font.pixelSize: Theme.fontSizeXs
+                font.pixelSize: Theme.fontSizeTick
+                elide: Text.ElideRight
+
+                TextMetrics {
+                    id: fullMetrics
+                    font: timecodeLabel.font
+                    text: timecodeLabel.full
+                }
             }
 
-            IconButton {
-                anchors.horizontalCenter: parent.horizontalCenter
+            // Preview quality is the one playback setting worth a permanent control on a
+            // phone: software decode at full resolution is the difference between scrubbing
+            // and waiting. Cycles rather than opening a combo, which needs no popup room.
+            ThemedChip {
+                id: qualityChip
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.spacingMd
                 anchors.verticalCenter: parent.verticalCenter
-                buttonSize: Theme.androidIconButtonSize
-                iconSize: Theme.iconSizeLg
-                glyph: root.playing ? Theme.icons.pause : Theme.icons.play
-                variant: "text"
-                tooltip: root.playing ? qsTr("Pause") : qsTr("Play")
-                onClicked: EditorState.togglePlayback()
+                // Only while it clears the centred transport row.
+                visible: transport.width - (transportRow.x + transportRow.width)
+                         >= width + Theme.spacingMd * 2
+                readonly property var values: ["full", "half", "quarter"]
+                readonly property var labels: [qsTr("Full"), qsTr("Half"), qsTr("Quarter")]
+                readonly property int currentIndex:
+                    Math.max(0, values.indexOf(EditorState.playback.previewQuality))
+                text: labels[currentIndex]
+                onClicked: EditorState.playback.previewQuality =
+                           values[(currentIndex + 1) % values.length]
             }
         }
     }

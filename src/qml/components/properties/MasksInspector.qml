@@ -39,7 +39,7 @@ Item {
             compact: true
             glyph: Theme.icons.mask
             title: qsTr("Not available")
-            hint: qsTr("Masks apply to visual clips.")
+            hint: qsTr("Cutouts apply to visual clips.")
         }
 
         // Segmentation produces a matte — a per-frame mask — so it belongs beside
@@ -190,11 +190,16 @@ Item {
                     font.pixelSize: Theme.fontSizeXs
                 }
                 ThemedSlider {
+                    id: maskParamSlider
+                    label: modelData.label
                     width: parent.width
                     from: modelData.min
                     to: modelData.max
                     stepSize: modelData.key === "feather" ? 1 : 0.01
-                    value: (root.clipData.mask && root.clipData.mask[modelData.key]) || 0
+                    Binding on value {
+                        when: !maskParamSlider.pressed
+                        value: (root.clipData.mask && root.clipData.mask[modelData.key]) || 0
+                    }
                     onMoved: {
                         const mask = Object.assign({}, root.clipData.mask || {})
                         mask[modelData.key] = value
@@ -202,12 +207,10 @@ Item {
                             EditorState.selectedTrack, EditorState.selectedClip, mask)
                     }
                     onPressedChanged: {
-                        if (pressed) {
+                        if (pressed)
                             EditorState.beginPreviewDrag(qsTr("Mask changed"))
-                        } else {
+                        else
                             EditorState.commitPreviewDrag()
-                            value = Qt.binding(() => (root.clipData.mask && root.clipData.mask[modelData.key]) || 0)
-                        }
                     }
                 }
             }

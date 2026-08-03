@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QPainter>
 #include <QProcess>
+#include <QScopeGuard>
 #include <QSet>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -23,6 +24,7 @@
 #include "engine/AudioEffectCatalog.h"
 #include "engine/audio/AudioEffectFactory.h"
 #include "engine/audio/AudioEffectRack.h"
+#include "engine/audio/ClipAudioRetimer.h"
 #include "engine/AudioFileWriter.h"
 #include "engine/AudioOnsets.h"
 #include "engine/DeepFilterDenoiser.h"
@@ -35,11 +37,22 @@
 #include "engine/FrameCompositor.h"
 #include "engine/TextRaster.h"
 #include "engine/GpuEffectExecutor.h"
+#include "engine/GpuPackageParse.h"
+
+#include <QJsonDocument>
 #include "engine/MaskApplier.h"
 #include "engine/MatteWriter.h"
+#include "engine/ReverseProxyCache.h"
+#include "engine/ReverseRenderer.h"
 #include "engine/ClipReaderPool.h"
 #include "engine/TransitionCatalog.h"
 #include "core/Transition.h"
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/pixfmt.h>
+}
 
 class EngineTest : public QObject
 {
@@ -48,7 +61,16 @@ class EngineTest : public QObject
 private slots:
     void initTestCase();
     void matteWriterRoundTripsThroughClipReader();
+    void reverseRendererPlaysSourceBackwards();
+    void reverseProxyLookupIsByContainmentAndSourceIdentity();
+    void resolveVideoReadMirrorsTheClipOntoTheProxy();
     void faceTrackRoundTripsAndInterpolates();
+    void faceTrackV2CarriesContoursAndPose();
+    void faceTrackV1FileStillLoads();
+    void smoothFaceTrackHandlesMissingBlocks();
+    void applyFaceUniformsEmitsContourArrays();
+    void colorParametersParseAndResolve();
+    void beautyEffectsPassThroughWithoutContours();
     void emojiCatalogNeedsFontAddon();
     void emojiRasterisesGlyph();
     void effectProcessorPassthroughWithoutEffects();
@@ -121,10 +143,26 @@ private slots:
     void heavyWeightsRenderSolidGlyphs();
     void textClipCarriesGpuEffects();
     void textAnimationFadesAndSlides();
+    void clipBodyAnimationFadeRampsOpacity();
     void maskApplierEllipseMasksCorners();
     void exporterProducesPlayableFileWithBackground();
+    void exporterProducesAudioOnlyMp3();
+    void exporterTagsSdrBt709ColorMetadata();
+    void exporterDefaultCrfIsNearLosslessForH264();
+    void exporterSettingsFromMapValidatesFrameRate();
+    void exporterDefaultsToProjectFrameRate();
+    void exporterHonoursExportFrameRateOverride();
+    void exporterSupportsNtscFrameRates();
+    void exporterFrameRateAddsRealDetailToSlowedClips();
     void mixerHasNoBlockBoundaryDropout();
-    void mixerSurvivesConcurrentEffectRackReset();
+    void mixerSurvivesConcurrentClipAudioReset();
+    void retimedClipAudioIsNotSilent();
+    void retimedAudioPreservesPitch();
+    void retimedAudioLengthTracksTimeline();
+    void retimedAudioSurvivesBlockSizeChanges();
+    void reversedRetimedAudioIsNotSilent();
+    void rampedSpeedCurveRetimesAudioClip();
+    void clipAudioRetimerStreamsSyntheticSource();
     void audioEffectCatalogLoadsPackages();
     void audioEffectFactoryBuildsEveryCatalogEntry();
     void audioEffectChainAltersSignal();
@@ -149,9 +187,17 @@ private:
 
 void EngineTest::initTestCase()
 {
+    // Several subsystems here write into QStandardPaths::AppDataLocation (reversed proxies, the
+    // matte and denoise caches). Test mode keeps a test run out of the developer's real app data.
+    QStandardPaths::setTestModeEnabled(true);
+
     const QString effectsDir = QString::fromUtf8(DRIFT_TEST_EFFECTS_DIR);
     QVERIFY2(QDir(effectsDir).exists(), qPrintable(effectsDir));
-    reloadEffectCatalog({effectsDir});
+    QStringList effectRoots{effectsDir};
+    const QString addonEffectsDir = QString::fromUtf8(DRIFT_TEST_ADDON_EFFECTS_DIR);
+    if (QDir(addonEffectsDir).exists())
+        effectRoots.append(addonEffectsDir);
+    reloadEffectCatalog(effectRoots);
 
     const QString transitionsDir = QString::fromUtf8(DRIFT_TEST_TRANSITIONS_DIR);
     QVERIFY2(QDir(transitionsDir).exists(), qPrintable(transitionsDir));
@@ -280,6 +326,339 @@ void EngineTest::faceTrackRoundTripsAndInterpolates()
     QVERIFY(!loaded.sample(0, 3).valid);
 }
 
+namespace {
+
+// Anchors with every field a v2 sidecar carries, so the round-trip tests actually exercise the
+// contour and pose blocks rather than defaults.
+drift::FaceAnchors makeFullAnchors(double shift)
+{
+    drift::FaceAnchors a;
+    a.valid = true;
+    a.faceCenter = QPointF(0.4 + shift, 0.5);
+    a.leftEye = QPointF(0.35 + shift, 0.45);
+    a.rightEye = QPointF(0.45 + shift, 0.45);
+    a.faceRx = 0.1;
+    a.faceRy = 0.12;
+    a.angle = 0.1;
+    a.eyeRadius = 0.02;
+    a.score = 0.9;
+
+    a.contour.reserve(drift::contour::kTotalPoints);
+    for (int i = 0; i < drift::contour::kTotalPoints; ++i)
+        a.contour.append(QPointF(0.3 + shift + i * 0.001, 0.4 + i * 0.002));
+    a.hasContours = true;
+    a.cheekLeft = QPointF(0.33 + shift, 0.52);
+    a.cheekRight = QPointF(0.47 + shift, 0.52);
+
+    a.hasPose = true;
+    a.poseQx = 0.0;
+    a.poseQy = 0.0;
+    a.poseQz = std::sin(0.15);
+    a.poseQw = std::cos(0.15);
+    a.poseScale = 0.08;
+    a.poseOx = 0.4 + shift;
+    a.poseOy = 0.45;
+    a.poseOz = 0.01;
+    return a;
+}
+
+} // namespace
+
+void EngineTest::faceTrackV2CarriesContoursAndPose()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("v2.json"));
+
+    drift::FaceTrack track;
+    track.fps = 30;
+    for (int i = 0; i < 2; ++i) {
+        drift::FaceTrackFrame frame;
+        frame.faces.append(makeFullAnchors(0.1 * i));
+        track.frames.append(frame);
+    }
+
+    QString error;
+    QVERIFY2(drift::writeFaceTrack(path, track, &error), qPrintable(error));
+    drift::FaceTrack loaded;
+    QVERIFY2(drift::readFaceTrack(path, &loaded, &error), qPrintable(error));
+
+    const drift::FaceAnchors &a = loaded.frames.at(0).faces.at(0);
+    QVERIFY(a.hasContours);
+    QCOMPARE(a.contour.size(), drift::contour::kTotalPoints);
+    // The contour block is quantized to uint16 over a range of 4.0, so a point is good to about
+    // 6e-5 — finer than the five-decimal rounding the plain fields already use.
+    for (int i = 0; i < drift::contour::kTotalPoints; ++i) {
+        QVERIFY(qAbs(a.contour.at(i).x() - (0.3 + i * 0.001)) < 1e-4);
+        QVERIFY(qAbs(a.contour.at(i).y() - (0.4 + i * 0.002)) < 1e-4);
+    }
+    QVERIFY(qAbs(a.cheekLeft.x() - 0.33) < 1e-4);
+    QVERIFY(a.hasPose);
+    QVERIFY(qAbs(a.poseQz - std::sin(0.15)) < 1e-6);
+    QVERIFY(qAbs(a.poseScale - 0.08) < 1e-6);
+
+    // Interpolating between the two frames keeps both blocks and renormalizes the quaternion.
+    const drift::FaceAnchors mid = loaded.sample(drift::kUsPerSecond / 60, 0);
+    QVERIFY(mid.valid);
+    QVERIFY(mid.hasContours);
+    QCOMPARE(mid.contour.size(), drift::contour::kTotalPoints);
+    QVERIFY(qAbs(mid.contour.at(0).x() - 0.35) < 1e-3);
+    QVERIFY(mid.hasPose);
+    const double norm = std::sqrt(mid.poseQx * mid.poseQx + mid.poseQy * mid.poseQy
+                                 + mid.poseQz * mid.poseQz + mid.poseQw * mid.poseQw);
+    QVERIFY(qAbs(norm - 1.0) < 1e-6);
+
+    // Sidecars are embedded in every project bundle, so their size is a real cost. A minute of
+    // single-face 30fps footage must stay near a megabyte; if this trips, something stopped being
+    // rounded or the contour blob stopped being packed.
+    drift::FaceTrack minute;
+    minute.fps = 30;
+    for (int i = 0; i < 1800; ++i) {
+        drift::FaceTrackFrame frame;
+        frame.faces.append(makeFullAnchors(0.0001 * i));
+        minute.frames.append(frame);
+    }
+    const QString bigPath = dir.filePath(QStringLiteral("minute.json"));
+    QVERIFY2(drift::writeFaceTrack(bigPath, minute, &error), qPrintable(error));
+    const qint64 bytes = QFileInfo(bigPath).size();
+    QVERIFY2(bytes < 2'400'000,
+             qPrintable(QStringLiteral("sidecar grew to %1 bytes per minute per face").arg(bytes)));
+}
+
+// The reason the format bump is not a hard break: an existing sidecar still drives every warp
+// effect, and only the makeup effects see that they have nothing to work with.
+void EngineTest::faceTrackV1FileStillLoads()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("v1.json"));
+
+    // Written by hand in the old format — a bare 24-number array per face — because the point is
+    // to prove the reader copes with files this build can no longer produce.
+    const QByteArray v1 =
+        "{\"version\":1,\"fps\":30,\"startSrcUs\":0,\"frames\":["
+        "[[1,0.2,0.4,0.3,0.4,0.25,0.45,0.25,0.5,0.22,0.5,0.28,0.5,0.25,0.6,0.25,0.3,0.25,0.5,"
+        "0.1,0.12,0.2,0.02,0.9]],"
+        "[[1,0.3,0.4,0.4,0.4,0.35,0.45,0.35,0.5,0.32,0.5,0.38,0.5,0.35,0.6,0.35,0.3,0.35,0.5,"
+        "0.1,0.12,0.2,0.02,0.9]]]}";
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(v1);
+    f.close();
+
+    QString error;
+    drift::FaceTrack loaded;
+    QVERIFY2(drift::readFaceTrack(path, &loaded, &error), qPrintable(error));
+    QCOMPARE(loaded.frames.size(), 2);
+
+    const drift::FaceAnchors &a = loaded.frames.at(0).faces.at(0);
+    QVERIFY(a.valid);
+    QVERIFY(qAbs(a.faceCenter.x() - 0.25) < 1e-6);
+    QVERIFY(!a.hasContours);
+    QVERIFY(!a.hasPose);
+    QVERIFY(a.contour.isEmpty());
+
+    // Still interpolates, so the warp effects are unaffected.
+    const drift::FaceAnchors mid = loaded.sample(drift::kUsPerSecond / 60, 0);
+    QVERIFY(mid.valid);
+    QVERIFY(qAbs(mid.faceCenter.x() - 0.30) < 1e-4);
+    QVERIFY(!mid.hasContours);
+
+    // A version from the future is still refused, since we cannot guess what it holds.
+    QFile future(dir.filePath(QStringLiteral("future.json")));
+    QVERIFY(future.open(QIODevice::WriteOnly));
+    future.write("{\"version\":99,\"fps\":30,\"frames\":[]}");
+    future.close();
+    drift::FaceTrack unused;
+    QVERIFY(!drift::readFaceTrack(dir.filePath(QStringLiteral("future.json")), &unused, &error));
+}
+
+// Contours and pose must average only across frames that have them, or a partly re-scanned clip
+// produces a half-length mask.
+void EngineTest::smoothFaceTrackHandlesMissingBlocks()
+{
+    drift::FaceTrack track;
+    track.fps = 30;
+    for (int i = 0; i < 5; ++i) {
+        drift::FaceTrackFrame frame;
+        drift::FaceAnchors a = makeFullAnchors(0.0);
+        // Jitter the centre so smoothing has something to do.
+        a.faceCenter = QPointF(0.4 + (i % 2 ? 0.02 : -0.02), 0.5);
+        // The middle frame carries no contours and no pose, as a v1-era frame would.
+        if (i == 2) {
+            a.contour.clear();
+            a.hasContours = false;
+            a.hasPose = false;
+        }
+        frame.faces.append(a);
+        track.frames.append(frame);
+    }
+
+    drift::smoothFaceTrack(&track);
+
+    for (int i = 0; i < 5; ++i) {
+        const drift::FaceAnchors &a = track.frames.at(i).faces.at(0);
+        QVERIFY(a.valid);
+        if (i == 2) {
+            QVERIFY(!a.hasContours);
+            QVERIFY(a.contour.isEmpty());
+            QVERIFY(!a.hasPose);
+        } else {
+            QVERIFY(a.hasContours);
+            QCOMPARE(a.contour.size(), drift::contour::kTotalPoints);
+            QVERIFY(a.hasPose);
+            const double norm = std::sqrt(a.poseQx * a.poseQx + a.poseQy * a.poseQy
+                                         + a.poseQz * a.poseQz + a.poseQw * a.poseQw);
+            QVERIFY(qAbs(norm - 1.0) < 1e-6);
+        }
+    }
+
+    // The jitter is gone from the interior frames, which is what smoothing is for.
+    QVERIFY(qAbs(track.frames.at(2).faces.at(0).faceCenter.x() - 0.4) < 0.015);
+}
+
+// Contour loops travel as array uniforms rather than 256 named scalars; a v1 anchor must emit none
+// of them and must leave every pre-existing uniform exactly as it was.
+void EngineTest::applyFaceUniformsEmitsContourArrays()
+{
+    QMap<QString, QVariant> params;
+    params.insert(QStringLiteral("faceIndex"), 0);
+    drift::applyFaceUniforms(&params, {makeFullAnchors(0.0)});
+
+    QCOMPARE(params.value(QStringLiteral("u_faceValid")).toDouble(), 1.0);
+    QCOMPARE(params.value(QStringLiteral("u_faceHasContours")).toDouble(), 1.0);
+    // faceIndex selects a slot; it is not a uniform and must be consumed.
+    QVERIFY(!params.contains(QStringLiteral("faceIndex")));
+
+    const struct { const char *name; int count; } loops[] = {
+        {"u_faceOval", 36},      {"u_faceLipOuter", 20}, {"u_faceLipInner", 20},
+        {"u_faceEyeLeft", 16},   {"u_faceEyeRight", 16}, {"u_faceBrowLeft", 10},
+        {"u_faceBrowRight", 10},
+    };
+    for (const auto &loop : loops) {
+        const QVariant v = params.value(QLatin1String(loop.name));
+        QVERIFY2(v.canConvert<drift::GpuFloatArray>(), loop.name);
+        const auto array = v.value<drift::GpuFloatArray>();
+        QCOMPARE(array.tupleSize, 2);
+        QCOMPARE(array.values.size(), loop.count * 2);
+    }
+
+    QCOMPARE(params.value(QStringLiteral("u_facePoseValid")).toDouble(), 1.0);
+    // The pose reaches shaders as a basis, and a frontal-ish head must not come back mirrored.
+    QVERIFY(params.value(QStringLiteral("u_facePoseRightX")).toDouble() > 0.9);
+
+    // A v1 anchor: the warp uniforms are all still there, the contour arrays are all absent.
+    drift::FaceAnchors legacy;
+    legacy.valid = true;
+    legacy.faceCenter = QPointF(0.5, 0.5);
+    legacy.faceRx = 0.1;
+    QMap<QString, QVariant> legacyParams;
+    legacyParams.insert(QStringLiteral("faceIndex"), 0);
+    drift::applyFaceUniforms(&legacyParams, {legacy});
+
+    QCOMPARE(legacyParams.value(QStringLiteral("u_faceValid")).toDouble(), 1.0);
+    QCOMPARE(legacyParams.value(QStringLiteral("u_faceCenterX")).toDouble(), 0.5);
+    QCOMPARE(legacyParams.value(QStringLiteral("u_faceRx")).toDouble(), 0.1);
+    QCOMPARE(legacyParams.value(QStringLiteral("u_faceHasContours")).toDouble(), 0.0);
+    QCOMPARE(legacyParams.value(QStringLiteral("u_facePoseValid")).toDouble(), 0.0);
+    for (const auto &loop : loops)
+        QVERIFY2(!legacyParams.contains(QLatin1String(loop.name)), loop.name);
+}
+
+void EngineTest::colorParametersParseAndResolve()
+{
+    const auto parse = [](const QByteArray &json, QList<drift::EffectParamSpec> *out,
+                          QString *error) {
+        const QJsonArray params = QJsonDocument::fromJson(json).array();
+        return GpuPackageParse::parseParameters(params, out, /*gpuBackend=*/true, error);
+    };
+
+    QList<drift::EffectParamSpec> specs;
+    QString error;
+    QVERIFY2(parse(R"([{"identifier":"shade","type":"color","defaultValue":"#B03048"}])", &specs,
+                   &error),
+             qPrintable(error));
+    QCOMPARE(specs.size(), 1);
+    QVERIFY(specs.at(0).isColor());
+    QVERIFY(!specs.at(0).isBoolean());
+    // Normalized at parse time so the swatch, the project file and the uniform agree on one form.
+    QCOMPARE(specs.at(0).defaultColorHex, QStringLiteral("#b03048"));
+    QCOMPARE(specs.at(0).defaultVariant().toString(), QStringLiteral("#b03048"));
+    QCOMPARE(specs.at(0).typeName(), QStringLiteral("color"));
+
+    // Alpha is dropped rather than silently carried into a vec3.
+    specs.clear();
+    QVERIFY(parse(R"([{"identifier":"shade","type":"color","defaultValue":"#80b03048"}])", &specs,
+                  &error));
+    QCOMPARE(specs.at(0).defaultColorHex, QStringLiteral("#b03048"));
+
+    // A malformed default is a package error, not a silent black.
+    specs.clear();
+    QVERIFY(!parse(R"([{"identifier":"shade","type":"color","defaultValue":"crimson"}])", &specs,
+                   &error));
+    QVERIFY(error.contains(QStringLiteral("invalid colour")));
+    specs.clear();
+    QVERIFY(!parse(R"([{"identifier":"shade","type":"color","defaultValue":0.5}])", &specs, &error));
+
+    // A stale numeric value on a colour key — from a hand-edited project, or a package that changed
+    // a parameter's type — must not reach the shader, where it would bind as black.
+    const EffectPresetEntry *def = effectDefForId(QStringLiteral("face_lipstick"));
+    if (!def)
+        QSKIP("face_lipstick package not available (drift-addons staging missing)");
+    drift::Effect effect;
+    effect.catalogId = def->meta.id;
+    effect.parameters.insert(QStringLiteral("shade"), 0.7);
+    const QMap<QString, QVariant> resolved = resolvedEffectParameters(effect, *def);
+    QCOMPARE(resolved.value(QStringLiteral("shade")).typeId(), QMetaType::QString);
+    QCOMPARE(resolved.value(QStringLiteral("shade")).toString(), QStringLiteral("#b03048"));
+
+    // A legitimate override still wins.
+    effect.parameters.insert(QStringLiteral("shade"), QStringLiteral("#123456"));
+    QCOMPARE(resolvedEffectParameters(effect, *def).value(QStringLiteral("shade")).toString(),
+             QStringLiteral("#123456"));
+}
+
+// Every beauty package must pass the frame through untouched when the clip has no contours, or an
+// un-rescanned clip looks broken rather than merely un-scanned.
+void EngineTest::beautyEffectsPassThroughWithoutContours()
+{
+    if (!GpuEffectExecutor::instance().isAvailable())
+        QSKIP("GPU effect executor unavailable");
+
+    const QStringList ids = {QStringLiteral("face_lipstick"),   QStringLiteral("face_blush"),
+                             QStringLiteral("face_teeth_whiten"), QStringLiteral("face_eyeliner"),
+                             QStringLiteral("face_eyeshadow"),  QStringLiteral("face_brow_tint"),
+                             QStringLiteral("face_eye_color"),  QStringLiteral("face_beautify")};
+    if (!effectDefForId(ids.first()))
+        QSKIP("beauty packages not available (drift-addons staging missing)");
+
+    QImage source(64, 64, QImage::Format_RGBA8888);
+    source.fill(QColor(180, 140, 130));
+
+    // Valid, but from a v1 sidecar: no contours.
+    drift::FaceAnchors legacy;
+    legacy.valid = true;
+    legacy.faceCenter = QPointF(0.5, 0.5);
+    legacy.leftEye = QPointF(0.4, 0.4);
+    legacy.rightEye = QPointF(0.6, 0.4);
+    legacy.faceRx = 0.25;
+    legacy.faceRy = 0.3;
+    legacy.eyeRadius = 0.03;
+
+    for (const QString &id : ids) {
+        const EffectPresetEntry *def = effectDefForId(id);
+        QVERIFY2(def, qPrintable(id));
+        QVERIFY2(def->needsFace, qPrintable(id));
+
+        drift::Effect effect;
+        effect.catalogId = id;
+        const QImage out = EffectProcessor::applyEffects(source, {effect}, 0, {legacy});
+        QVERIFY2(!out.isNull(), qPrintable(id));
+        QCOMPARE(out.size(), source.size());
+        QVERIFY2(out == source, qPrintable(QStringLiteral("%1 altered a contour-less frame").arg(id)));
+    }
+}
+
 // or lands on the wrong frame — silent, and only visible in the composite.
 void EngineTest::matteWriterRoundTripsThroughClipReader()
 {
@@ -330,6 +709,156 @@ void EngineTest::matteWriterRoundTripsThroughClipReader()
         }
         QCOMPARE(band, i);
     }
+}
+
+// The whole point of a proxy is that reading it forwards shows the source backwards. An off-by-one
+// or a batch stitched together in the wrong order is invisible in a still and obvious in motion,
+// so the ordering is pinned here rather than left to the eye.
+void EngineTest::reverseRendererPlaysSourceBackwards()
+{
+    if (!Exporter::videoCodecById(QStringLiteral("h264")).value(QStringLiteral("available")).toBool())
+        QSKIP("No H.264 encoder available in this FFmpeg build");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString sourcePath = dir.filePath(QStringLiteral("forward.mp4"));
+    const QString proxyPath = dir.filePath(QStringLiteral("reversed.mp4"));
+    const QSize size(320, 240);
+    const int frames = 10;
+    const int fps = 30;
+
+    // Same band-per-frame trick as the matte round-trip: frame i is the only one with a white band
+    // at row i * 20, so a frame can be identified from its pixels alone.
+    drift::MatteWriter writer;
+    QString error;
+    QVERIFY2(writer.open(sourcePath, size, fps, 1, &error), qPrintable(error));
+    for (int i = 0; i < frames; ++i) {
+        QImage mask(size, QImage::Format_Grayscale8);
+        mask.fill(0);
+        QPainter p(&mask);
+        p.fillRect(QRect(0, i * 20, size.width(), 20), Qt::white);
+        p.end();
+        QVERIFY2(writer.writeFrame(mask, &error), qPrintable(error));
+    }
+    QVERIFY2(writer.finish(&error), qPrintable(error));
+
+    const drift::TimeUs coverOut = drift::TimeUs(frames) * drift::kUsPerSecond / fps;
+    QVERIFY2(drift::renderReversed(sourcePath, 0, coverOut, proxyPath, &error, {}),
+             qPrintable(error));
+    QVERIFY(QFileInfo::exists(proxyPath));
+    QVERIFY(!QFileInfo::exists(proxyPath + QStringLiteral(".part")));
+
+    // Each source frame keeps the mirror of its own timestamp, so source frame i lands at
+    // coverOut - i frames into the proxy. Walking the proxy forwards must walk the source back.
+    for (int j = 1; j <= frames; ++j) {
+        const drift::TimeUs us = drift::TimeUs(j) * drift::kUsPerSecond / fps;
+        const QImage frame = ClipReaderPool::instance().readVideoFrame(proxyPath, us, 0, 0);
+        QVERIFY2(!frame.isNull(), qPrintable(QStringLiteral("proxy frame %1 did not decode").arg(j)));
+
+        int band = -1;
+        for (int b = 0; b < frames + 2; ++b) {
+            if (qRed(frame.pixel(size.width() / 2, b * 20 + 10)) > 128) {
+                band = b;
+                break;
+            }
+        }
+        QCOMPARE(band, frames - j);
+    }
+}
+
+// A proxy stays usable while the clip it was rendered for is trimmed inward, split or copied, and
+// stops being usable the moment the source underneath it changes. Both halves matter: the first is
+// what keeps ordinary editing smooth, the second is what stops a stale render being served as if
+// it were the current source.
+void EngineTest::reverseProxyLookupIsByContainmentAndSourceIdentity()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString sourcePath = dir.filePath(QStringLiteral("source.mp4"));
+    const QString proxyPath = dir.filePath(QStringLiteral("proxy.mp4"));
+
+    QFile source(sourcePath);
+    QVERIFY(source.open(QIODevice::WriteOnly));
+    source.write(QByteArray(1024, 'a'));
+    source.close();
+    QFile proxy(proxyPath);
+    QVERIFY(proxy.open(QIODevice::WriteOnly));
+    proxy.write(QByteArray(16, 'b'));
+    proxy.close();
+
+    const drift::TimeUs coverIn = 0;
+    const drift::TimeUs coverOut = 10 * drift::kUsPerSecond;
+    drift::ReverseProxyCache::instance().insert(sourcePath, coverIn, coverOut, proxyPath);
+
+    drift::TimeUs coverEnd = 0;
+    QCOMPARE(drift::ReverseProxyCache::instance().lookup(sourcePath, 2 * drift::kUsPerSecond,
+                                                         8 * drift::kUsPerSecond, &coverEnd),
+             proxyPath);
+    QCOMPARE(coverEnd, coverOut);
+
+    // Exactly the rendered range still counts as covered.
+    QCOMPARE(drift::ReverseProxyCache::instance().lookup(sourcePath, coverIn, coverOut, &coverEnd),
+             proxyPath);
+
+    // Extending past what was rendered drops back to the live path rather than showing the wrong
+    // frames at the ends.
+    QVERIFY(drift::ReverseProxyCache::instance()
+                .lookup(sourcePath, coverIn, 12 * drift::kUsPerSecond, &coverEnd)
+                .isEmpty());
+
+    // A source replaced in place keeps its path, so identity has to come from the file itself.
+    QVERIFY(source.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    source.write(QByteArray(2048, 'c'));
+    source.close();
+    QVERIFY(drift::ReverseProxyCache::instance()
+                .lookup(sourcePath, 2 * drift::kUsPerSecond, 8 * drift::kUsPerSecond, &coverEnd)
+                .isEmpty());
+}
+
+void EngineTest::resolveVideoReadMirrorsTheClipOntoTheProxy()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString sourcePath = dir.filePath(QStringLiteral("clip.mp4"));
+    const QString proxyPath = dir.filePath(QStringLiteral("clip-reversed.mp4"));
+
+    QFile source(sourcePath);
+    QVERIFY(source.open(QIODevice::WriteOnly));
+    source.write(QByteArray(512, 'a'));
+    source.close();
+    QFile proxy(proxyPath);
+    QVERIFY(proxy.open(QIODevice::WriteOnly));
+    proxy.write(QByteArray(16, 'b'));
+    proxy.close();
+
+    drift::Clip clip;
+    clip.type = drift::ClipType::Video;
+    clip.path = sourcePath;
+    clip.timelineStart = 5 * drift::kUsPerSecond;
+    clip.timelineDuration = 4 * drift::kUsPerSecond;
+    clip.srcIn = 3 * drift::kUsPerSecond;
+    clip.srcOut = 7 * drift::kUsPerSecond;
+
+    // Without the reverse flag nothing is redirected, even with a proxy sitting in the cache.
+    const drift::TimeUs coverOut = 9 * drift::kUsPerSecond;
+    drift::ReverseProxyCache::instance().insert(sourcePath, drift::kUsPerSecond, coverOut, proxyPath);
+    drift::VideoRead read = drift::resolveVideoRead(clip, clip.timelineStart);
+    QCOMPARE(read.path, sourcePath);
+    QCOMPARE(read.sourceUs, clip.srcIn);
+
+    // Reversed, the clip's first timeline frame is the source's last, and that is the proxy frame
+    // furthest from its start. Getting this backwards shows up as a clip that plays the right way
+    // round but from the wrong end.
+    clip.reverse = true;
+    read = drift::resolveVideoRead(clip, clip.timelineStart);
+    QCOMPARE(read.path, proxyPath);
+    QCOMPARE(read.sourceUs, coverOut - clip.srcOut);
+
+    read = drift::resolveVideoRead(clip, clip.timelineStart + clip.timelineDuration);
+    QCOMPARE(read.path, proxyPath);
+    QCOMPARE(read.sourceUs, coverOut - clip.srcIn);
+
+    QCOMPARE(drift::videoReadPath(clip), proxyPath);
 }
 
 void EngineTest::effectProcessorPassthroughWithoutEffects()
@@ -907,12 +1436,14 @@ void EngineTest::effectPresetStableIds()
         QStringLiteral("wave_warp"),       QStringLiteral("zoom_pulse"),
     };
 
+    // absolutePath() because the macro points out of the source tree with a ".." segment, while
+    // the catalog stores what QFileInfo::absoluteFilePath() produced — already cleaned.
+    const QString addonEffectsDir =
+        QDir(QString::fromUtf8(DRIFT_TEST_ADDON_EFFECTS_DIR)).absolutePath() + QLatin1Char('/');
+
     QSet<QString> seen;
     for (const QString &id : ids) {
         QVERIFY2(!id.isEmpty(), "preset id must not be empty");
-        QVERIFY2(id.contains(QLatin1Char('.')) || legacyBareIds.contains(id)
-                     || id.startsWith(QStringLiteral("face_")),
-                 qPrintable(QStringLiteral("stable id: %1").arg(id)));
         QVERIFY2(!seen.contains(id), qPrintable(QStringLiteral("duplicate id: %1").arg(id)));
         seen.insert(id);
 
@@ -923,6 +1454,16 @@ void EngineTest::effectPresetStableIds()
                  qPrintable(QStringLiteral("display name missing for %1").arg(id)));
         QVERIFY2(!def->meta.category.isEmpty(),
                  qPrintable(QStringLiteral("category missing for %1").arg(id)));
+
+        // effects.core shipped its catalog with bare ids from 1.0.0 on, so this rule cannot
+        // retroactively rename them without breaking every project saved against it. The
+        // namespacing requirement applies to what this repo bundles; addon roots are only
+        // present when a sibling drift-addons checkout exists, and never on CI.
+        if (def->isGpu && def->gpu.packageDir.startsWith(addonEffectsDir))
+            continue;
+        QVERIFY2(id.contains(QLatin1Char('.')) || legacyBareIds.contains(id)
+                     || id.startsWith(QStringLiteral("face_")),
+                 qPrintable(QStringLiteral("stable id: %1").arg(id)));
     }
 }
 
@@ -951,18 +1492,20 @@ void EngineTest::effectPresetCatalogIncludesStylizePresets()
     requirePreset("ripple_water", "Ripple / Water", "glitch", true);
     requirePreset("shockwave_pulse", "Shockwave / Pulse", "glitch", true);
     requirePreset("digital_glitch", "Digital Glitch", "glitch", true);
-    requirePreset("adjust.contrast", "Contrast", "impact", true);
+    requirePreset("adjust.contrast", "Contrast", "color", true);
 }
 
 void EngineTest::effectBrowserCategories()
 {
     const QList<QPair<QString, QString>> categories = effectCategories();
-    QVERIFY(categories.size() >= 4);
-    QCOMPARE(categories[0].first, QStringLiteral("glitch"));
-    QCOMPARE(categories[0].second, QStringLiteral("Glitch & Distortion"));
-    QCOMPARE(categories[1].first, QStringLiteral("retro"));
-    QCOMPARE(categories[2].first, QStringLiteral("dreamy"));
-    QCOMPARE(categories[3].first, QStringLiteral("impact"));
+    QVERIFY(categories.size() >= 5);
+    QCOMPARE(categories[0].first, QStringLiteral("color"));
+    QCOMPARE(categories[0].second, QStringLiteral("Color"));
+    QCOMPARE(categories[1].first, QStringLiteral("glitch"));
+    QCOMPARE(categories[1].second, QStringLiteral("Glitch & Distortion"));
+    QCOMPARE(categories[2].first, QStringLiteral("retro"));
+    QCOMPARE(categories[3].first, QStringLiteral("dreamy"));
+    QCOMPARE(categories[4].first, QStringLiteral("impact"));
 
     QSet<QString> knownCategories;
     for (const auto &category : categories)
@@ -2208,7 +2751,7 @@ namespace {
 #define SKIP_WITHOUT_FONTS()                                                                        \
     do {                                                                                            \
         if (fontCatalog().isEmpty())                                                                \
-            QSKIP("font bundle not present — run scripts/fetch-fonts.py");                          \
+            QSKIP("font bundle not present — see recipes/fetch-fonts.py in drift-addons");          \
     } while (false)
 
 drift::Clip makeTextClip(const QString &text, const QRectF &rect)
@@ -2359,6 +2902,7 @@ void EngineTest::textDecorationsAreNotCropped()
     QVERIFY(!plain.image.isNull());
 
     clip.textStyle.outlineWidth = 12.0;
+    clip.textStyle.outlineEnabled = true;
     clip.textStyle.shadowEnabled = true;
     clip.textStyle.shadowBlur = 10.0;
     clip.textStyle.shadowOffsetY = 8.0;
@@ -2654,6 +3198,33 @@ void EngineTest::textAnimationFadesAndSlides()
     QVERIFY2(startY > endY + 1.0, "slide-up entrance did not travel upward");
 }
 
+void EngineTest::clipBodyAnimationFadeRampsOpacity()
+{
+    drift::Project project;
+    project.setResolution(128, 128);
+    project.tracks().clear();
+    project.tracks().append(drift::Track{.type = drift::TrackType::Shape});
+
+    drift::Clip clip;
+    clip.id = QStringLiteral("body");
+    clip.type = drift::ClipType::Shape;
+    clip.timelineStart = 0;
+    clip.timelineDuration = drift::secondsToUs(2.0);
+    clip.shapeStyle.kind = drift::ShapeKind::Rectangle;
+    clip.shapeStyle.fill = Qt::white;
+    clip.animIn = {drift::ClipAnimKind::Fade, drift::secondsToUs(1.0), drift::ClipAnimEase::Linear,
+                   drift::FadeCurve::Linear};
+    project.tracks()[0].clips.append(clip);
+
+    FrameCompositor compositor;
+    compositor.setProject(&project);
+
+    const double early = meanLuminance(compositor.compositeAt(drift::secondsToUs(0.05)));
+    const double mid = meanLuminance(compositor.compositeAt(drift::secondsToUs(0.5)));
+    const double settled = meanLuminance(compositor.compositeAt(drift::secondsToUs(1.5)));
+    QVERIFY2(early < mid && mid < settled, "clip body fade-in did not ramp up");
+}
+
 void EngineTest::maskApplierEllipseMasksCorners()
 {
     QImage image(64, 64, QImage::Format_RGBA8888);
@@ -2763,6 +3334,527 @@ void EngineTest::exporterProducesPlayableFileWithBackground()
     const QRgb corner = frame.pixel(6, 6);
     QVERIFY(qBlue(corner) > 150);
     QVERIFY(qBlue(corner) > qRed(corner));
+}
+
+void EngineTest::exporterProducesAudioOnlyMp3()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    drift::Project project;
+    project.setResolution(160, 90);
+    project.setFps(25);
+    project.tracks().clear();
+    project.tracks().append(drift::Track{.type = drift::TrackType::Shape});
+
+    drift::Clip clip;
+    clip.id = QStringLiteral("shape");
+    clip.type = drift::ClipType::Shape;
+    clip.timelineStart = 0;
+    clip.timelineDuration = drift::secondsToUs(1.0);
+    clip.shapeStyle.kind = drift::ShapeKind::Rectangle;
+    clip.shapeStyle.fill = Qt::red;
+    project.tracks()[0].clips.append(clip);
+
+    ExportSettings settings = Exporter::defaultSettings();
+    settings.audioOnly = true;
+    settings.audioCodecId = QStringLiteral("mp3");
+    settings.audioBitrateKbps = 192;
+
+    if (!Exporter::audioCodecById(settings.audioCodecId).value(QStringLiteral("available")).toBool())
+        QSKIP("MP3 encoder not available in this FFmpeg build");
+
+    const QString out = dir.filePath(QStringLiteral("out.mp3"));
+    QString error;
+    const bool ok = Exporter::run(project, settings, out, &error);
+    if (!ok && error.contains(QStringLiteral("encoder")))
+        QSKIP("MP3 encoder not available in this FFmpeg build");
+    QVERIFY2(ok, qPrintable(error));
+    QVERIFY(QFileInfo(out).size() > 0);
+
+    ClipReader reader;
+    QVERIFY(reader.open(out));
+    QVERIFY(reader.hasAudio());
+    QVERIFY(!reader.hasVideo());
+}
+
+void EngineTest::exporterTagsSdrBt709ColorMetadata()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    drift::Project project;
+    project.setResolution(160, 90);
+    project.setFps(25);
+    project.tracks().clear();
+    project.tracks().append(drift::Track{.type = drift::TrackType::Shape});
+
+    drift::Clip clip;
+    clip.id = QStringLiteral("shape");
+    clip.type = drift::ClipType::Shape;
+    clip.timelineStart = 0;
+    clip.timelineDuration = drift::secondsToUs(0.5);
+    clip.shapeStyle.kind = drift::ShapeKind::Rectangle;
+    clip.shapeStyle.fill = Qt::green;
+    project.tracks()[0].clips.append(clip);
+
+    ExportSettings settings = Exporter::defaultSettings();
+    settings.targetHeight = 0;
+    settings.videoCodecId = QStringLiteral("h264");
+    settings.audioCodecId = QStringLiteral("aac");
+    settings.rateControl = QStringLiteral("crf");
+    settings.crf = 18;
+
+    if (!Exporter::videoCodecById(settings.videoCodecId).value(QStringLiteral("available")).toBool())
+        QSKIP("H.264 encoder not available in this FFmpeg build");
+    if (!Exporter::audioCodecById(settings.audioCodecId).value(QStringLiteral("available")).toBool())
+        QSKIP("AAC encoder not available in this FFmpeg build");
+
+    const QString out = dir.filePath(QStringLiteral("color.mp4"));
+    QString error;
+    const bool ok = Exporter::run(project, settings, out, &error);
+    if (!ok && error.contains(QStringLiteral("encoder")))
+        QSKIP("Selected encoder not available in this FFmpeg build");
+    QVERIFY2(ok, qPrintable(error));
+
+    AVFormatContext *fmt = nullptr;
+    QVERIFY(avformat_open_input(&fmt, out.toUtf8().constData(), nullptr, nullptr) == 0);
+    QVERIFY(avformat_find_stream_info(fmt, nullptr) >= 0);
+
+    const AVStream *vstream = nullptr;
+    for (unsigned i = 0; i < fmt->nb_streams; ++i) {
+        if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            vstream = fmt->streams[i];
+            break;
+        }
+    }
+    QVERIFY(vstream);
+    QCOMPARE(vstream->codecpar->color_range, AVCOL_RANGE_MPEG);
+    QCOMPARE(vstream->codecpar->color_primaries, AVCOL_PRI_BT709);
+    QCOMPARE(vstream->codecpar->color_trc, AVCOL_TRC_BT709);
+    QCOMPARE(vstream->codecpar->color_space, AVCOL_SPC_BT709);
+
+    avformat_close_input(&fmt);
+}
+
+void EngineTest::exporterDefaultCrfIsNearLosslessForH264()
+{
+    const QVariantMap h264 = Exporter::videoCodecById(QStringLiteral("h264"));
+    if (!h264.value(QStringLiteral("available")).toBool())
+        QSKIP("H.264 encoder not available in this FFmpeg build");
+    QCOMPARE(h264.value(QStringLiteral("defaultCrf")).toInt(), 18);
+
+    const ExportSettings defaults = Exporter::defaultSettings();
+    if (defaults.videoCodecId == QLatin1String("h264"))
+        QCOMPARE(defaults.crf, 18);
+}
+
+namespace {
+
+// One-second red-on-blue canvas; enough for the muxer to report a stable rate.
+drift::Project frameRateTestProject(int projectFps)
+{
+    drift::Project project;
+    project.setResolution(160, 90);
+    project.setFps(projectFps);
+    project.tracks().clear();
+    project.tracks().append(drift::Track{.type = drift::TrackType::Shape});
+
+    drift::Clip clip;
+    clip.id = QStringLiteral("shape");
+    clip.type = drift::ClipType::Shape;
+    clip.timelineStart = 0;
+    clip.timelineDuration = drift::secondsToUs(1.0);
+    clip.shapeStyle.kind = drift::ShapeKind::Rectangle;
+    clip.shapeStyle.fill = Qt::red;
+    clip.shapeStyle.strokeWidth = 0.0;
+    clip.transformX.setKeyframe(0, 70.0);
+    clip.transformY.setKeyframe(0, 35.0);
+    clip.transformW.setKeyframe(0, 20.0);
+    clip.transformH.setKeyframe(0, 20.0);
+    project.tracks()[0].clips.append(clip);
+    return project;
+}
+
+// Swaps in whatever encoders this FFmpeg build actually has; false means none.
+bool useAvailableCodecs(ExportSettings &settings)
+{
+    const auto pick = [](const QVariantList &catalog, QString &id) {
+        for (const QVariant &v : catalog) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("available")).toBool()) {
+                id = m.value(QStringLiteral("id")).toString();
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!Exporter::videoCodecById(settings.videoCodecId).value(QStringLiteral("available")).toBool()
+        && !pick(Exporter::videoCodecs(), settings.videoCodecId)) {
+        return false;
+    }
+    if (!Exporter::audioCodecById(settings.audioCodecId).value(QStringLiteral("available")).toBool()
+        && !pick(Exporter::audioCodecs(), settings.audioCodecId)) {
+        return false;
+    }
+    return true;
+}
+
+// Frame rate the demuxer reports, plus a demuxed packet count (nb_frames is 0 on
+// some muxers, so count rather than trust it).
+bool probeVideoRate(const QString &path, AVRational &rate, int64_t &frameCount)
+{
+    rate = AVRational{0, 1};
+    frameCount = 0;
+
+    AVFormatContext *fmt = nullptr;
+    if (avformat_open_input(&fmt, path.toUtf8().constData(), nullptr, nullptr) < 0)
+        return false;
+    if (avformat_find_stream_info(fmt, nullptr) < 0) {
+        avformat_close_input(&fmt);
+        return false;
+    }
+    const int idx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (idx < 0) {
+        avformat_close_input(&fmt);
+        return false;
+    }
+    const AVStream *st = fmt->streams[idx];
+    // r_frame_rate, not avg_frame_rate: the latter divides the frame count by the
+    // span to the *last frame's start*, so a 1s/25fps file reads back as 26.04.
+    rate = st->r_frame_rate.num > 0 ? st->r_frame_rate : st->avg_frame_rate;
+
+    AVPacket *pkt = av_packet_alloc();
+    while (pkt && av_read_frame(fmt, pkt) >= 0) {
+        if (pkt->stream_index == idx)
+            ++frameCount;
+        av_packet_unref(pkt);
+    }
+    av_packet_free(&pkt);
+    avformat_close_input(&fmt);
+    return rate.num > 0 && rate.den > 0;
+}
+
+// Decodes every frame and reports how many differ from the frame before them.
+// A frame that merely repeats its predecessor scores ~0 mean-absolute-difference
+// on the luma plane, so this separates real temporal detail from duplication.
+bool countDistinctFrames(const QString &path, int &total, int &changed, double threshold = 1.0)
+{
+    total = 0;
+    changed = 0;
+
+    AVFormatContext *fmt = nullptr;
+    if (avformat_open_input(&fmt, path.toUtf8().constData(), nullptr, nullptr) < 0)
+        return false;
+    const auto closeFmt = qScopeGuard([&] { avformat_close_input(&fmt); });
+    if (avformat_find_stream_info(fmt, nullptr) < 0)
+        return false;
+
+    const int idx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (idx < 0)
+        return false;
+    const AVCodec *dec = avcodec_find_decoder(fmt->streams[idx]->codecpar->codec_id);
+    if (!dec)
+        return false;
+    AVCodecContext *ctx = avcodec_alloc_context3(dec);
+    if (!ctx)
+        return false;
+    const auto freeCtx = qScopeGuard([&] { avcodec_free_context(&ctx); });
+    if (avcodec_parameters_to_context(ctx, fmt->streams[idx]->codecpar) < 0)
+        return false;
+    if (avcodec_open2(ctx, dec, nullptr) < 0)
+        return false;
+
+    AVPacket *pkt = av_packet_alloc();
+    AVFrame *frame = av_frame_alloc();
+    if (!pkt || !frame) {
+        av_packet_free(&pkt);
+        av_frame_free(&frame);
+        return false;
+    }
+    const auto freeAv = qScopeGuard([&] {
+        av_packet_free(&pkt);
+        av_frame_free(&frame);
+    });
+
+    QByteArray previous;
+    const auto consume = [&]() {
+        while (avcodec_receive_frame(ctx, frame) >= 0) {
+            QByteArray luma;
+            luma.resize(frame->width * frame->height);
+            for (int y = 0; y < frame->height; ++y) {
+                std::memcpy(luma.data() + y * frame->width, frame->data[0] + y * frame->linesize[0],
+                            frame->width);
+            }
+            if (!previous.isEmpty() && previous.size() == luma.size()) {
+                double sum = 0.0;
+                const auto *a = reinterpret_cast<const uint8_t *>(previous.constData());
+                const auto *b = reinterpret_cast<const uint8_t *>(luma.constData());
+                for (int i = 0; i < luma.size(); ++i)
+                    sum += std::abs(static_cast<int>(a[i]) - static_cast<int>(b[i]));
+                if (sum / luma.size() > threshold)
+                    ++changed;
+            }
+            previous = luma;
+            ++total;
+        }
+    };
+
+    while (av_read_frame(fmt, pkt) >= 0) {
+        if (pkt->stream_index == idx) {
+            // EAGAIN means the decoder wants its output read before it will take
+            // more; dropping the packet there would silently lose a frame.
+            int rc = avcodec_send_packet(ctx, pkt);
+            while (rc == AVERROR(EAGAIN)) {
+                consume();
+                rc = avcodec_send_packet(ctx, pkt);
+            }
+            consume();
+        }
+        av_packet_unref(pkt);
+    }
+    avcodec_send_packet(ctx, nullptr);
+    consume();
+    return total > 0;
+}
+
+// Exports `project` at the given rate and reports what landed in the file.
+// Returns false only when this FFmpeg build cannot encode at all.
+bool exportAtRate(const drift::Project &project, int fpsNum, int fpsDen, const QString &dirPath,
+                  const QString &name, AVRational &rate, int64_t &frameCount,
+                  QString *outPathOut = nullptr)
+{
+    ExportSettings settings = Exporter::defaultSettings();
+    settings.videoCodecId = QStringLiteral("h264");
+    settings.audioCodecId = QStringLiteral("aac");
+    settings.rateControl = QStringLiteral("crf");
+    settings.crf = 18;
+    settings.fpsNum = fpsNum;
+    settings.fpsDen = fpsDen;
+    if (!useAvailableCodecs(settings))
+        return false;
+
+    const QString out = dirPath + QLatin1Char('/') + name + QLatin1Char('.')
+        + Exporter::defaultSuffix(
+                             Exporter::preferredContainer(settings.videoCodecId, settings.audioCodecId));
+
+    QString error;
+    if (!Exporter::run(project, settings, out, &error)) {
+        if (error.contains(QStringLiteral("encoder")))
+            return false;
+        qWarning("export failed: %s", qPrintable(error));
+        return false;
+    }
+    if (outPathOut)
+        *outPathOut = out;
+    return probeVideoRate(out, rate, frameCount);
+}
+
+// 1 second of 120 fps footage — the high-frame-rate source a slow-motion edit is
+// built on. Every frame is a flat grey stepping by 11 levels, so "is this frame
+// new or a repeat?" is unambiguous however the frame is scaled or colour-converted
+// (testsrc is too nearly-static at 64x64 to tell the two apart).
+QString makeHighRateVideo(QTemporaryDir &dir)
+{
+    const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty())
+        return {};
+
+    const QString out = dir.filePath(QStringLiteral("fast.mp4"));
+    const QStringList args{
+        QStringLiteral("-y"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"),
+        QStringLiteral("-i"), QStringLiteral("color=c=black:s=64x64:r=120:d=1"),
+        // Escaped comma: the filtergraph parser would read a bare one as a filter break.
+        QStringLiteral("-vf"), QStringLiteral("geq=lum='mod(N*11\\,256)':cb=128:cr=128"),
+        QStringLiteral("-c:v"), QStringLiteral("libx264"),
+        QStringLiteral("-crf"), QStringLiteral("12"),
+        QStringLiteral("-g"), QStringLiteral("12"),
+        QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+        out,
+    };
+
+    QProcess proc;
+    proc.start(ffmpeg, args);
+    if (!proc.waitForFinished(30000) || proc.exitCode() != 0)
+        return {};
+    return QFileInfo::exists(out) ? out : QString{};
+}
+
+} // namespace
+
+// Pure validation — runs even on an FFmpeg build with no encoders at all.
+void EngineTest::exporterSettingsFromMapValidatesFrameRate()
+{
+    // Unset means "follow the project".
+    const ExportSettings none = Exporter::settingsFromMap({});
+    QCOMPARE(none.fpsNum, 0);
+    QCOMPARE(none.fpsDen, 1);
+
+    // A negative numerator or a zero denominator would produce a time_base the
+    // muxer rejects, so both fall back rather than propagating.
+    const ExportSettings negative = Exporter::settingsFromMap(
+        {{QStringLiteral("fpsNum"), -5}, {QStringLiteral("fpsDen"), 1}});
+    QCOMPARE(negative.fpsNum, 0);
+    QCOMPARE(negative.fpsDen, 1);
+
+    const ExportSettings zeroDen = Exporter::settingsFromMap(
+        {{QStringLiteral("fpsNum"), 30}, {QStringLiteral("fpsDen"), 0}});
+    QCOMPARE(zeroDen.fpsNum, 0);
+    QCOMPARE(zeroDen.fpsDen, 1);
+
+    const ExportSettings tooFast = Exporter::settingsFromMap(
+        {{QStringLiteral("fpsNum"), 9999}, {QStringLiteral("fpsDen"), 1}});
+    QCOMPARE(tooFast.fpsNum, kMaxExportFps);
+    QCOMPARE(tooFast.fpsDen, 1);
+
+    // NTSC rates must survive untouched — this is the whole point of keeping it rational.
+    const ExportSettings ntsc = Exporter::settingsFromMap(
+        {{QStringLiteral("fpsNum"), 30000}, {QStringLiteral("fpsDen"), 1001}});
+    QCOMPARE(ntsc.fpsNum, 30000);
+    QCOMPARE(ntsc.fpsDen, 1001);
+}
+
+void EngineTest::exporterDefaultsToProjectFrameRate()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    AVRational rate{};
+    int64_t frames = 0;
+    if (!exportAtRate(frameRateTestProject(25), 0, 1, dir.path(), QStringLiteral("project"), rate, frames))
+        QSKIP("No usable encoder in this FFmpeg build");
+
+    QVERIFY2(std::abs(av_q2d(rate) - 25.0) < 0.5, qPrintable(QStringLiteral("got %1").arg(av_q2d(rate))));
+    QVERIFY2(std::llabs(frames - 25) <= 1, qPrintable(QStringLiteral("got %1 frames").arg(frames)));
+}
+
+void EngineTest::exporterHonoursExportFrameRateOverride()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    // 25 fps project, 50 fps delivery: the export rate must win, and the file must
+    // hold twice the frames over the same one-second timeline.
+    AVRational rate{};
+    int64_t frames = 0;
+    if (!exportAtRate(frameRateTestProject(25), 50, 1, dir.path(), QStringLiteral("fast"), rate, frames))
+        QSKIP("No usable encoder in this FFmpeg build");
+
+    QVERIFY2(std::abs(av_q2d(rate) - 50.0) < 0.5, qPrintable(QStringLiteral("got %1").arg(av_q2d(rate))));
+    QVERIFY2(std::llabs(frames - 50) <= 1, qPrintable(QStringLiteral("got %1 frames").arg(frames)));
+}
+
+void EngineTest::exporterSupportsNtscFrameRates()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    AVRational rate{};
+    int64_t frames = 0;
+    if (!exportAtRate(frameRateTestProject(30), 30000, 1001, dir.path(), QStringLiteral("ntsc"), rate,
+                      frames)) {
+        QSKIP("No usable encoder in this FFmpeg build");
+    }
+
+    // Tolerance is deliberately tighter than the 0.03 gap between 29.97 and 30:
+    // an integer-fps exporter would land on 30.0 and fail here.
+    const double expected = 30000.0 / 1001.0;
+    QVERIFY2(std::abs(av_q2d(rate) - expected) < 0.01,
+             qPrintable(QStringLiteral("got %1, expected %2").arg(av_q2d(rate)).arg(expected)));
+    QVERIFY2(std::llabs(frames - 30) <= 1, qPrintable(QStringLiteral("got %1 frames").arg(frames)));
+}
+
+// The point of the feature: a higher export rate must yield genuinely new frames
+// for a slowed clip, not duplicates — but only while the source still has them.
+// 120 fps footage at 0.5x advances source time at 60 source-fps, so 60 fps of
+// export is exactly the ceiling and 240 fps is past it.
+void EngineTest::exporterFrameRateAddsRealDetailToSlowedClips()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString source = makeHighRateVideo(dir);
+    if (source.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    // Fixture sanity: the whole test is meaningless unless the source really does
+    // change every frame.
+    int sourceTotal = 0;
+    int sourceChanged = 0;
+    QVERIFY(countDistinctFrames(source, sourceTotal, sourceChanged));
+    QVERIFY2(sourceChanged > 100,
+             qPrintable(QStringLiteral("source only had %1/%2 changing frames")
+                            .arg(sourceChanged)
+                            .arg(sourceTotal)));
+
+    drift::Project project;
+    project.setResolution(64, 64);
+    project.setFps(30);
+    project.tracks().clear();
+    project.tracks().append(drift::Track{.type = drift::TrackType::Video});
+
+    drift::Clip clip;
+    clip.id = QStringLiteral("slowmo");
+    clip.type = drift::ClipType::Video;
+    clip.path = source;
+    clip.timelineStart = 0;
+    clip.speed = 0.5;
+    clip.srcIn = 0;
+    // 1s of source stretched over 2s of timeline.
+    clip.timelineDuration = drift::secondsToUs(2.0);
+    clip.srcOut = clip.sourceSpanUs();
+    project.tracks()[0].clips.append(clip);
+
+    struct Result
+    {
+        int64_t encoded = 0; // packets written by the exporter
+        int total = 0;       // frames the decoder handed back
+        int changed = 0;
+    };
+    const auto exportAndCount = [&](int fps, const QString &name, Result &result) -> bool {
+        AVRational rate{};
+        QString path;
+        if (!exportAtRate(project, fps, 1, dir.path(), name, rate, result.encoded, &path))
+            return false;
+        return countDistinctFrames(path, result.total, result.changed);
+    };
+
+    Result slow;
+    Result fast;
+    Result beyond;
+    if (!exportAndCount(30, QStringLiteral("at30"), slow))
+        QSKIP("No usable encoder in this FFmpeg build");
+    QVERIFY(exportAndCount(60, QStringLiteral("at60"), fast));
+    QVERIFY(exportAndCount(240, QStringLiteral("at240"), beyond));
+
+    QCOMPARE(slow.encoded, 60);
+    QCOMPARE(fast.encoded, 120);
+    QCOMPARE(beyond.encoded, 480);
+
+    // Decoded count can trail the packet count by one when the mp4 edit list makes
+    // the demuxer drop the first frame; the packet counts above are the exact check.
+    QVERIFY2(std::abs(slow.total - 60) <= 1, qPrintable(QStringLiteral("decoded %1").arg(slow.total)));
+    QVERIFY2(std::abs(fast.total - 120) <= 1, qPrintable(QStringLiteral("decoded %1").arg(fast.total)));
+    QVERIFY2(std::abs(beyond.total - 480) <= 1,
+             qPrintable(QStringLiteral("decoded %1").arg(beyond.total)));
+
+    // Under the ceiling, essentially every frame is new: the extra frames are real
+    // temporal detail pulled from the source, which is what makes slow-mo smooth.
+    QVERIFY2(slow.changed >= 55, qPrintable(QStringLiteral("30fps: %1/60 new").arg(slow.changed)));
+    QVERIFY2(fast.changed >= 110, qPrintable(QStringLiteral("60fps: %1/120 new").arg(fast.changed)));
+    QVERIFY2(fast.changed > slow.changed * 1.5,
+             qPrintable(QStringLiteral("60fps gave %1 new frames vs %2 at 30fps")
+                            .arg(fast.changed)
+                            .arg(slow.changed)));
+
+    // Past the ceiling the source has nothing left to give, so frames repeat —
+    // asking for 4x the rate does not buy 4x the detail.
+    QVERIFY2(beyond.changed < beyond.total / 2,
+             qPrintable(QStringLiteral("240fps: %1/480 new").arg(beyond.changed)));
+    QVERIFY2(beyond.changed < fast.changed * 1.5,
+             qPrintable(QStringLiteral("240fps gave %1 new frames vs %2 at 60fps")
+                            .arg(beyond.changed)
+                            .arg(fast.changed)));
 }
 
 // The audio-effects addon content must parse into a usable catalog: known ids resolve, categories
@@ -2897,7 +3989,357 @@ void EngineTest::mixerHasNoBlockBoundaryDropout()
 // mix() is running on the audio thread. Taking a reference into the hash instead of a strong
 // reference — and touching the hash at all without a lock — segfaults inside the rack's buffers
 // once the timing lines up, which is what "crashed after a while" looks like from the outside.
-void EngineTest::mixerSurvivesConcurrentEffectRackReset()
+namespace {
+
+constexpr int kToneRate = 48000;
+constexpr drift::TimeUs kToneSourceUs = 2'000'000;
+constexpr double kTonePi = 3.14159265358979323846;
+
+// One audio clip covering the whole tone, retimed either by a constant speed or by a curve.
+drift::Project makeRetimedToneProject(const QString &path, double speed, bool reverse,
+                                      const drift::SpeedCurve &curve = {})
+{
+    drift::Project project;
+    project.setSampleRate(kToneRate);
+    project.tracks().clear(); // drop the default timeline so the clip is the only thing in the mix
+    drift::Track track{.type = drift::TrackType::Audio};
+    drift::Clip clip;
+    clip.id = QStringLiteral("tone");
+    clip.type = drift::ClipType::Audio;
+    clip.path = path;
+    clip.timelineStart = 0;
+    clip.srcIn = 0;
+    clip.srcOut = kToneSourceUs;
+    clip.speed = speed;
+    clip.reverse = reverse;
+    clip.speedCurve = curve;
+    clip.timelineDuration = static_cast<drift::TimeUs>(kToneSourceUs / speed);
+    if (!curve.isEmpty())
+        clip.syncDurationFromSpeedCurve();
+    track.clips.append(clip);
+    project.tracks().append(track);
+    return project;
+}
+
+double blockRms(const QVector<float> &interleaved, int frames)
+{
+    double sumSq = 0.0;
+    for (int i = 0; i < frames * 2; ++i)
+        sumSq += static_cast<double>(interleaved[i]) * interleaved[i];
+    return std::sqrt(sumSq / (frames * 2));
+}
+
+// Mixes `blocks` contiguous buffers and returns each one's RMS, appending the samples to `collected`
+// when it is given. A whole-run RMS would pass a design that emits one good buffer in four, which is
+// exactly what a stretcher without a FIFO produces — the per-block figures are the point.
+QList<double> mixBlockRms(AudioMixer &mixer, int blocks, int frames, QVector<float> *collected = nullptr)
+{
+    QVector<float> buffer(frames * 2);
+    QList<double> rms;
+    for (int b = 0; b < blocks; ++b) {
+        const drift::TimeUs t =
+            static_cast<drift::TimeUs>(b) * frames * drift::kUsPerSecond / kToneRate;
+        mixer.mix(t, frames, kToneRate, buffer.data());
+        rms.append(blockRms(buffer, frames));
+        if (collected)
+            collected->append(buffer);
+    }
+    return rms;
+}
+
+double goertzelMagnitude(const QVector<float> &interleaved, double frequency)
+{
+    const int frames = interleaved.size() / 2;
+    const double w = 2.0 * kTonePi * frequency / kToneRate;
+    const double coeff = 2.0 * std::cos(w);
+    double s1 = 0.0;
+    double s2 = 0.0;
+    for (int i = 0; i < frames; ++i) {
+        const double s = interleaved[i * 2] + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s;
+    }
+    return std::sqrt(qMax(0.0, s1 * s1 + s2 * s2 - coeff * s1 * s2));
+}
+
+} // namespace
+
+// Regression gate for the silence a stateless per-block stretcher produced: it rebuilt its filter
+// from scratch every buffer, and a WSOLA stretcher fed one short buffer with no history emits
+// nothing at all.
+void EngineTest::retimedClipAudioIsNotSilent()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = makeToneAudio(dir);
+    if (path.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    struct Case
+    {
+        const char *name;
+        double speed;
+        drift::SpeedCurve curve;
+    };
+    const QList<Case> cases{
+        {"0.5x", 0.5, {}},
+        {"2.0x", 2.0, {}},
+        {"flat curve 0.75x", 1.0, drift::SpeedCurve::flat(0.75)},
+    };
+
+    for (const Case &c : cases) {
+        drift::Project project = makeRetimedToneProject(path, c.speed, false, c.curve);
+        AudioMixer mixer;
+        mixer.setProject(&project);
+
+        constexpr int kFrames = 1024;
+        const drift::TimeUs durationUs = project.tracks().at(0).clips.at(0).timelineDuration;
+        const int blocks = static_cast<int>(durationUs * kToneRate / drift::kUsPerSecond / kFrames) - 2;
+        QVERIFY(blocks > 20);
+
+        QVector<float> collected;
+        const QList<double> rms = mixBlockRms(mixer, blocks, kFrames, &collected);
+        QVERIFY2(blockRms(collected, collected.size() / 2) > 0.05, c.name);
+        for (int b = 2; b < rms.size(); ++b) {
+            QVERIFY2(rms.at(b) > 0.02,
+                     qPrintable(QStringLiteral("%1: block %2 rms %3")
+                                    .arg(QString::fromUtf8(c.name))
+                                    .arg(b)
+                                    .arg(rms.at(b))));
+        }
+    }
+}
+
+// A tempo change that took the pitch with it would be a resample, not a stretch.
+void EngineTest::retimedAudioPreservesPitch()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = makeToneAudio(dir);
+    if (path.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    for (double speed : {0.5, 2.0}) {
+        drift::Project project = makeRetimedToneProject(path, speed, false);
+        AudioMixer mixer;
+        mixer.setProject(&project);
+
+        QVector<float> collected;
+        mixBlockRms(mixer, 40, 1024, &collected);
+
+        const double tone = goertzelMagnitude(collected, 440.0);
+        QVERIFY2(tone > 10.0 * goertzelMagnitude(collected, 220.0), qPrintable(QString::number(speed)));
+        QVERIFY2(tone > 10.0 * goertzelMagnitude(collected, 880.0), qPrintable(QString::number(speed)));
+    }
+}
+
+// The retimer walks the source itself, so a cursor that ran fast or slow would show up as audio
+// that ends early or keeps going past the clip.
+void EngineTest::retimedAudioLengthTracksTimeline()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = makeToneAudio(dir);
+    if (path.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    drift::Project project = makeRetimedToneProject(path, 0.5, false);
+    AudioMixer mixer;
+    mixer.setProject(&project);
+
+    constexpr int kFrames = 1024;
+    const int blocks = static_cast<int>(5'000'000LL * kToneRate / drift::kUsPerSecond / kFrames);
+    QVector<float> collected;
+    mixBlockRms(mixer, blocks, kFrames, &collected);
+
+    int lastAudible = -1;
+    for (int i = 0; i < collected.size() / 2; ++i) {
+        if (std::fabs(collected[i * 2]) > 0.01)
+            lastAudible = i;
+    }
+    QVERIFY(lastAudible > 0);
+    const drift::TimeUs endUs =
+        static_cast<drift::TimeUs>(lastAudible) * drift::kUsPerSecond / kToneRate;
+    QVERIFY2(std::llabs(endUs - 4'000'000) < 150'000, qPrintable(QString::number(endUs)));
+}
+
+// Preview asks for whatever the sink wants; export asks for one video frame's worth. Nothing in the
+// pipeline may be sized off a single block length.
+void EngineTest::retimedAudioSurvivesBlockSizeChanges()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = makeToneAudio(dir);
+    if (path.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    drift::Project project = makeRetimedToneProject(path, 0.5, false);
+    AudioMixer mixer;
+    mixer.setProject(&project);
+
+    const QList<int> sizes{1024, 1600, 256};
+    QVector<float> buffer(1600 * 2);
+    drift::TimeUs t = 0;
+    for (int b = 0; b < 90; ++b) {
+        const int frames = sizes.at(b % sizes.size());
+        mixer.mix(t, frames, kToneRate, buffer.data());
+        if (b >= 2) {
+            QVERIFY2(blockRms(buffer, frames) > 0.02,
+                     qPrintable(QStringLiteral("block %1 of %2 frames").arg(b).arg(frames)));
+        }
+        t += static_cast<drift::TimeUs>(frames) * drift::kUsPerSecond / kToneRate;
+    }
+}
+
+void EngineTest::reversedRetimedAudioIsNotSilent()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = makeToneAudio(dir);
+    if (path.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    drift::Project project = makeRetimedToneProject(path, 0.5, true);
+    AudioMixer mixer;
+    mixer.setProject(&project);
+
+    constexpr int kFrames = 1024;
+    const QList<double> rms = mixBlockRms(mixer, 120, kFrames);
+    for (int b = 2; b < rms.size(); ++b)
+        QVERIFY2(rms.at(b) > 0.02, qPrintable(QStringLiteral("block %1 rms %2").arg(b).arg(rms.at(b))));
+}
+
+// A ramp on an audio-track clip, which is the case with no picture to fall back on: the mixer has
+// to change tempo every block and still come out with continuous sound over the whole retimed
+// length. A flat curve would not exercise the per-block tempo at all.
+void EngineTest::rampedSpeedCurveRetimesAudioClip()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = makeToneAudio(dir);
+    if (path.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    QList<drift::SpeedPoint> points;
+    points.append(drift::SpeedPoint{.pos = 0.0, .speed = 0.5});
+    points.append(drift::SpeedPoint{.pos = 1.0, .speed = 2.0});
+    drift::SpeedCurve curve;
+    curve.setPoints(points);
+
+    drift::Project project = makeRetimedToneProject(path, 1.0, false, curve);
+    const drift::Clip &clip = project.tracks().at(0).clips.at(0);
+    QCOMPARE(clip.type, drift::ClipType::Audio);
+    QVERIFY(clip.hasSpeedCurve());
+    // Timeline length is the integral of 1/speed over the source: (2/3)·ln4 ≈ 0.924 of it here.
+    // Asserting the number rather than just "it changed" is what would catch the ramp being read
+    // as its endpoint value or its average.
+    QVERIFY2(std::llabs(clip.timelineDuration - 1'848'000) < 60'000,
+             qPrintable(QString::number(clip.timelineDuration)));
+
+    AudioMixer mixer;
+    mixer.setProject(&project);
+
+    constexpr int kFrames = 1024;
+    const int blocks = static_cast<int>(clip.timelineDuration * kToneRate / drift::kUsPerSecond / kFrames) - 2;
+    QVERIFY(blocks > 20);
+
+    QVector<float> collected;
+    const QList<double> rms = mixBlockRms(mixer, blocks, kFrames, &collected);
+    for (int b = 2; b < rms.size(); ++b)
+        QVERIFY2(rms.at(b) > 0.02, qPrintable(QStringLiteral("block %1 rms %2").arg(b).arg(rms.at(b))));
+
+    // Pitch has to hold across the whole ramp, not just at the ends.
+    const double tone = goertzelMagnitude(collected, 440.0);
+    QVERIFY(tone > 10.0 * goertzelMagnitude(collected, 220.0));
+    QVERIFY(tone > 10.0 * goertzelMagnitude(collected, 880.0));
+}
+
+// The retimer on its own, with a generated source: no ffmpeg, no decoder timing, and the source
+// frame count is observable, which is what pins the input and output rates together.
+void EngineTest::clipAudioRetimerStreamsSyntheticSource()
+{
+    constexpr int kFrames = 1024;
+    constexpr int kBlocks = 400;
+
+    qint64 pulled = 0;
+    auto tonePull = [&pulled](drift::TimeUs startUs, int frames, float *dst) {
+        const qint64 startFrame = startUs * kToneRate / drift::kUsPerSecond;
+        for (int i = 0; i < frames; ++i) {
+            const double phase = 2.0 * kTonePi * 440.0 * static_cast<double>(startFrame + i) / kToneRate;
+            dst[i * 2] = dst[i * 2 + 1] = static_cast<float>(std::sin(phase));
+        }
+        pulled += frames;
+        return frames;
+    };
+
+    QVector<float> out(kFrames * 2);
+    for (double tempo : {0.5, 1.5, 4.0}) {
+        drift::ClipAudioRetimer retimer;
+        pulled = 0;
+        for (int b = 0; b < kBlocks; ++b) {
+            drift::ClipAudioBlock block;
+            block.identity = 1;
+            block.sampleRate = kToneRate;
+            block.timelineStartUs =
+                static_cast<drift::TimeUs>(b) * kFrames * drift::kUsPerSecond / kToneRate;
+            block.tempo = tempo;
+            retimer.process(block, tonePull, kFrames, out.data());
+            if (b >= 2) {
+                QVERIFY2(blockRms(out, kFrames) > 0.2,
+                         qPrintable(QStringLiteral("tempo %1 block %2").arg(tempo).arg(b)));
+            }
+        }
+        // Consumption is what proves the loop is closed: a stretcher fed the wrong amount either
+        // starves or piles up a backlog, and both are silent failures over a short run.
+        const double expected = static_cast<double>(kBlocks) * kFrames * tempo;
+        QVERIFY2(std::fabs(pulled - expected) / expected < 0.1,
+                 qPrintable(QStringLiteral("tempo %1 pulled %2, expected %3")
+                                .arg(tempo)
+                                .arg(pulled)
+                                .arg(expected)));
+    }
+
+    // A ramp changes tempo every block; the total source consumed must still match its integral.
+    {
+        drift::ClipAudioRetimer retimer;
+        pulled = 0;
+        double integral = 0.0;
+        for (int b = 0; b < kBlocks; ++b) {
+            const double tempo = 0.5 + 1.5 * static_cast<double>(b) / (kBlocks - 1);
+            integral += tempo * kFrames;
+            drift::ClipAudioBlock block;
+            block.identity = 2;
+            block.sampleRate = kToneRate;
+            block.timelineStartUs =
+                static_cast<drift::TimeUs>(b) * kFrames * drift::kUsPerSecond / kToneRate;
+            block.tempo = tempo;
+            retimer.process(block, tonePull, kFrames, out.data());
+            if (b >= 2)
+                QVERIFY2(blockRms(out, kFrames) > 0.2, qPrintable(QStringLiteral("ramp block %1").arg(b)));
+        }
+        QVERIFY2(std::fabs(pulled - integral) / integral < 0.1,
+                 qPrintable(QStringLiteral("ramp pulled %1, expected %2").arg(pulled).arg(integral)));
+    }
+
+    // A source that gives nothing must produce silence and stop asking, not spin.
+    {
+        drift::ClipAudioRetimer retimer;
+        int calls = 0;
+        auto emptyPull = [&calls](drift::TimeUs, int, float *) {
+            ++calls;
+            return 0;
+        };
+        drift::ClipAudioBlock block;
+        block.identity = 3;
+        block.sampleRate = kToneRate;
+        block.tempo = 0.5;
+        retimer.process(block, emptyPull, kFrames, out.data());
+        QCOMPARE(blockRms(out, kFrames), 0.0);
+        QCOMPARE(calls, 1);
+    }
+}
+
+void EngineTest::mixerSurvivesConcurrentClipAudioReset()
 {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -2925,6 +4367,17 @@ void EngineTest::mixerSurvivesConcurrentEffectRackReset()
     track.clips.append(clip);
     project.tracks().append(track);
 
+    // A retimed clip with no effect chain reaches the same per-clip state through a different door:
+    // it needs its stretcher whether or not it has a rack.
+    drift::Track retimedTrack{.type = drift::TrackType::Audio};
+    drift::Clip retimed = clip;
+    retimed.id = QStringLiteral("tone-slow");
+    retimed.audioEffects.clear();
+    retimed.speed = 0.5;
+    retimed.timelineDuration = kDurationUs * 2;
+    retimedTrack.clips.append(retimed);
+    project.tracks().append(retimedTrack);
+
     AudioMixer mixer;
     mixer.setProject(&project);
 
@@ -2939,7 +4392,7 @@ void EngineTest::mixerSurvivesConcurrentEffectRackReset()
     }));
     QScopedPointer<QThread> resetThread(QThread::create([&mixer, &stop] {
         while (!stop.load(std::memory_order_relaxed))
-            mixer.resetEffectRacks();
+            mixer.resetClipAudioState();
     }));
 
     mixThread->start();

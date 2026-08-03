@@ -87,42 +87,42 @@ double tileSeconds(int level, qint64 index)
     return static_cast<double>(index) * std::pow(2.0, level);
 }
 
-QImage frameToImage(const AVFrame *frame, int width, int height)
+// `swsCache` is owned by the caller and reused across frames: sws_getCachedContext hands back
+// the same scaler whenever the geometry is unchanged, which it is for every frame of a source.
+// It frees the old one itself when the parameters do change, so storing its result is enough.
+QImage frameToImage(const AVFrame *frame, int width, int height, SwsContext **swsCache)
 {
-    SwsContext *sws = sws_getContext(frame->width, frame->height,
+    *swsCache = sws_getCachedContext(*swsCache, frame->width, frame->height,
                                      static_cast<AVPixelFormat>(frame->format),
                                      width, height, AV_PIX_FMT_RGB24, SWS_BILINEAR,
                                      nullptr, nullptr, nullptr);
-    if (!sws)
+    if (!*swsCache)
         return {};
 
     AVFrame *rgb = av_frame_alloc();
-    if (!rgb) {
-        sws_freeContext(sws);
+    if (!rgb)
         return {};
-    }
 
     rgb->format = AV_PIX_FMT_RGB24;
     rgb->width = width;
     rgb->height = height;
     if (av_frame_get_buffer(rgb, 0) < 0) {
         av_frame_free(&rgb);
-        sws_freeContext(sws);
         return {};
     }
 
-    sws_scale(sws, frame->data, frame->linesize, 0, frame->height, rgb->data, rgb->linesize);
+    sws_scale(*swsCache, frame->data, frame->linesize, 0, frame->height, rgb->data, rgb->linesize);
 
     QImage image(rgb->data[0], width, height, rgb->linesize[0], QImage::Format_RGB888);
     const QImage copy = image.copy();
 
     av_frame_free(&rgb);
-    sws_freeContext(sws);
     return copy;
 }
 
 bool decodeNextVideoFrame(AVFormatContext *fmt, int videoStreamIndex, AVCodecContext *codecCtx,
-                          AVPacket *packet, AVFrame *frame, QImage &outImage, int width, int height)
+                          AVPacket *packet, AVFrame *frame, QImage &outImage, int width, int height,
+                          SwsContext **swsCache)
 {
     while (av_read_frame(fmt, packet) >= 0) {
         if (packet->stream_index != videoStreamIndex) {
@@ -143,7 +143,7 @@ bool decodeNextVideoFrame(AVFormatContext *fmt, int videoStreamIndex, AVCodecCon
             if (rc < 0)
                 return false;
 
-            outImage = frameToImage(frame, width, height);
+            outImage = frameToImage(frame, width, height, swsCache);
             return !outImage.isNull();
         }
     }
@@ -152,7 +152,8 @@ bool decodeNextVideoFrame(AVFormatContext *fmt, int videoStreamIndex, AVCodecCon
 }
 
 bool seekAndDecodeFrame(AVFormatContext *fmt, int videoStreamIndex, AVCodecContext *codecCtx,
-                        int64_t timeUs, QImage &outImage, int width, int height)
+                        int64_t timeUs, QImage &outImage, int width, int height,
+                        SwsContext **swsCache)
 {
     AVStream *stream = fmt->streams[videoStreamIndex];
     const int64_t targetTs = av_rescale_q(timeUs, {1, AV_TIME_BASE}, stream->time_base);
@@ -161,8 +162,9 @@ bool seekAndDecodeFrame(AVFormatContext *fmt, int videoStreamIndex, AVCodecConte
 
     AVPacket *packet = av_packet_alloc();
     AVFrame *frame = av_frame_alloc();
-    const bool ok = packet && frame && decodeNextVideoFrame(fmt, videoStreamIndex, codecCtx,
-                                                            packet, frame, outImage, width, height);
+    const bool ok = packet && frame
+                    && decodeNextVideoFrame(fmt, videoStreamIndex, codecCtx, packet, frame,
+                                            outImage, width, height, swsCache);
 
     av_frame_free(&frame);
     av_packet_free(&packet);
@@ -176,24 +178,28 @@ bool decodeFirstVideoFrame(AVFormatContext *fmt, int videoStreamIndex, AVCodecCo
 
     AVPacket *packet = av_packet_alloc();
     AVFrame *frame = av_frame_alloc();
+    SwsContext *sws = nullptr;
     QImage image;
     bool saved = false;
     int packetsRead = 0;
 
     while (!saved && packetsRead < 400 && packet && frame) {
-        if (!decodeNextVideoFrame(fmt, videoStreamIndex, codecCtx, packet, frame, image, width, height))
+        if (!decodeNextVideoFrame(fmt, videoStreamIndex, codecCtx, packet, frame, image, width,
+                                  height, &sws))
             break;
         ++packetsRead;
         saved = image.save(outPath, "JPG", 85);
     }
 
+    sws_freeContext(sws);
     av_frame_free(&frame);
     av_packet_free(&packet);
     return saved;
 }
 
 bool openVideoDecoder(const QString &absolutePath, AVFormatContext **fmtOut,
-                      int *videoStreamIndexOut, AVCodecContext **codecCtxOut)
+                      int *videoStreamIndexOut, AVCodecContext **codecCtxOut,
+                      bool singleThreaded = false)
 {
     AVFormatContext *fmt = nullptr;
     if (avformat_open_input(&fmt, absolutePath.toUtf8().constData(), nullptr, nullptr) < 0)
@@ -226,6 +232,12 @@ bool openVideoDecoder(const QString &absolutePath, AVFormatContext **fmtOut,
 
     AVCodecContext *codecCtx = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(codecCtx, codecPar);
+    if (singleThreaded) {
+        // Tiles are seek-then-decode-one-frame, so frame threading buys no throughput but
+        // does allocate a decoded-picture buffer per worker thread.
+        codecCtx->thread_count = 1;
+        codecCtx->thread_type = 0;
+    }
     if (avcodec_open2(codecCtx, codec, nullptr) < 0) {
         avcodec_free_context(&codecCtx);
         avformat_close_input(&fmt);
@@ -315,11 +327,13 @@ QString MediaThumbnail::generateFilmstrip(const QString &sourcePath, const QStri
     QImage strip(frameW * frameCount, frameH, QImage::Format_RGB888);
     strip.fill(Qt::black);
 
+    SwsContext *sws = nullptr;
     bool anyFrame = false;
     for (int i = 0; i < frameCount; ++i) {
         const int64_t timeUs = durationUs > 0 ? (durationUs * i) / frameCount : 0;
         QImage frame;
-        if (!seekAndDecodeFrame(fmt, videoStreamIndex, codecCtx, timeUs, frame, frameW, frameH))
+        if (!seekAndDecodeFrame(fmt, videoStreamIndex, codecCtx, timeUs, frame, frameW, frameH,
+                                &sws))
             continue;
 
         anyFrame = true;
@@ -327,6 +341,7 @@ QString MediaThumbnail::generateFilmstrip(const QString &sourcePath, const QStri
         painter.drawImage(i * frameW, 0, frame);
     }
 
+    sws_freeContext(sws);
     avcodec_free_context(&codecCtx);
     avformat_close_input(&fmt);
 
@@ -346,8 +361,40 @@ QString MediaThumbnail::tilePath(const QString &sourcePath, int level, qint64 in
            + QStringLiteral("_t%1_%2.jpg").arg(level).arg(index);
 }
 
-QList<qint64> MediaThumbnail::generateTiles(const QString &sourcePath, int level,
-                                            const QList<qint64> &indices)
+MediaThumbnail::TileDecoder::~TileDecoder()
+{
+    close();
+}
+
+void MediaThumbnail::TileDecoder::close()
+{
+    if (m_sws) {
+        sws_freeContext(m_sws);
+        m_sws = nullptr;
+    }
+    if (m_codecCtx)
+        avcodec_free_context(&m_codecCtx);
+    if (m_fmt)
+        avformat_close_input(&m_fmt);
+    m_videoStreamIndex = -1;
+    m_path.clear();
+}
+
+bool MediaThumbnail::TileDecoder::ensureOpen(const QString &absolutePath)
+{
+    if (m_fmt && m_path == absolutePath)
+        return true;
+
+    close();
+    if (!openVideoDecoder(absolutePath, &m_fmt, &m_videoStreamIndex, &m_codecCtx, true))
+        return false;
+
+    m_path = absolutePath;
+    return true;
+}
+
+QList<qint64> MediaThumbnail::TileDecoder::generateTiles(const QString &sourcePath, int level,
+                                                         const QList<qint64> &indices)
 {
     QList<qint64> produced;
     const QString absolutePath = QFileInfo(sourcePath).absoluteFilePath();
@@ -366,24 +413,18 @@ QList<qint64> MediaThumbnail::generateTiles(const QString &sourcePath, int level
 
     std::sort(todo.begin(), todo.end());
 
-    AVFormatContext *fmt = nullptr;
-    int videoStreamIndex = -1;
-    AVCodecContext *codecCtx = nullptr;
-    if (!openVideoDecoder(absolutePath, &fmt, &videoStreamIndex, &codecCtx))
+    if (!ensureOpen(absolutePath))
         return produced;
 
     for (const qint64 index : std::as_const(todo)) {
         const int64_t timeUs = static_cast<int64_t>(tileSeconds(level, index) * 1'000'000.0);
         QImage frame;
-        if (!seekAndDecodeFrame(fmt, videoStreamIndex, codecCtx, timeUs, frame,
-                                kFilmstripFrameWidth, kFilmstripFrameHeight))
+        if (!seekAndDecodeFrame(m_fmt, m_videoStreamIndex, m_codecCtx, timeUs, frame,
+                                kFilmstripFrameWidth, kFilmstripFrameHeight, &m_sws))
             continue;
         if (frame.save(tilePath(absolutePath, level, index), "JPG", 85))
             produced.append(index);
     }
-
-    avcodec_free_context(&codecCtx);
-    avformat_close_input(&fmt);
 
     return produced;
 }
@@ -427,10 +468,13 @@ QString MediaThumbnail::generateAtTime(const QString &sourcePath, double sourceS
         return {};
 
     const int64_t timeUs = static_cast<int64_t>(sourceSeconds * 1'000'000.0);
+    SwsContext *sws = nullptr;
     QImage frame;
-    const bool ok = seekAndDecodeFrame(fmt, videoStreamIndex, codecCtx, timeUs, frame, 320, 180)
+    const bool ok = seekAndDecodeFrame(fmt, videoStreamIndex, codecCtx, timeUs, frame, 320, 180,
+                                       &sws)
                     && frame.save(outPath, "JPG", 85);
 
+    sws_freeContext(sws);
     avcodec_free_context(&codecCtx);
     avformat_close_input(&fmt);
 

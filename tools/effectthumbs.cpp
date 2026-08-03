@@ -118,6 +118,52 @@ QImage makeFaceBase(int size, drift::FaceAnchors *anchorsOut)
     a.angle = 0.0;
     a.eyeRadius = 0.035;
     a.score = 1.0;
+
+    // Contours matching what was drawn above. Without these the beauty packages see
+    // u_faceHasContours = 0, pass the frame straight through, and every makeup thumbnail comes out
+    // as a bare face — and thumbnails are committed assets that must be reproducible on a clean
+    // checkout, where no face model is installed to detect a real one.
+    //
+    // The base is square, so width-normalized coordinates are the uv ones and no aspect correction
+    // is needed anywhere in here.
+    const double mouthYn = mouthY / S;
+    const double eyeYn = eyeY / S;
+    a.contour.reserve(drift::contour::kTotalPoints);
+
+    auto appendEllipse = [&](QPointF c, double erx, double ery, int count, double startDeg) {
+        for (int i = 0; i < count; ++i) {
+            const double t = startDeg * M_PI / 180.0 + 2.0 * M_PI * double(i) / double(count);
+            a.contour.append(QPointF(c.x() + erx * std::cos(t), c.y() + ery * std::sin(t)));
+        }
+    };
+
+    // Oval: wound from the forehead clockwise, matching FACEMESH_FACE_OVAL's own direction.
+    appendEllipse(QPointF(0.5, 0.5), 0.26, 0.32, drift::contour::kOval.count, -90.0);
+    // Lips, drawn as the arc above: outer loop starts at the image-left corner.
+    appendEllipse(QPointF(0.5, mouthYn), 0.10, 0.045, drift::contour::kLipOuter.count, 180.0);
+    appendEllipse(QPointF(0.5, mouthYn), 0.075, 0.022, drift::contour::kLipInner.count, 180.0);
+    // Eye rings must start at the inner corner and run along the *upper* lid first, because
+    // contour::kEyeLeftUpper slices the first nine points as the lash line.
+    appendEllipse(QPointF(0.5 - 0.11, eyeYn), 0.06, 0.038, drift::contour::kEyeLeft.count, 0.0);
+    appendEllipse(QPointF(0.5 + 0.11, eyeYn), 0.06, 0.038, drift::contour::kEyeRight.count, 180.0);
+    // Brows sit above the eyes; image y grows downward, so that is a smaller y.
+    appendEllipse(QPointF(0.5 - 0.11, eyeYn - 0.075), 0.075, 0.018,
+                  drift::contour::kBrowLeft.count, 180.0);
+    appendEllipse(QPointF(0.5 + 0.11, eyeYn - 0.075), 0.075, 0.018,
+                  drift::contour::kBrowRight.count, 0.0);
+    a.hasContours = a.contour.size() == drift::contour::kTotalPoints;
+    a.cheekLeft = QPointF(0.5 - 0.15, 0.56);
+    a.cheekRight = QPointF(0.5 + 0.15, 0.56);
+
+    // Facing the camera square on: identity rotation, right along +x and forward at the viewer.
+    a.hasPose = true;
+    a.poseQx = a.poseQy = a.poseQz = 0.0;
+    a.poseQw = 1.0;
+    a.poseScale = 0.22;
+    a.poseOx = 0.5;
+    a.poseOy = eyeYn;
+    a.poseOz = 0.0;
+
     *anchorsOut = a;
     return image;
 }
@@ -126,9 +172,14 @@ QMap<QString, QVariant> dramaticDefaults(const EffectPresetEntry &def)
 {
     QMap<QString, QVariant> params;
     for (const drift::EffectParamSpec &spec : def.meta.parameters) {
+        // A colour has no "more dramatic" direction — the package's shade is the shade.
+        if (spec.isColor()) {
+            params.insert(spec.key, spec.defaultColorHex);
+            continue;
+        }
         double v = spec.defaultValue;
         // Push slider effects toward a readable preview when defaults are subtle.
-        if (!spec.isBoolean && spec.max > spec.min) {
+        if (!spec.isBoolean() && spec.max > spec.min) {
             const double mid = (spec.min + spec.max) * 0.5;
             if (qFuzzyCompare(v, 0.0) || qFuzzyCompare(v, 1.0))
                 v = mid + (spec.max - mid) * 0.45;

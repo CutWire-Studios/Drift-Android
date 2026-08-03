@@ -108,7 +108,7 @@ PanelFrame {
                 }
 
                 Behavior on cropZoom {
-                    NumberAnimation { duration: Theme.durationBase; easing.type: Theme.easing }
+                    NumberAnimation { duration: Theme.durationBase; easing.type: Theme.easingInOut }
                 }
 
                 Rectangle {
@@ -196,12 +196,29 @@ PanelFrame {
                         }
                     }
 
+                    // On a brand-new project this — the largest, most central panel —
+                    // said nothing at all, while the timeline below it explained what
+                    // to do. The terse gap message below is right when a project has
+                    // content and the playhead is simply over a gap; it is not an
+                    // answer to "what do I do first".
+                    EmptyState {
+                        anchors.centerIn: parent
+                        width: Math.min(parent.width - Theme.spacing3xl, 280)
+                        visible: EditorState.tracks.length === 0
+                        glyph: Theme.icons.film
+                        title: qsTr("Nothing to preview yet")
+                        // No CTA: importing and adding tracks both live in the panels
+                        // either side, and this one should not compete with them.
+                        hint: qsTr("Import media and drag it onto the timeline below to see it here.")
+                    }
+
                     // Fades rather than popping, so scrubbing across a gap no
                     // longer flickers this text on and off.
                     Text {
                         anchors.centerIn: parent
                         visible: opacity > 0
-                        opacity: EditorState.playback.hasFrame ? 0 : 1
+                        opacity: EditorState.playback.hasFrame
+                                 || EditorState.tracks.length === 0 ? 0 : 1
                         text: EditorState.activeAudioClipAtPlayhead().path
                               ? qsTr("Audio only") : qsTr("No clip at the current time")
                         // Drawn on the letterbox scrim, not a panel surface, so it
@@ -258,6 +275,7 @@ PanelFrame {
 
             ThemedSlider {
                 id: scrubSlider
+                label: qsTr("Seek")
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.left: parent.left
                 anchors.right: parent.right

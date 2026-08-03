@@ -41,7 +41,7 @@ Item {
         if (t < 0 || !tracks || t >= tracks.length)
             return false
         const track = tracks[t]
-        if (track.type !== "video" && track.type !== "shape")
+        if (track.type !== "video" && track.type !== "shape" && track.type !== "text")
             return false
         if (c < 0 || c >= track.clips.length)
             return false
@@ -134,9 +134,9 @@ Item {
             width: parent.width
             wrapMode: Text.WordWrap
             visible: !root.hasActiveTransition && !root.canAddOutgoingTransition
-            text: root.clipKind === "video" || root.clipKind === "shape"
+            text: root.clipKind === "video" || root.clipKind === "shape" || root.clipKind === "text"
                   ? qsTr("Select where two clips overlap (shown in purple), or drag a clip so it overlaps the next one.")
-                  : qsTr("Transitions work between two clips on a video or shape track.")
+                  : qsTr("Transitions work between two clips on a video, shape, or text track.")
             color: Theme.mutedForeground
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontSizeSm
@@ -241,11 +241,14 @@ Item {
             }
 
             // Shader parameters declared by the active transition package.
+            // Integer model: preview ticks replace params as a new list; a count
+            // model keeps the pressed slider alive across those updates.
             Repeater {
-                model: root.activeTransition.params || []
+                model: (root.activeTransition.params || []).length
                 delegate: Column {
                     id: trParamRow
-                    required property var modelData
+                    required property int index
+                    readonly property var paramData: (root.activeTransition.params || [])[index] || ({})
                     width: root.width
                     spacing: 4
 
@@ -255,7 +258,7 @@ Item {
                         Text {
                             width: parent.width - 48
                             elide: Text.ElideRight
-                            text: trParamRow.modelData.label
+                            text: trParamRow.paramData.label
                             color: Theme.mutedForeground
                             font.family: Theme.fontFamily
                             font.pixelSize: Theme.fontSizeXs
@@ -264,10 +267,10 @@ Item {
                         Text {
                             width: 40
                             horizontalAlignment: Text.AlignRight
-                            text: trParamRow.modelData.isBoolean
-                                  ? (trParamRow.modelData.value ? qsTr("On") : qsTr("Off"))
+                            text: trParamRow.paramData.isBoolean
+                                  ? (trParamRow.paramData.value ? qsTr("On") : qsTr("Off"))
                                   : Number(trParamSlider.value).toFixed(
-                                        Math.abs(trParamRow.modelData.max - trParamRow.modelData.min) >= 10 ? 1 : 2)
+                                        Math.abs(trParamRow.paramData.max - trParamRow.paramData.min) >= 10 ? 1 : 2)
                             color: Theme.panelForeground
                             font.family: Theme.monoFontFamily
                             font.pixelSize: Theme.fontSizeXs
@@ -276,30 +279,32 @@ Item {
                     }
 
                     ThemedSwitch {
-                        visible: !!trParamRow.modelData.isBoolean
-                        checked: !!trParamRow.modelData.value
+                        visible: !!trParamRow.paramData.isBoolean
+                        checked: !!trParamRow.paramData.value
                         onToggled: EditorState.setTransitionParam(
                                        root.transitionEditTrack, root.activeTransition.id,
-                                       trParamRow.modelData.key, checked ? 1 : 0)
+                                       trParamRow.paramData.key, checked ? 1 : 0)
                     }
 
                     ThemedSlider {
                         id: trParamSlider
-                        visible: !trParamRow.modelData.isBoolean
+                        label: trParamRow.paramData.label
+                        visible: !trParamRow.paramData.isBoolean
                         width: parent.width
-                        from: trParamRow.modelData.min
-                        to: trParamRow.modelData.max
-                        value: trParamRow.modelData.value
+                        from: trParamRow.paramData.min
+                        to: trParamRow.paramData.max
+                        Binding on value {
+                            when: !trParamSlider.pressed
+                            value: trParamRow.paramData.value
+                        }
                         onMoved: EditorState.previewSetTransitionParam(
                                      root.transitionEditTrack, root.activeTransition.id,
-                                     trParamRow.modelData.key, value)
+                                     trParamRow.paramData.key, value)
                         onPressedChanged: {
-                            if (pressed) {
+                            if (pressed)
                                 EditorState.beginPreviewDrag(qsTr("Edit transition"))
-                            } else {
+                            else
                                 EditorState.commitPreviewDrag()
-                                value = Qt.binding(() => trParamRow.modelData.value)
-                            }
                         }
                     }
                 }

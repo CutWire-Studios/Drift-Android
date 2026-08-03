@@ -1,6 +1,7 @@
 #include "engine/AudioFileWriter.h"
 #include "engine/EmojiCatalog.h"
 #include "engine/FontCatalog.h"
+#include "engine/ReverseProxyCache.h"
 #include "models/AddonManager.h"
 #include "models/AppController.h"
 #include "models/AssetLibrary.h"
@@ -164,6 +165,11 @@ int main(int argc, char *argv[])
     if (runSelfTest())
         return 0;
 #endif
+
+    // Reversed proxies are a pure cache: dropping one only costs the clip its smooth playback, so
+    // they are pruned to a budget rather than kept forever the way mattes are.
+    drift::ReverseProxyCache::instance().load();
+    drift::ReverseProxyCache::instance().sweep(drift::ReverseProxyCache::kDefaultMaxBytes);
 
     qmlRegisterType<PreviewItem>("Drift", 1, 0, "PreviewItem");
 

@@ -1,5 +1,6 @@
 pragma Singleton
 import QtQuick
+import Drift
 
 // Design tokens for the app shell and panel surfaces (dark + light), plus
 // shared layout/typography/iconography constants used across the UI.
@@ -14,16 +15,20 @@ QtObject {
     readonly property string fontFamily: _interLoader.name || "sans-serif"
     readonly property string monoFontFamily: "monospace"
 
-    // --- Light/dark mode: follows the OS by default, overridable at runtime ----
+    // --- Light/dark mode: follows the OS until the user picks a side -----------
     // Qt.styleHints.colorScheme is live-updated by the platform theme (Qt 6.5+).
+    // Once toggled, the choice lives in QSettings via EditorState and survives
+    // restarts; it is app-wide, not stored per project.
     readonly property bool systemPrefersDark: Qt.styleHints.colorScheme !== Qt.Light
-    property bool _userOverride: false
-    property bool _userDarkMode: true
-    readonly property bool darkMode: _userOverride ? _userDarkMode : systemPrefersDark
+    readonly property bool darkMode: EditorState.darkModeOverridden ? EditorState.darkModePreferred
+                                                                    : systemPrefersDark
 
     function toggleDarkMode() {
-        _userDarkMode = !darkMode;
-        _userOverride = true;
+        EditorState.setDarkModePreference(!darkMode);
+    }
+
+    function setDarkMode(enabled) {
+        EditorState.setDarkModePreference(enabled);
     }
 
     // --- Color palettes: app shell vs. panel surfaces, light and dark ------------
@@ -81,6 +86,13 @@ QtObject {
     readonly property color panelAccent: _palette.panelAccent
     readonly property color panelAccentForeground: _palette.panelAccentForeground
     readonly property color panelMuted: _palette.panelMuted
+    // Slider groove — lighter than panelMuted in dark mode so the track reads at rest.
+    readonly property color sliderTrack: darkMode ? "#505050" : panelMuted
+    // Scrollbar track + handle (timeline horizontal bar, panel flickables).
+    readonly property color scrollbarTrack: darkMode ? "#2a2a2a" : panelBorder
+    readonly property color scrollbarHandle: darkMode ? "#6a6a6a" : panelMuted
+    readonly property color scrollbarHandleHover: darkMode ? "#888888" : mutedForeground
+    readonly property color scrollbarHandlePressed: darkMode ? "#b8b8b8" : foreground
     readonly property color panelSecondaryBg: _palette.panelSecondaryBg
     readonly property color panelSecondaryBorder: _palette.panelSecondaryBorder
     readonly property color panelSecondaryForeground: _palette.panelSecondaryForeground
@@ -140,6 +152,10 @@ QtObject {
     // thumbnail generation exists, use a fixed dark placeholder so the white filename
     // scrim stays legible in light mode too instead of following panelAccent.
     readonly property color clipVideoPlaceholder: "#2b2b2b"
+    // Style-pack thumbnails: most packs use white/light glyphs (and sit on video), so the
+    // card canvas stays dark in both themes — panelSecondaryBg washes them out in light mode.
+    readonly property color textStylePreviewBg: "#1c1c1c"
+    readonly property color textStylePreviewBorder: darkMode ? "#3a3a3a" : "#2a2a2a"
 
     // --- Colors: keyframe curves (fixed regardless of app theme) -------------
     // One hue per animatable property so overlaid curves, their key diamonds and
@@ -191,9 +207,17 @@ QtObject {
     // --- Control metrics -------------------------------------------------------
     // controlHeight is the alignment baseline: text fields, combo boxes and text
     // buttons all share it so adjacent controls in a Row line up.
-    readonly property real controlHeight: 30
-    readonly property real controlHeightSm: 26   // chips, segmented toggles
-    readonly property real iconButtonSize: 28
+    //
+    // The panels, inspectors and browsers are shared with the desktop build, and every
+    // one of them sizes its controls from these three tokens. Rather than fork each
+    // component for touch, the tokens themselves grow on Android: a 28px icon button
+    // sized for a mouse cursor is roughly a third of a fingertip, which made destructive
+    // controls (Remove sitting beside Disable in the effects list) genuinely risky.
+    // 44/36/40 are Android's minimum comfortable targets, not arbitrary bumps.
+    readonly property bool touchUi: Qt.platform.os === "android"
+    readonly property real controlHeight: touchUi ? 44 : 30
+    readonly property real controlHeightSm: touchUi ? 36 : 26   // chips, segmented toggles
+    readonly property real iconButtonSize: touchUi ? 40 : 28
     readonly property real borderWidth: 1
     readonly property real borderWidthFocus: 2
 
@@ -206,11 +230,20 @@ QtObject {
 
     // --- Motion ----------------------------------------------------------------
     // durationFast: hover/press tints. durationBase: dialogs, tab crossfades.
-    // durationSlow: layout-affecting reveals.
+    // durationSlow: layout-affecting reveals. durationPress: press feedback.
     readonly property int durationFast: 90
     readonly property int durationBase: 140
     readonly property int durationSlow: 220
-    readonly property int easing: Easing.OutCubic
+    readonly property int durationPress: 120
+    // Strong ease-out (~cubic-bezier(0.22, 1, 0.36, 1)) for anything entering or
+    // leaving: it starts fast, so the interface answers in the frame the user is
+    // watching. OutCubic was too weak to read as deliberate.
+    readonly property int easing: Easing.OutQuint
+    // Strong ease-in-out (~cubic-bezier(0.76, 0, 0.24, 1)) for things already on
+    // screen that move or morph, where a fast start reads as a jerk.
+    readonly property int easingInOut: Easing.InOutQuart
+    // Press feedback: pressable chrome dips to this scale while held.
+    readonly property real pressScale: 0.97
     readonly property int tooltipDelay: 400
 
     // --- Dialog widths ---------------------------------------------------------
@@ -234,10 +267,23 @@ QtObject {
     readonly property real pagePadding: 12
 
     // --- Layout: assets panel -----------------------------------------------
-    readonly property real panelHeaderHeight: 44
-    readonly property real tabRailWidth: 40
+    readonly property real panelHeaderHeight: touchUi ? 52 : 44
+    readonly property real tabRailWidth: touchUi ? 52 : 40
     readonly property real assetCardWidth: 112
     readonly property real assetCardGap: 16
+
+    // Tint for category chips in asset browser tabs.
+    readonly property var categoryColors: [
+        "#f59e0b", "#ef4444", "#8b5cf6", "#3b82f6", "#10b981",
+        "#ec4899", "#06b6d4", "#84cc16", "#f97316", "#6366f1"
+    ]
+
+    function categoryColor(index) {
+        const colors = categoryColors
+        if (!colors || colors.length === 0)
+            return primary
+        return colors[Math.abs(index) % colors.length]
+    }
 
     // --- Layout: preview panel -----------------------------------------------
     readonly property real previewToolbarPaddingTop: 20
@@ -258,6 +304,10 @@ QtObject {
     readonly property real newTrackHitSlop: 24
     readonly property real trackLabelsWidth: 130
     readonly property real pixelsPerSecondBase: 50
+    // Empty runway after the last clip: fixed in pixels at every zoom (not a
+    // fixed number of seconds). Sized as a fraction of the timeline viewport.
+    readonly property real timelineEndPadFraction: 0.25
+    readonly property real timelineEndPadMinPx: 120
     readonly property real playheadLineWidth: 2
     // Top scrubber head — sized to sit in the seek strip and stay easy to grab.
     readonly property real playheadHandleSize: 16
@@ -274,7 +324,6 @@ QtObject {
     // Matches drift::kMinClipDurationUs (0.1s). Effective min duration is the
     // larger of this and clipMinWidth / pxPerSecond at the current zoom.
     readonly property real clipMinDurationSeconds: 0.1
-    readonly property real timelineZoomMin: 0.05
 
     // --- Layout: Android / touch -----------------------------------------------
     // Used by AndroidMain / AndroidTimeline / AndroidPreview and the CapCut shell.
@@ -284,7 +333,7 @@ QtObject {
     readonly property real androidPreviewTransportHeight: 48
     readonly property real androidTopBarHeight: 48
     readonly property real androidBottomRailHeight: 56
-    readonly property real androidEditActionsHeight: 40
+    readonly property real androidEditActionsHeight: 48
     readonly property real androidSplitterHeight: 16
     readonly property real androidSheetHeightFraction: 0.55
     readonly property real androidSheetExpandedFraction: 0.92
@@ -322,6 +371,7 @@ QtObject {
         trash: "trash-2",
         snowflake: "snowflake",
         bookmark: "bookmark",
+        star: "star",
         layers: "layers",
         magnet: "magnet",
         linkTwo: "link-2",
@@ -329,9 +379,14 @@ QtObject {
         foldHorizontal: "fold-horizontal",
         zoomOut: "zoom-out",
         zoomIn: "zoom-in",
+        zoomFit: "chevrons-left-right-ellipsis",
         gauge: "gauge",
         play: "play",
         pause: "pause",
+        stepBack: "step-back",
+        stepForward: "step-forward",
+        rewind: "rewind",
+        fastForward: "fast-forward",
         maximize: "maximize",
         minimize: "minimize",
         folder: "folder",
@@ -339,6 +394,7 @@ QtObject {
         type: "type",
         smile: "smile",
         wand: "wand-sparkles",
+        sparkles: "sparkles",
         sliders: "sliders-horizontal",
         settings: "settings",
         upload: "upload",
@@ -354,6 +410,7 @@ QtObject {
         image: "image",
         shapes: "shapes",
         chevronDown: "chevron-down",
+        chevronUp: "chevron-up",
         chevronsRight: "chevrons-right",
         x: "x",
         messageSquare: "message-square",
@@ -364,10 +421,15 @@ QtObject {
         sortByName: "arrow-down-a-z",
         sortByKind: "tags",
         gripVertical: "grip-vertical",
+        ellipsis: "ellipsis",
         save: "save",
         setStart: "arrow-left-to-line",
         setEnd: "arrow-right-to-line",
+        // Timeline trim tools — vertical align marks read as “keep from here”.
+        trimStart: "align-start-vertical",
+        trimEnd: "align-end-vertical",
         blend: "blend",
+        option: "option",
         keyboard: "keyboard",
         crop: "crop",
         diamondPlus: "diamond-plus",
@@ -404,9 +466,10 @@ QtObject {
         alignLeft: "text-align-start",
         alignCenter: "text-align-center",
         alignRight: "text-align-end",
-        alignTop: "align-start-vertical",
-        alignMiddle: "align-center-vertical",
-        alignBottom: "align-end-vertical",
+        // Lucide names these *-horizontal, but they are the correct valign glyphs.
+        alignTop: "align-start-horizontal",
+        alignMiddle: "align-center-horizontal",
+        alignBottom: "align-end-horizontal",
 
         // Media
         captions: "captions",

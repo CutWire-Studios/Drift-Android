@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 # C is enabled for JUCE only: its modules compile a handful of C sources (zlib, flac, oggvorbis)
 # and its CMake refuses to configure without it.
-project(Drift VERSION 0.1.2 LANGUAGES CXX C)
+project(Drift VERSION 0.2.1 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -303,6 +303,10 @@ add_library(driftcore STATIC
     src/core/Bezier.h
     src/core/SpeedCurve.h
     src/core/SpeedCurve.cpp
+    src/core/FadeShape.h
+    src/core/FadeShape.cpp
+    src/core/ClipAnimation.h
+    src/core/ClipAnimation.cpp
     src/core/SubtitleCue.h
     src/core/SubtitleCue.cpp
     src/core/SrtIO.h
@@ -348,6 +352,8 @@ add_library(driftaudiodsp STATIC
     src/engine/audio/AudioEffectFactory.cpp
     src/engine/audio/AudioEffectRack.h
     src/engine/audio/AudioEffectRack.cpp
+    src/engine/audio/ClipAudioRetimer.h
+    src/engine/audio/ClipAudioRetimer.cpp
 )
 # Nothing here is a QObject, and AUTOMOC would otherwise scan JUCE's amalgamated sources.
 set_target_properties(driftaudiodsp PROPERTIES AUTOMOC OFF)
@@ -429,8 +435,6 @@ add_library(driftengine STATIC
     src/engine/FrameCompositor.cpp
     src/engine/MaskApplier.h
     src/engine/MaskApplier.cpp
-    src/engine/AudioAtempo.h
-    src/engine/AudioAtempo.cpp
     src/engine/AudioEffectCatalog.h
     src/engine/AudioEffectCatalog.cpp
     src/engine/EffectTemplateCatalog.h
@@ -454,6 +458,10 @@ add_library(driftengine STATIC
     src/engine/DeepFilterDenoiser.cpp
     src/engine/MatteWriter.h
     src/engine/MatteWriter.cpp
+    src/engine/ReverseProxyCache.h
+    src/engine/ReverseProxyCache.cpp
+    src/engine/ReverseRenderer.h
+    src/engine/ReverseRenderer.cpp
     src/engine/AudioFileWriter.h
     src/engine/AudioFileWriter.cpp
     src/engine/ProjectBundle.h
@@ -573,27 +581,32 @@ qt_add_qml_module(drift
         src/qml/SegmentationWindow.qml
         src/qml/DenoiseWindow.qml
         src/qml/SpeedCurveWindow.qml
+        src/qml/FadeCurveWindow.qml
         src/qml/PropertiesPanel.qml
         src/qml/components/properties/GeneralInspector.qml
         src/qml/components/properties/TextInspector.qml
         src/qml/components/properties/TransformInspector.qml
         src/qml/components/properties/AudioInspector.qml
+        src/qml/components/properties/AudioEffectsInspector.qml
         src/qml/components/properties/SpeedFadeInspector.qml
+        src/qml/components/properties/AnimationInspector.qml
         src/qml/components/properties/TransitionInspector.qml
         src/qml/components/properties/BlendingInspector.qml
         src/qml/components/properties/ShapeInspector.qml
         src/qml/components/properties/MasksInspector.qml
         src/qml/components/properties/EffectsInspector.qml
         src/qml/components/assets/TextAssetsTab.qml
+        src/qml/components/assets/SubtitlesTab.qml
         src/qml/components/assets/StickersTab.qml
         src/qml/components/assets/ShapesTab.qml
         src/qml/components/assets/SoundsTab.qml
         src/qml/components/assets/SettingsTab.qml
         src/qml/components/assets/ShortcutsTab.qml
         src/qml/components/assets/MediaAssetsTab.qml
+        src/qml/components/assets/AssetCategoryChips.qml
+        src/qml/components/assets/AssetFavoriteButton.qml
         src/qml/TimelinePanel.qml
         src/qml/components/timeline/TimelineToolbar.qml
-        src/qml/components/timeline/AndroidTimelineToolbar.qml
         src/qml/components/timeline/TrackHeaderColumn.qml
         src/qml/components/timeline/TimelineClipItem.qml
         src/qml/components/IconGlyph.qml
@@ -618,6 +631,9 @@ qt_add_qml_module(drift
         src/qml/components/SubtitleEditor.qml
         src/qml/components/ThemedComboBox.qml
         src/qml/components/FontPicker.qml
+        src/qml/components/CollapsibleSection.qml
+        src/qml/components/TextStylePackThumb.qml
+        src/qml/components/TextStylePackPicker.qml
         src/qml/components/EmojiPicker.qml
         src/qml/components/ThemedButton.qml
         src/qml/components/ThemedChip.qml
@@ -625,6 +641,7 @@ qt_add_qml_module(drift
         src/qml/components/ThemedLabel.qml
         src/qml/components/ThemedDialog.qml
         src/qml/components/AddonManagerDialog.qml
+        src/qml/components/AddonStartupDialog.qml
         src/qml/components/MissingAddonsDialog.qml
         src/qml/components/UpdateDialog.qml
         src/qml/components/ProjectSetupDialog.qml
@@ -633,6 +650,7 @@ qt_add_qml_module(drift
         src/qml/components/PackageProgressDialog.qml
         src/qml/components/ExportDialog.qml
         src/qml/components/ExportProgressDialog.qml
+        src/qml/components/ReverseProgressDialog.qml
         src/qml/components/SubtitleProgressDialog.qml
         src/qml/components/CircularProgress.qml
         src/qml/components/RecoveryDialog.qml
@@ -686,7 +704,10 @@ if(ANDROID)
          "effects/*/thumbnail.png"
          "transitions/*/*.json"
          "transitions/*/*.frag"
-         "transitions/*/preview_strip.png"
+         # Every PNG, not just the preview strip: a shader may sample its own texture
+         # (matrix_rain/glyphs.png), and leaving those out ships a transition that
+         # renders black on device while looking fine in the browser thumbnail.
+         "transitions/*/*.png"
          "audio-effects/*/audio-effect.json"
          "audio-effects/*/thumbnail.png"
          "effect-templates/*/template.json"

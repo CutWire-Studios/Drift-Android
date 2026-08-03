@@ -3,7 +3,6 @@
 #include "MediaThumbnail.h"
 
 #include <QFileInfo>
-#include <QThreadPool>
 #include <QTimer>
 
 namespace {
@@ -16,12 +15,50 @@ constexpr int kMaxQueued = 256;
 constexpr int kBatchSize = 24;
 constexpr qint64 kTileCacheMaxBytes = 128LL * 1024 * 1024;
 constexpr int kPruneEvery = 512;
+// Far more tiles than any viewport holds. Past that the whole memo goes rather than tracking
+// LRU order for it — a miss costs one stat, and the paths are rebuilt on the next lookup.
+constexpr int kMaxReadyEntries = 4096;
+// Idle long enough that panning, pausing to look, and panning again doesn't reopen the file.
+constexpr int kDecoderIdleMs = 30'000;
 
 } // namespace
 
 FilmstripTileCache::FilmstripTileCache(QObject *parent)
     : QObject(parent)
 {
+    m_decodeContext = new QObject;
+    m_idleTimer = new QTimer(m_decodeContext);
+    m_idleTimer->setSingleShot(true);
+    m_idleTimer->setInterval(kDecoderIdleMs);
+    // m_idleTimer as the context object, so this runs on the decode thread — the only thread
+    // allowed to touch m_decoder.
+    connect(m_idleTimer, &QTimer::timeout, m_idleTimer, [this] { m_decoder.close(); });
+
+    // Moves the timer with it.
+    m_decodeContext->moveToThread(&m_decodeThread);
+    // Destroys the context and its timer on their own thread, as part of thread teardown.
+    connect(&m_decodeThread, &QThread::finished, m_decodeContext, &QObject::deleteLater);
+
+    m_decodeThread.setObjectName(QStringLiteral("drift-filmstrip"));
+    m_decodeThread.start();
+}
+
+FilmstripTileCache::~FilmstripTileCache()
+{
+    // Decode lambdas capture `this`, so the thread has to be stopped before any member is
+    // destroyed. wait() returns only once the batch in flight has finished.
+    m_decodeThread.quit();
+    m_decodeThread.wait();
+    m_decoder.close();
+}
+
+void FilmstripTileCache::clear()
+{
+    m_ready.clear();
+    m_failed.clear();
+    m_emptyBatches.clear();
+    m_queued.clear();
+    m_queue.clear();
 }
 
 QString FilmstripTileCache::keyFor(const QString &sourcePath, int level, qint64 index)
@@ -46,6 +83,8 @@ QString FilmstripTileCache::tile(const QString &sourcePath, int level, qint64 in
     // A tile written by an earlier session is on disk but not in m_ready yet.
     const QString path = MediaThumbnail::tilePath(sourcePath, level, index);
     if (QFileInfo::exists(path)) {
+        if (m_ready.size() >= kMaxReadyEntries)
+            m_ready.clear();
         m_ready.insert(key, path);
         return path;
     }
@@ -95,15 +134,20 @@ void FilmstripTileCache::runBatch()
     m_busy = true;
     const QString sourcePath = newest.sourcePath;
     const int level = newest.level;
-    QThreadPool::globalInstance()->start([this, sourcePath, level, indices] {
-        const QList<qint64> produced = MediaThumbnail::generateTiles(sourcePath, level, indices);
-        QMetaObject::invokeMethod(
-            this,
-            [this, sourcePath, level, produced, indices] {
-                applyBatch(sourcePath, level, produced, indices);
-            },
-            Qt::QueuedConnection);
-    });
+    QMetaObject::invokeMethod(
+        m_decodeContext,
+        [this, sourcePath, level, indices] {
+            m_idleTimer->stop();
+            const QList<qint64> produced = m_decoder.generateTiles(sourcePath, level, indices);
+            m_idleTimer->start();
+            QMetaObject::invokeMethod(
+                this,
+                [this, sourcePath, level, produced, indices] {
+                    applyBatch(sourcePath, level, produced, indices);
+                },
+                Qt::QueuedConnection);
+        },
+        Qt::QueuedConnection);
 }
 
 void FilmstripTileCache::applyBatch(const QString &sourcePath, int level,
@@ -114,6 +158,8 @@ void FilmstripTileCache::applyBatch(const QString &sourcePath, int level,
     for (const qint64 index : requested)
         m_queued.remove(keyFor(sourcePath, level, index));
 
+    if (m_ready.size() + produced.size() > kMaxReadyEntries)
+        m_ready.clear();
     for (const qint64 index : produced)
         m_ready.insert(keyFor(sourcePath, level, index),
                        MediaThumbnail::tilePath(sourcePath, level, index));
@@ -131,12 +177,15 @@ void FilmstripTileCache::applyBatch(const QString &sourcePath, int level,
     m_producedSincePrune += produced.size();
     if (m_producedSincePrune >= kPruneEvery) {
         m_producedSincePrune = 0;
-        QThreadPool::globalInstance()->start([this] {
-            MediaThumbnail::pruneTileCache(kTileCacheMaxBytes);
-            // Pruning may have deleted tiles we have memoized; drop the lot and let the next
-            // lookup re-check the disk rather than hand out paths that no longer exist.
-            QMetaObject::invokeMethod(this, [this] { m_ready.clear(); }, Qt::QueuedConnection);
-        });
+        QMetaObject::invokeMethod(
+            m_decodeContext,
+            [this] {
+                MediaThumbnail::pruneTileCache(kTileCacheMaxBytes);
+                // Pruning may have deleted tiles we have memoized; drop the lot and let the
+                // next lookup re-check the disk rather than hand out paths that are gone.
+                QMetaObject::invokeMethod(this, [this] { m_ready.clear(); }, Qt::QueuedConnection);
+            },
+            Qt::QueuedConnection);
     }
 
     scheduleBatch();

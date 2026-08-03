@@ -54,6 +54,9 @@ target_include_directories(tst_engine PRIVATE ../src)
 target_link_libraries(tst_engine PRIVATE Qt6::Test Qt6::Gui Qt6::OpenGL driftengine driftcore)
 target_compile_definitions(tst_engine PRIVATE
     DRIFT_TEST_EFFECTS_DIR="${CMAKE_SOURCE_DIR}/effects"
+    # Beauty / makeup packages live in the effects.core addon (drift-addons staging), not the
+    # bundled VideoEd/effects tree. Optional so a checkout without the sibling repo still builds.
+    DRIFT_TEST_ADDON_EFFECTS_DIR="${CMAKE_SOURCE_DIR}/../drift-addons/staging/effects-core/effects"
     DRIFT_TEST_TRANSITIONS_DIR="${CMAKE_SOURCE_DIR}/transitions"
     DRIFT_TEST_FONTS_DIR="${CMAKE_SOURCE_DIR}/fonts"
     DRIFT_TEST_EMOJI_FONT_DIR="${CMAKE_SOURCE_DIR}/emoji-fonts"

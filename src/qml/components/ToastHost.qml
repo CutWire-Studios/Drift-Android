@@ -48,6 +48,7 @@ Item {
                 required property string message
                 required property int repeats
                 required property int timeout
+                required property bool exiting
 
                 width: parent.width
                 height: toastRow.implicitHeight + Theme.spacingXl * 2
@@ -55,6 +56,12 @@ Item {
                 color: Theme.panelBackground
                 border.width: Theme.borderWidth
                 border.color: Theme.panelBorder
+
+                // Toasts are the app's only error surface, and had no role at all —
+                // so every failure was silent to assistive tech.
+                Accessible.role: Accessible.AlertMessage
+                Accessible.name: toast.message
+                Accessible.description: toast.severity
 
                 // Severity is carried by a leading accent bar rather than a full
                 // color wash, so the message stays readable in both themes.
@@ -111,9 +118,36 @@ Item {
 
                 // timeout 0 means "stays until dismissed" (errors).
                 Timer {
-                    running: toast.timeout > 0
+                    running: toast.timeout > 0 && !toast.exiting
                     interval: toast.timeout
                     onTriggered: Toasts.dismiss(toast.toastId)
+                }
+
+                // Exit is the reverse of the `add:` transition below, so a
+                // dismissal reads as the arrival played backwards. It runs as an
+                // explicit animation rather than a binding so it does not fight
+                // `add:` over the same properties, and the row is only actually
+                // removed once it has finished — otherwise the delegate would be
+                // destroyed mid-frame and the toast would just blink out.
+                onExitingChanged: if (toast.exiting) exitAnimation.start()
+
+                ParallelAnimation {
+                    id: exitAnimation
+                    NumberAnimation {
+                        target: toast
+                        property: "opacity"
+                        to: 0
+                        duration: Theme.durationFast
+                        easing.type: Theme.easing
+                    }
+                    NumberAnimation {
+                        target: toast
+                        property: "scale"
+                        to: 0.96
+                        duration: Theme.durationFast
+                        easing.type: Theme.easing
+                    }
+                    onFinished: Toasts.remove(toast.toastId)
                 }
 
                 // Hovering pauses nothing but does surface the full text, which
@@ -127,13 +161,28 @@ Item {
             }
         }
 
+        // Enter and exit share a shape, so a dismissal reads as the reverse of the
+        // arrival rather than the toast blinking out of existence. Exit is faster:
+        // the entrance is an announcement, the dismissal is just an acknowledgement.
+        //
+        // `y` is deliberately left to the Column positioner here — driving it from
+        // a transition as well fights the layout and jitters.
         add: Transition {
-            NumberAnimation {
-                properties: "opacity"
-                from: 0
-                to: 1
-                duration: Theme.durationBase
-                easing.type: Theme.easing
+            ParallelAnimation {
+                NumberAnimation {
+                    properties: "opacity"
+                    from: 0
+                    to: 1
+                    duration: Theme.durationBase
+                    easing.type: Theme.easing
+                }
+                NumberAnimation {
+                    properties: "scale"
+                    from: 0.96
+                    to: 1
+                    duration: Theme.durationBase
+                    easing.type: Theme.easing
+                }
             }
         }
 
@@ -141,8 +190,9 @@ Item {
             NumberAnimation {
                 properties: "y"
                 duration: Theme.durationBase
-                easing.type: Theme.easing
+                easing.type: Theme.easingInOut
             }
         }
+
     }
 }

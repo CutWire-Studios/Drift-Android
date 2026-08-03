@@ -43,6 +43,19 @@ struct FaceTrack
     QList<FaceAnchors> sampleAll(TimeUs relativeUs) const;
 };
 
+// Raw per-frame landmarks jitter by a pixel or two even on a still head, and a bulge anchored to a
+// jittering point visibly boils. A short symmetric average over neighbouring frames costs nothing
+// at bake time and is what makes the warps sit still.
+//
+// Only runs across frames where the slot is continuously valid, so smoothing never drags an anchor
+// across the gap where a face left and came back. Contours and pose are gated the same way on
+// their own presence flags, so a partially re-scanned track cannot average a present contour with
+// an absent one.
+//
+// Lives beside FaceTrack::sample rather than in the app layer because the two have to agree on
+// every convention these fields carry — the quaternion sign, the angle seam, the contour length.
+void smoothFaceTrack(FaceTrack *track, int radius = 2);
+
 // Merges one frame's anchors into an effect's parameter map as u_face* uniforms, consuming the
 // package's own "faceIndex" parameter to pick a slot.
 //

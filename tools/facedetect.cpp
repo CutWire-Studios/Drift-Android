@@ -23,7 +23,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPainter>
+#include <QPolygonF>
+#include <QQuaternion>
 #include <QTextStream>
+#include <QVector3D>
 
 namespace {
 
@@ -35,6 +38,55 @@ void mark(QPainter &p, const QPointF &uv, const QSize &size, const QColor &color
     p.setBrush(Qt::NoBrush);
     p.drawEllipse(px, 4.0, 4.0);
     p.drawText(px + QPointF(7, -7), label);
+}
+
+// Contours arrive width-normalized, so y divides back out by the aspect before it is a pixel.
+QPointF contourPx(const QPointF &wn, const QSize &size)
+{
+    const double aspect = double(size.height()) / double(size.width());
+    return QPointF(wn.x() * size.width(), (wn.y() / aspect) * size.height());
+}
+
+// Draws one loop and numbers its first few vertices, which is what makes a wrong index set or a
+// swapped left/right pair visible rather than merely plausible.
+void drawLoop(QPainter &p, const QList<QPointF> &contour, drift::contour::Span span,
+              const QSize &size, const QColor &color, const QString &label)
+{
+    QPolygonF poly;
+    poly.reserve(span.count);
+    for (int i = 0; i < span.count; ++i)
+        poly.append(contourPx(contour.at(span.offset + i), size));
+
+    p.setPen(QPen(color, 2.0));
+    p.setBrush(Qt::NoBrush);
+    p.drawPolygon(poly);
+
+    // Vertex 0 filled, then every fourth numbered: enough to read the winding direction off the
+    // image without burying the face in text.
+    p.setBrush(color);
+    p.drawEllipse(poly.first(), 4.0, 4.0);
+    p.setBrush(Qt::NoBrush);
+    p.drawText(poly.first() + QPointF(6, -6), label + QStringLiteral(" 0"));
+    for (int i = 4; i < span.count; i += 4)
+        p.drawText(poly.at(i) + QPointF(4, -4), QString::number(i));
+}
+
+QJsonArray loopToJson(const QList<QPointF> &contour, drift::contour::Span span)
+{
+    QJsonArray out;
+    for (int i = 0; i < span.count; ++i) {
+        const QPointF &q = contour.at(span.offset + i);
+        out.append(QJsonArray{q.x(), q.y()});
+    }
+    return out;
+}
+
+// Rotates a vector by the pose quaternion. Only used to turn the stored quaternion back into the
+// basis it came from, which is exactly the round trip that catches a sign error.
+QVector3D rotateByPose(const drift::FaceAnchors &a, const QVector3D &v)
+{
+    const QQuaternion q(float(a.poseQw), float(a.poseQx), float(a.poseQy), float(a.poseQz));
+    return q.rotatedVector(v);
 }
 
 } // namespace
@@ -105,7 +157,8 @@ int main(int argc, char **argv)
         const drift::FaceAnchors &a = faces.at(i);
         out << "  face " << i << " valid=" << a.valid << " score=" << a.score
             << " angle=" << (a.angle * 180.0 / M_PI) << "deg rx=" << a.faceRx << " ry=" << a.faceRy
-            << " eyeR=" << a.eyeRadius << "\n";
+            << " eyeR=" << a.eyeRadius << " contours=" << a.hasContours << " pose=" << a.hasPose
+            << "\n";
         if (!a.valid)
             continue;
 
@@ -134,6 +187,78 @@ int main(int argc, char **argv)
         o[QStringLiteral("faceRx")] = a.faceRx;
         o[QStringLiteral("faceRy")] = a.faceRy;
         o[QStringLiteral("eyeRadius")] = a.eyeRadius;
+
+        if (a.hasContours) {
+            using namespace drift::contour;
+            drawLoop(p, a.contour, kLipOuter, overlay.size(), QColor(255, 80, 120),
+                     QStringLiteral("lipOut"));
+            drawLoop(p, a.contour, kLipInner, overlay.size(), QColor(255, 180, 60),
+                     QStringLiteral("lipIn"));
+            drawLoop(p, a.contour, kEyeLeft, overlay.size(), QColor(80, 220, 255),
+                     QStringLiteral("eyeL"));
+            drawLoop(p, a.contour, kEyeRight, overlay.size(), QColor(80, 140, 255),
+                     QStringLiteral("eyeR"));
+            drawLoop(p, a.contour, kBrowLeft, overlay.size(), QColor(160, 255, 120),
+                     QStringLiteral("browL"));
+            drawLoop(p, a.contour, kBrowRight, overlay.size(), QColor(90, 200, 90),
+                     QStringLiteral("browR"));
+            mark(p, a.cheekLeft, overlay.size(), QColor(255, 140, 200), QStringLiteral("chkL"));
+            mark(p, a.cheekRight, overlay.size(), QColor(255, 140, 200), QStringLiteral("chkR"));
+
+            QJsonObject loops;
+            loops[QStringLiteral("oval")] = loopToJson(a.contour, kOval);
+            loops[QStringLiteral("lipOuter")] = loopToJson(a.contour, kLipOuter);
+            loops[QStringLiteral("lipInner")] = loopToJson(a.contour, kLipInner);
+            loops[QStringLiteral("eyeLeft")] = loopToJson(a.contour, kEyeLeft);
+            loops[QStringLiteral("eyeRight")] = loopToJson(a.contour, kEyeRight);
+            loops[QStringLiteral("browLeft")] = loopToJson(a.contour, kBrowLeft);
+            loops[QStringLiteral("browRight")] = loopToJson(a.contour, kBrowRight);
+            o[QStringLiteral("contours")] = loops;
+        }
+
+        if (a.hasPose) {
+            const QVector3D right = rotateByPose(a, QVector3D(1, 0, 0));
+            const QVector3D up = rotateByPose(a, QVector3D(0, 1, 0));
+            const QVector3D forward = rotateByPose(a, QVector3D(0, 0, 1));
+
+            // Axes drawn from the eye midpoint, one interocular distance long. On a frontal face
+            // right must run toward increasing x, up must point at the forehead (so *upward* on
+            // screen, i.e. decreasing y), and forward must be close to +/-z. Which sign forward
+            // takes is the thing to read off here — it decides whether a 3D prop faces the camera.
+            const QPointF originUv = contourPx(QPointF(a.poseOx, a.poseOy), overlay.size());
+            const double len = a.poseScale * overlay.width();
+            const struct { QVector3D axis; QColor color; const char *name; } axes[] = {
+                {right, QColor(255, 60, 60), "R"},
+                {up, QColor(60, 255, 60), "U"},
+                {forward, QColor(80, 120, 255), "F"},
+            };
+            const double aspect = double(overlay.height()) / double(overlay.width());
+            for (const auto &ax : axes) {
+                const QPointF tip = originUv
+                    + QPointF(ax.axis.x() * len, ax.axis.y() * len / aspect);
+                p.setPen(QPen(ax.color, 3.0));
+                p.drawLine(originUv, tip);
+                p.drawText(tip + QPointF(5, -5), QLatin1String(ax.name));
+            }
+
+            // Roll from the quaternion against the independently derived eye-line angle. They come
+            // from different vertices (eye corners vs iris centres) so they will not match exactly,
+            // but a large gap means a sign is wrong somewhere.
+            const double roll = std::atan2(right.y(), right.x());
+            out << "    pose fwd=(" << forward.x() << ", " << forward.y() << ", " << forward.z()
+                << ") roll=" << (roll * 180.0 / M_PI) << "deg vs angle="
+                << (a.angle * 180.0 / M_PI) << "deg scale=" << a.poseScale << "\n";
+
+            QJsonObject pose;
+            pose[QStringLiteral("right")] = QJsonArray{right.x(), right.y(), right.z()};
+            pose[QStringLiteral("up")] = QJsonArray{up.x(), up.y(), up.z()};
+            pose[QStringLiteral("forward")] = QJsonArray{forward.x(), forward.y(), forward.z()};
+            pose[QStringLiteral("origin")] = QJsonArray{a.poseOx, a.poseOy, a.poseOz};
+            pose[QStringLiteral("scale")] = a.poseScale;
+            pose[QStringLiteral("rollDeg")] = roll * 180.0 / M_PI;
+            o[QStringLiteral("pose")] = pose;
+        }
+
         json.append(o);
     }
     p.end();

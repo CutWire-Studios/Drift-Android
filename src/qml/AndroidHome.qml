@@ -20,6 +20,17 @@ Item {
         layoutPicker.apply()
     }
 
+    // Bookkeeping for the async import below. `countBefore` is captured before the copy
+    // starts so the completion handler knows which rows are new. `importOwned` exists
+    // because StackView keeps this page alive underneath the editor: without it, an
+    // import started from the editor's Media tab would also land here and shove the user
+    // back into the editor with a second copy of the clips.
+    property bool importOwned: false
+    property int countBefore: 0
+    property int importDone: 0
+    property int importTotal: 0
+    property string importName: ""
+
     function importAndEdit() {
         applyLayoutAndPrepare()
         const urls = FileDialogs.openFiles(qsTr("Import Media"), root.mediaFilter)
@@ -28,16 +39,44 @@ Item {
             root.enterEditor()
             return
         }
+        // A picked file is a content:// document, and reading one means copying it out of
+        // the SAF stream first. Doing that inline froze the whole app for as long as the
+        // copy took — minutes for a few 4K clips, long past the point Android offers to
+        // kill it. The copy runs off-thread now and this screen shows its progress.
         const before = AssetLibrary.count
-        AssetLibrary.importUrls(urls)
-        for (var i = before; i < AssetLibrary.count; ++i)
-            EditorState.addClipFromAsset(i)
-        const added = AssetLibrary.count - before
-        if (added > 0)
-            Toasts.success(qsTr("Imported %n file(s).", "", added))
-        else
-            Toasts.error(qsTr("Could not import the selected file(s)."))
-        root.enterEditor()
+        if (!AssetLibrary.importUrlsAsync(urls)) {
+            Toasts.warning(qsTr("An import is already running."))
+            return
+        }
+        root.importOwned = true
+        root.countBefore = before
+        root.importDone = 0
+        root.importTotal = urls.length
+        root.importName = ""
+    }
+
+    Connections {
+        target: AssetLibrary
+        function onImportProgress(done, total, name) {
+            if (!root.importOwned)
+                return
+            root.importDone = done
+            root.importTotal = total
+            root.importName = name
+        }
+        function onImportFinished(materialized, failed) {
+            if (!root.importOwned)
+                return
+            root.importOwned = false
+            for (var i = root.countBefore; i < AssetLibrary.count; ++i)
+                EditorState.addClipFromAsset(i)
+            const added = AssetLibrary.count - root.countBefore
+            if (added > 0)
+                Toasts.success(qsTr("Imported %n file(s).", "", added))
+            else
+                Toasts.error(qsTr("Could not import the selected file(s)."))
+            root.enterEditor()
+        }
     }
 
     function startBlank() {
@@ -50,7 +89,12 @@ Item {
     Flickable {
         id: flick
         anchors.fill: parent
-        anchors.bottomMargin: Theme.spacingXl
+        // The home page owns the whole window, so it is the one that has to clear the
+        // status bar, the gesture pill and any landscape cutout itself.
+        anchors.topMargin: root.SafeArea.margins.top
+        anchors.bottomMargin: Theme.spacingXl + root.SafeArea.margins.bottom
+        anchors.leftMargin: root.SafeArea.margins.left
+        anchors.rightMargin: root.SafeArea.margins.right
         contentWidth: width
         contentHeight: pageColumn.implicitHeight + Theme.spacing3xl
         clip: true
@@ -221,6 +265,7 @@ Item {
                     text: qsTr("Import media & edit")
                     glyph: Theme.icons.upload
                     variant: "primary"
+                    enabled: !AssetLibrary.importing
                     onClicked: root.importAndEdit()
                 }
 
@@ -229,8 +274,62 @@ Item {
                     text: qsTr("Start blank")
                     glyph: Theme.icons.plus
                     variant: "secondary"
+                    enabled: !AssetLibrary.importing
                     onClicked: root.startBlank()
                 }
+            }
+        }
+    }
+
+    // Copying a picked document out of the SAF stream is the one part of import that
+    // takes real time, so it gets a real progress surface rather than a frozen screen.
+    Rectangle {
+        anchors.fill: parent
+        visible: root.importOwned && AssetLibrary.importing
+        color: Qt.rgba(Theme.appBackground.r, Theme.appBackground.g, Theme.appBackground.b, 0.92)
+
+        // Swallow taps so nothing behind the overlay can be started mid-copy.
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.AllButtons
+        }
+
+        Column {
+            anchors.centerIn: parent
+            width: Math.min(280, parent.width - Theme.spacing3xl * 2)
+            spacing: Theme.spacingLg
+
+            CircularProgress {
+                anchors.horizontalCenter: parent.horizontalCenter
+                size: 48
+                strokeWidth: 4
+                indeterminate: root.importTotal <= 0
+                value: root.importTotal > 0 ? root.importDone / root.importTotal : 0
+            }
+
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: root.importTotal > 1
+                      ? qsTr("Importing %1 of %2…").arg(root.importDone + 1).arg(root.importTotal)
+                      : qsTr("Importing…")
+                color: Theme.foreground
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSizeBase
+                font.weight: Font.Medium
+            }
+
+            Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WrapAnywhere
+                maximumLineCount: 2
+                elide: Text.ElideMiddle
+                visible: root.importName.length > 0
+                text: root.importName
+                color: Theme.mutedForeground
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSizeSm
             }
         }
     }

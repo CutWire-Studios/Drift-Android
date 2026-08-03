@@ -3,6 +3,7 @@
 #include "ClipPreviewImageStore.h"
 #include "engine/AudioMixer.h"
 #include "engine/ClipReaderPool.h"
+#include "engine/ReverseProxyCache.h"
 
 #include <QAudioSink>
 
@@ -286,8 +287,9 @@ void ClipPreviewPlayer::requestFrame(drift::TimeUs position)
         QMutexLocker lock(&m_clipMutex);
         if (m_clip.type == drift::ClipType::Audio || m_clip.path.isEmpty())
             return;
-        path = m_clip.path;
-        sourceUs = m_clip.timelineToSourceUs(position);
+        const drift::VideoRead read = drift::resolveVideoRead(m_clip, position);
+        path = read.path;
+        sourceUs = read.sourceUs;
     }
 
     const quint64 token = ++m_frameToken;
@@ -329,7 +331,8 @@ int ClipPreviewPlayer::fillAudio(float *buffer, int sampleCount)
     }
 
     const drift::TimeUs timeUs = m_clock.produceTimeUs();
-    const QVector<float> mixed = AudioMixer::readClipAudio(clip, timeUs, sampleCount, m_sampleRate);
+    const QVector<float> mixed =
+        AudioMixer::readClipAudio(clip, timeUs, sampleCount, m_sampleRate, &m_retimer);
     const int frames = qMin(sampleCount, static_cast<int>(mixed.size() / 2));
     std::memcpy(buffer, mixed.constData(), static_cast<size_t>(frames) * 2 * sizeof(float));
     if (frames < sampleCount) {

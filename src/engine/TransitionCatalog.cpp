@@ -106,12 +106,8 @@ QMap<QString, QVariant> resolvedTransitionParameters(const drift::Transition &tr
                                                      const TransitionPresetEntry &def)
 {
     QMap<QString, QVariant> params = def.fixedParams;
-    for (const drift::EffectParamSpec &spec : def.meta.parameters) {
-        if (spec.isBoolean)
-            params.insert(spec.key, spec.defaultValue > 0.5);
-        else
-            params.insert(spec.key, spec.defaultValue);
-    }
+    for (const drift::EffectParamSpec &spec : def.meta.parameters)
+        params.insert(spec.key, spec.defaultVariant());
     for (auto it = transition.parameters.constBegin(); it != transition.parameters.constEnd(); ++it)
         params.insert(it.key(), it.value());
     return params;

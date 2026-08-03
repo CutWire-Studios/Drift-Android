@@ -22,17 +22,29 @@ struct ExportScalePreset
     int videoBitrateKbps = 12000;
 };
 
+// Upper bound for a hand-typed export frame rate; anything above is clamped.
+inline constexpr int kMaxExportFps = 480;
+
 // Full encode settings passed from the export dialog.
 struct ExportSettings
 {
     int targetHeight = 0; // 0 = keep project height
+    // Output frame rate. 0 = follow the project fps. Rational so NTSC rates
+    // (24000/1001, 30000/1001, 60000/1001) round-trip exactly.
+    int fpsNum = 0;
+    int fpsDen = 1;
     QString videoCodecId = QStringLiteral("h264");
     QString rateControl = QStringLiteral("crf"); // "crf" | "bitrate"
-    int crf = 23;
+    int crf = 18;
     int videoBitrateKbps = 12000;
     QString videoPreset = QStringLiteral("medium");
     QString audioCodecId = QStringLiteral("aac");
     int audioBitrateKbps = 192;
+    bool audioOnly = false;
+    QString metadataTitle;
+    QString metadataArtist;
+    QString metadataAlbum;
+    QString metadataComment;
 };
 
 // WYSIWYG exporter: encodes frames straight from FrameCompositor and audio from
@@ -54,11 +66,16 @@ public:
 
     // Preferred container extension for a video+audio pair (mp4 / webm / mkv).
     static QString preferredContainer(const QString &videoCodecId, const QString &audioCodecId);
-    static QStringList saveFilters(const QString &container);
-    static QString defaultSuffix(const QString &container);
+    // Standalone audio muxer (m4a / mp3 / opus / ac3 / flac).
+    static QString preferredAudioOnlyContainer(const QString &audioCodecId);
+    static QStringList saveFilters(const QString &container, bool audioOnly = false);
+    static QString defaultSuffix(const QString &container, bool audioOnly = false);
 
     // Downscale chip options for the current project size (no upscale).
     static QVariantList scaleOptions(int projectWidth, int projectHeight);
+
+    // Frame rate choices for the export dialog; the first entry follows `projectFps`.
+    static QVariantList frameRateOptions(int projectFps);
 
     static ExportSettings defaultSettings();
     static ExportSettings settingsFromMap(const QVariantMap &map);

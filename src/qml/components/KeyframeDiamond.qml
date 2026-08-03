@@ -22,8 +22,10 @@ Item {
 
     signal toggled()
 
-    width: 12
-    height: 12
+    // The diamond itself stays 12px — it sits in a dense property row and a bigger
+    // mark would read as a badge rather than a switch. Only the target grows on touch.
+    width: Theme.touchUi ? 32 : 12
+    height: width
 
     Rectangle {
         anchors.centerIn: parent

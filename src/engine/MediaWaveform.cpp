@@ -14,6 +14,11 @@ extern "C" {
 
 namespace {
 
+// One pull window: 256k frames is 2 MB of interleaved stereo float. Small enough that a
+// feature-length span costs megabytes rather than hundreds of them, large enough that the
+// per-window call overhead stays in the noise.
+constexpr int kVoiceChunkFrames = 1 << 18;
+
 float frameSampleAbs(const AVFrame *frame, int channels, int channel, int sample)
 {
     switch (frame->format) {
@@ -477,11 +482,11 @@ QVector<float> MediaWaveform::peaksForRange(const QString &sourcePath, double st
     return buckets;
 }
 
-QVariantList MediaWaveform::voicePeaksFromPcm(const float *interleavedStereo, int frameCount,
-                                              int sampleRate, int buckets)
+QVariantList MediaWaveform::voicePeaks(qint64 totalFrames, int sampleRate, int buckets,
+                                       const FillChunk &fill)
 {
     QVariantList result;
-    if (!interleavedStereo || frameCount <= 0 || buckets <= 0 || sampleRate <= 0)
+    if (totalFrames <= 0 || buckets <= 0 || sampleRate <= 0 || !fill)
         return result;
 
     // Restrict to the speech band before measuring, so the lane tracks dialogue rather than
@@ -504,18 +509,27 @@ QVariantList MediaWaveform::voicePeaksFromPcm(const float *interleavedStereo, in
     QVector<float> peaks(buckets, 0.0f);
     float maxPeak = 0.0f;
 
-    for (int i = 0; i < frameCount; ++i) {
-        const double mono = 0.5 * (static_cast<double>(interleavedStereo[i * 2])
-                                   + static_cast<double>(interleavedStereo[i * 2 + 1]));
-        double voice = highPass2.process(highPass1.process(mono));
-        voice = lowPass2.process(lowPass1.process(voice));
+    QVector<float> chunk(static_cast<qsizetype>(kVoiceChunkFrames) * 2);
+    for (qint64 done = 0; done < totalFrames;) {
+        const int want = static_cast<int>(qMin<qint64>(kVoiceChunkFrames, totalFrames - done));
+        const int got = fill(chunk.data(), done, want);
+        if (got <= 0)
+            break;
 
-        const int bucket = qBound(0, static_cast<int>((static_cast<int64_t>(i) * buckets) / frameCount),
-                                  buckets - 1);
-        const float amp = static_cast<float>(qAbs(voice));
-        if (amp > peaks[bucket])
-            peaks[bucket] = amp;
-        maxPeak = qMax(maxPeak, amp);
+        for (int i = 0; i < got; ++i) {
+            const double mono = 0.5 * (static_cast<double>(chunk[i * 2])
+                                       + static_cast<double>(chunk[i * 2 + 1]));
+            double voice = highPass2.process(highPass1.process(mono));
+            voice = lowPass2.process(lowPass1.process(voice));
+
+            const int bucket = qBound(
+                0, static_cast<int>(((done + i) * buckets) / totalFrames), buckets - 1);
+            const float amp = static_cast<float>(qAbs(voice));
+            if (amp > peaks[bucket])
+                peaks[bucket] = amp;
+            maxPeak = qMax(maxPeak, amp);
+        }
+        done += got;
     }
 
     // Normalize to the loudest voice moment so speech fills the lane while

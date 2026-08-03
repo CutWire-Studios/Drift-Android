@@ -210,325 +210,376 @@ ThemedDialog {
         EditorState.markProjectLayoutChosen()
     }
 
-    contentItem: Column {
-        spacing: Theme.spacingXl
-        width: parent ? parent.width : 600
+    // First-launch dismiss. This used to call markProjectLayoutChosen(), which stopped
+    // the chooser reopening and let the essential-packs nudge follow — but the same
+    // flag also gates ProjectSetupDialog, so "Decide later" silently meant "never ask",
+    // and dropping the first clip no longer offered to set the canvas up. The canvas is
+    // still undecided here, so report the dismissal instead of faking a decision.
+    signal firstRunDismissed()
 
-        ThemedLabel {
-            width: parent.width
-            size: "sm"
-            wrapMode: Text.WordWrap
-            text: fromSettings
-                  ? qsTr("Pick a platform template and quality. This updates the project video size.")
-                  : qsTr("Pick a category, then a template and quality. You can change this anytime in Settings → Choose layout.")
+    onRejected: {
+        if (!fromSettings)
+            root.firstRunDismissed()
+    }
+
+    // The category rail, template list, quality pills and preview together run well
+    // past a phone's screen height, and ThemedDialog clamps rather than overflows —
+    // so unscrolled the lower half (including the preview) was simply cropped away.
+    contentItem: Flickable {
+        id: chooserFlick
+        width: parent ? parent.width : Theme.dialogWidthLg
+        implicitHeight: Math.min(chooserColumn.height, root.availableContentHeight)
+        contentWidth: width
+        contentHeight: chooserColumn.height
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        interactive: contentHeight > height
+        ScrollBar.vertical: AppScrollBar {
+            policy: chooserFlick.contentHeight > chooserFlick.height
+                    ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
         }
 
-        Flickable {
-            id: categoryFlick
-            width: parent.width
-            height: 34
-            contentWidth: categoryRow.width
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-
-            Row {
-                id: categoryRow
-                height: parent.height
-                spacing: 6
-
-                Repeater {
-                    model: root.categories
-                    delegate: AbstractButton {
-                        id: catBtn
-                        required property var modelData
-                        height: 32
-                        implicitWidth: catRow.implicitWidth + 16
-                        checkable: false
-                        hoverEnabled: true
-                        focusPolicy: Qt.StrongFocus
-
-                        readonly property bool selected: modelData.id === root.activeCategory
-
-                        background: Rectangle {
-                            radius: Theme.radiusSm
-                            color: {
-                                if (catBtn.selected)
-                                    return Theme.panelSecondaryBg
-                                if (catBtn.down)
-                                    return Theme.panelMuted
-                                if (catBtn.hovered)
-                                    return Theme.popoverHover
-                                return Theme.panelAccent
-                            }
-                            border.width: Theme.borderWidth
-                            border.color: catBtn.selected
-                                          ? Theme.panelSecondaryBorder
-                                          : Theme.panelBorder
-                        }
-
-                        contentItem: Row {
-                            id: catRow
-                            anchors.centerIn: parent
-                            spacing: 6
-
-                            IconGlyph {
-                                anchors.verticalCenter: parent.verticalCenter
-                                glyph: catBtn.modelData.icon
-                                iconSize: 14
-                                iconColor: catBtn.selected
-                                           ? Theme.panelSecondaryForeground
-                                           : Theme.panelForeground
-                            }
-
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: catBtn.modelData.label
-                                color: catBtn.selected
-                                       ? Theme.panelSecondaryForeground
-                                       : Theme.panelForeground
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.fontSizeXs
-                                font.weight: catBtn.selected ? Font.Medium : Font.Normal
-                            }
-                        }
-
-                        onClicked: root.selectCategory(modelData.id)
-
-                        MouseArea {
-                            anchors.fill: parent
-                            acceptedButtons: Qt.NoButton
-                            cursorShape: Qt.PointingHandCursor
-                        }
-                    }
-                }
-            }
-        }
-
-        ThemedLabel {
-            text: qsTr("Template")
-            tone: "default"
-            size: "sm"
-        }
-
-        Rectangle {
-            width: parent.width
-            height: Math.min(220, Math.max(44, root.categoryTemplates.length * 44) + 2)
-            radius: Theme.radiusSm
-            color: Theme.appBackground
-            border.width: Theme.borderWidth
-            border.color: Theme.panelBorder
-            clip: true
-
-            ListView {
-                id: templateList
-                anchors.fill: parent
-                anchors.margins: 1
-                clip: true
-                model: root.categoryTemplates
-                interactive: contentHeight > height
-                boundsBehavior: Flickable.StopAtBounds
-                ScrollBar.vertical: AppScrollBar { }
-
-                delegate: ItemDelegate {
-                    id: row
-                    required property var modelData
-                    required property int index
-                    width: templateList.width
-                    height: 44
-                    highlighted: modelData.id === root.templateId
-                    hoverEnabled: true
-
-                    background: Rectangle {
-                        color: {
-                            if (row.highlighted)
-                                return Theme.panelSecondaryBg
-                            if (row.hovered)
-                                return Theme.popoverHover
-                            return "transparent"
-                        }
-                    }
-
-                    contentItem: Item {
-                        anchors.fill: parent
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
-
-                        Row {
-                            anchors.left: parent.left
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 10
-
-                            IconGlyph {
-                                anchors.verticalCenter: parent.verticalCenter
-                                glyph: row.modelData.icon
-                                iconSize: 18
-                                iconColor: row.highlighted
-                                           ? Theme.panelSecondaryForeground
-                                           : Theme.panelForeground
-                            }
-
-                            Column {
-                                anchors.verticalCenter: parent.verticalCenter
-                                spacing: 1
-
-                                Text {
-                                    text: row.modelData.label
-                                    color: row.highlighted
-                                           ? Theme.panelSecondaryForeground
-                                           : Theme.panelForeground
-                                    font.family: Theme.fontFamily
-                                    font.pixelSize: Theme.fontSizeSm
-                                    font.weight: Font.Medium
-                                }
-
-                                Text {
-                                    text: row.modelData.detail
-                                    color: Theme.mutedForeground
-                                    font.family: Theme.monoFontFamily
-                                    font.pixelSize: Theme.fontSizeXs
-                                }
-                            }
-                        }
-
-                        // Mini aspect-ratio box on the right of each row.
-                        Item {
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: 28
-                            height: 28
-
-                            readonly property real aw: {
-                                switch (row.modelData.aspect) {
-                                case "9:16": return 12
-                                case "4:5": return 16
-                                case "1:1": return 20
-                                default: return 26
-                                }
-                            }
-                            readonly property real ah: {
-                                switch (row.modelData.aspect) {
-                                case "9:16": return 22
-                                case "4:5": return 20
-                                case "1:1": return 20
-                                default: return 15
-                                }
-                            }
-
-                            Rectangle {
-                                anchors.centerIn: parent
-                                width: parent.aw
-                                height: parent.ah
-                                radius: 2
-                                color: "transparent"
-                                border.width: Theme.borderWidth
-                                border.color: row.highlighted ? Theme.primary : Theme.panelBorder
-                            }
-                        }
-                    }
-
-                    onClicked: root.templateId = modelData.id
-                }
-            }
-        }
-
-        ThemedLabel {
-            text: qsTr("Quality")
-            tone: "default"
-            size: "sm"
-        }
-
-        Flow {
-            width: parent.width
-            spacing: 6
-
-            Repeater {
-                model: root.qualities
-                delegate: ThemedChip {
-                    required property var modelData
-                    text: modelData.label
-                    selected: root.qualityId === modelData.id
-                    chipHeight: 28
-                    onClicked: root.qualityId = modelData.id
-                }
-            }
-        }
-
-        Row {
-            width: parent.width
+        Column {
+            id: chooserColumn
             spacing: Theme.spacingXl
+            width: chooserFlick.width
+
+            ThemedLabel {
+                width: parent.width
+                size: "sm"
+                wrapMode: Text.WordWrap
+                text: fromSettings
+                      ? qsTr("Pick a platform template and quality. This updates the project video size.")
+                      : qsTr("Pick a category, then a template and quality. You can change this anytime in Settings → Choose layout.")
+            }
+
+            Flickable {
+                id: categoryFlick
+                width: parent.width
+                height: Theme.controlHeight
+                contentWidth: categoryRow.width
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                Row {
+                    id: categoryRow
+                    height: parent.height
+                    spacing: Theme.spacingMd
+
+                    Repeater {
+                        model: root.categories
+                        delegate: AbstractButton {
+                            id: catBtn
+                            required property var modelData
+
+                            // Match ThemedChip / quality pills: Control padding owns the
+                            // inset so icon+label stay optically centered in the pill.
+                            height: Theme.controlHeight
+                            horizontalPadding: Theme.spacingXl
+                            verticalPadding: 0
+                            spacing: Theme.spacingMd
+                            implicitWidth: leftPadding + catContent.implicitWidth + rightPadding
+                            checkable: false
+                            hoverEnabled: true
+                            focusPolicy: Qt.StrongFocus
+
+                            readonly property bool selected: modelData.id === root.activeCategory
+
+                            background: Rectangle {
+                                radius: Theme.radiusSm
+                                color: {
+                                    if (catBtn.selected)
+                                        return Theme.panelSecondaryBg
+                                    if (catBtn.down)
+                                        return Theme.panelMuted
+                                    if (catBtn.hovered)
+                                        return Theme.popoverHover
+                                    return Theme.panelAccent
+                                }
+                                border.width: Theme.borderWidth
+                                border.color: catBtn.selected
+                                              ? Theme.panelSecondaryBorder
+                                              : Theme.panelBorder
+                            }
+
+                            contentItem: Item {
+                                id: catContent
+                                implicitWidth: catRow.implicitWidth
+                                implicitHeight: Math.max(catIcon.implicitHeight, catLabel.implicitHeight)
+
+                                Row {
+                                    id: catRow
+                                    anchors.centerIn: parent
+                                    spacing: catBtn.spacing
+
+                                    IconGlyph {
+                                        id: catIcon
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        glyph: catBtn.modelData.icon
+                                        iconSize: Theme.fontSizeSm
+                                        iconColor: catBtn.selected
+                                                   ? Theme.panelSecondaryForeground
+                                                   : Theme.panelForeground
+                                    }
+
+                                    Text {
+                                        id: catLabel
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        // Match icon box height so verticalCenter lines up
+                                        // with the glyph, not the taller font metrics box.
+                                        height: catIcon.iconSize
+                                        verticalAlignment: Text.AlignVCenter
+                                        text: catBtn.modelData.label
+                                        color: catBtn.selected
+                                               ? Theme.panelSecondaryForeground
+                                               : Theme.panelForeground
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontSizeXs
+                                        font.weight: catBtn.selected ? Font.Medium : Font.Normal
+                                    }
+                                }
+                            }
+
+                            onClicked: root.selectCategory(modelData.id)
+
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.NoButton
+                                cursorShape: Qt.PointingHandCursor
+                            }
+                        }
+                    }
+                }
+            }
+
+            ThemedLabel {
+                text: qsTr("Template")
+                tone: "default"
+                size: "sm"
+            }
 
             Rectangle {
-                width: root.aspectBoxSize
-                height: root.aspectBoxSize
+                width: parent.width
+                height: Math.min(220, Math.max(44, root.categoryTemplates.length * 44) + 2)
                 radius: Theme.radiusSm
                 color: Theme.appBackground
                 border.width: Theme.borderWidth
                 border.color: Theme.panelBorder
+                clip: true
 
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: root.previewW
-                    height: root.previewH
-                    radius: 3
-                    color: Theme.panelAccent
-                    border.width: Theme.borderWidth
-                    border.color: Theme.primary
+                ListView {
+                    id: templateList
+                    anchors.fill: parent
+                    anchors.margins: 1
+                    clip: true
+                    model: root.categoryTemplates
+                    interactive: contentHeight > height
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: AppScrollBar { }
 
-                    Behavior on width {
-                        NumberAnimation { duration: Theme.durationBase; easing.type: Theme.easing }
-                    }
-                    Behavior on height {
-                        NumberAnimation { duration: Theme.durationBase; easing.type: Theme.easing }
-                    }
+                    delegate: ItemDelegate {
+                        id: row
+                        required property var modelData
+                        required property int index
+                        width: templateList.width
+                        height: 44
+                        highlighted: modelData.id === root.templateId
+                        hoverEnabled: true
 
-                    Text {
-                        anchors.centerIn: parent
-                        text: root.aspect
-                        color: Theme.panelForeground
-                        font.family: Theme.monoFontFamily
-                        font.pixelSize: Theme.fontSizeXs
-                        font.weight: Font.Medium
+                        background: Rectangle {
+                            color: {
+                                if (row.highlighted)
+                                    return Theme.panelSecondaryBg
+                                if (row.hovered)
+                                    return Theme.popoverHover
+                                return "transparent"
+                            }
+                        }
+
+                        contentItem: Item {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+
+                            Row {
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: Theme.spacingLg
+
+                                IconGlyph {
+                                    id: templateIcon
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    glyph: row.modelData.icon
+                                    iconSize: 16
+                                    iconColor: row.highlighted
+                                               ? Theme.panelSecondaryForeground
+                                               : Theme.panelForeground
+                                }
+
+                                Column {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 1
+
+                                    Text {
+                                        text: row.modelData.label
+                                        color: row.highlighted
+                                               ? Theme.panelSecondaryForeground
+                                               : Theme.panelForeground
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontSizeSm
+                                        font.weight: Font.Medium
+                                    }
+
+                                    Text {
+                                        text: row.modelData.detail
+                                        color: Theme.mutedForeground
+                                        font.family: Theme.monoFontFamily
+                                        font.pixelSize: Theme.fontSizeXs
+                                    }
+                                }
+                            }
+
+                            // Mini aspect-ratio box on the right of each row.
+                            Item {
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 28
+                                height: 28
+
+                                readonly property real aw: {
+                                    switch (row.modelData.aspect) {
+                                    case "9:16": return 12
+                                    case "4:5": return 16
+                                    case "1:1": return 20
+                                    default: return 26
+                                    }
+                                }
+                                readonly property real ah: {
+                                    switch (row.modelData.aspect) {
+                                    case "9:16": return 22
+                                    case "4:5": return 20
+                                    case "1:1": return 20
+                                    default: return 15
+                                    }
+                                }
+
+                                Rectangle {
+                                    anchors.centerIn: parent
+                                    width: parent.aw
+                                    height: parent.ah
+                                    radius: 2
+                                    color: "transparent"
+                                    border.width: Theme.borderWidth
+                                    border.color: row.highlighted ? Theme.primary : Theme.panelBorder
+                                }
+                            }
+                        }
+
+                        onClicked: root.templateId = modelData.id
                     }
                 }
             }
 
-            Column {
-                width: parent.width - root.aspectBoxSize - parent.spacing
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: 4
+            ThemedLabel {
+                text: qsTr("Quality")
+                tone: "default"
+                size: "sm"
+            }
 
-                Row {
-                    spacing: 8
+            Flow {
+                width: parent.width
+                spacing: 6
 
-                    IconGlyph {
-                        anchors.verticalCenter: parent.verticalCenter
-                        glyph: root.selectedTemplate.icon || ""
-                        iconSize: 16
-                        iconColor: Theme.panelForeground
+                Repeater {
+                    model: root.qualities
+                    delegate: ThemedChip {
+                        required property var modelData
+                        text: modelData.label
+                        selected: root.qualityId === modelData.id
+                        chipHeight: 28
+                        onClicked: root.qualityId = modelData.id
+                    }
+                }
+            }
+
+            Row {
+                width: parent.width
+                spacing: Theme.spacingXl
+
+                Rectangle {
+                    width: root.aspectBoxSize
+                    height: root.aspectBoxSize
+                    radius: Theme.radiusSm
+                    color: Theme.appBackground
+                    border.width: Theme.borderWidth
+                    border.color: Theme.panelBorder
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: root.previewW
+                        height: root.previewH
+                        radius: 3
+                        color: Theme.panelAccent
+                        border.width: Theme.borderWidth
+                        border.color: Theme.primary
+
+                        // A morph between two aspect ratios, not an entrance.
+                        Behavior on width {
+                            NumberAnimation { duration: Theme.durationBase; easing.type: Theme.easingInOut }
+                        }
+                        Behavior on height {
+                            NumberAnimation { duration: Theme.durationBase; easing.type: Theme.easingInOut }
+                        }
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: root.aspect
+                            color: Theme.panelForeground
+                            font.family: Theme.monoFontFamily
+                            font.pixelSize: Theme.fontSizeXs
+                            font.weight: Font.Medium
+                        }
+                    }
+                }
+
+                Column {
+                    width: parent.width - root.aspectBoxSize - parent.spacing
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 4
+
+                    Row {
+                        spacing: 8
+
+                        IconGlyph {
+                            anchors.verticalCenter: parent.verticalCenter
+                            glyph: root.selectedTemplate.icon || ""
+                            iconSize: 16
+                            iconColor: Theme.panelForeground
+                        }
+
+                        ThemedLabel {
+                            anchors.verticalCenter: parent.verticalCenter
+                            tone: "default"
+                            size: "sm"
+                            text: root.selectedTemplate.label
+                        }
                     }
 
                     ThemedLabel {
-                        anchors.verticalCenter: parent.verticalCenter
-                        tone: "default"
+                        width: parent.width
                         size: "sm"
-                        text: root.selectedTemplate.label
+                        font.family: Theme.monoFontFamily
+                        text: qsTr("%1×%2 · %3")
+                              .arg(root.outWidth)
+                              .arg(root.outHeight)
+                              .arg(root.aspect)
                     }
-                }
 
-                ThemedLabel {
-                    width: parent.width
-                    size: "sm"
-                    font.family: Theme.monoFontFamily
-                    text: qsTr("%1×%2 · %3")
-                          .arg(root.outWidth)
-                          .arg(root.outHeight)
-                          .arg(root.aspect)
-                }
-
-                ThemedLabel {
-                    width: parent.width
-                    size: "xs"
-                    text: qsTr("Preview shows the canvas aspect ratio")
+                    ThemedLabel {
+                        width: parent.width
+                        size: "xs"
+                        text: qsTr("Preview shows the canvas aspect ratio")
+                    }
                 }
             }
         }

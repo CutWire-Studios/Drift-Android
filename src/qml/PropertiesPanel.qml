@@ -58,6 +58,7 @@ PanelFrame {
             root.syncSubtitlesTab()
             root.syncShapeTab()
             root.syncTextTab()
+            root.syncAnimationTab()
         }
         function onSelectedClipDataChanged() {
             root.clipDataRevision++
@@ -76,33 +77,70 @@ PanelFrame {
         root.syncSubtitlesTab()
     }
 
+    // Rail order: clip identity → geometry/timing → compositing / FX.
+    // Contextual tabs (text / shape / captions) share the first group so a
+    // separator still appears after General when they are hidden.
+    // `group` drives hairlines between the next *visible* tab of a different group.
     ListModel {
         id: tabsModel
-        ListElement { tabId: "general"; icon: 0; label: "General" }
-        ListElement { tabId: "text"; icon: 10; label: "Text" }
-        ListElement { tabId: "transform"; icon: 1; label: "Position & size" }
-        ListElement { tabId: "audio"; icon: 2; label: "Audio" }
-        ListElement { tabId: "speed"; icon: 3; label: "Speed & Fade" }
-        ListElement { tabId: "blending"; icon: 4; label: "Layer mix" }
-        ListElement { tabId: "transition"; icon: 5; label: "Transition" }
-        ListElement { tabId: "masks"; icon: 6; label: "Cutouts" }
-        ListElement { tabId: "effects"; icon: 7; label: "Effects" }
-        ListElement { tabId: "subtitles"; icon: 8; label: "Subtitles" }
-        ListElement { tabId: "shape"; icon: 9; label: "Shape" }
+        ListElement { tabId: "general"; icon: 0; label: "General"; group: 0 }
+        ListElement { tabId: "text"; icon: 1; label: "Text"; group: 0 }
+        ListElement { tabId: "shape"; icon: 2; label: "Shape"; group: 0 }
+        ListElement { tabId: "subtitles"; icon: 3; label: "Subtitles"; group: 0 }
+        ListElement { tabId: "transform"; icon: 4; label: "Transform"; group: 1 }
+        ListElement { tabId: "animation"; icon: 5; label: "Animation"; group: 1 }
+        ListElement { tabId: "audio"; icon: 6; label: "Audio"; group: 1 }
+        ListElement { tabId: "speed"; icon: 7; label: "Speed"; group: 1 }
+        ListElement { tabId: "blending"; icon: 8; label: "Blend"; group: 2 }
+        ListElement { tabId: "masks"; icon: 9; label: "Cutouts"; group: 2 }
+        ListElement { tabId: "effects"; icon: 10; label: "Effects"; group: 2 }
+        ListElement { tabId: "audioEffects"; icon: 11; label: "Audio FX"; group: 2 }
+        ListElement { tabId: "transition"; icon: 12; label: "Transition"; group: 2 }
     }
     property var tabIcons: [
         Theme.icons.info,
+        Theme.icons.type,
+        Theme.icons.shapes,
+        Theme.icons.captions,
         Theme.icons.maximize,
-        Theme.icons.headphones,
+        Theme.icons.sparkles,
+        Theme.icons.volumeHigh,
         Theme.icons.gauge,
-        Theme.icons.layers,
         Theme.icons.blend,
         Theme.icons.mask,
         Theme.icons.wand,
-        Theme.icons.messageSquare,
-        Theme.icons.shapes,
-        Theme.icons.type
+        Theme.icons.audioLines,
+        Theme.icons.chevronsRight
     ]
+
+    function tabVisible(tabId) {
+        if (tabId === "subtitles")
+            return root.clipKind === "subtitle"
+        if (tabId === "shape")
+            return root.clipKind === "shape"
+        if (tabId === "text")
+            return root.hasTextStyle
+        if (tabId === "animation")
+            return root.clipKind === "video" || root.clipKind === "image"
+                   || root.clipKind === "shape" || root.clipKind === "text"
+                   || root.clipKind === "audio"
+        return true
+    }
+
+    // Hairline after this index when the next visible tab belongs to another group.
+    function showSeparatorAfter(index) {
+        const cur = tabsModel.get(index)
+        if (!tabVisible(cur.tabId))
+            return false
+        for (let i = index + 1; i < tabsModel.count; ++i) {
+            const next = tabsModel.get(i)
+            if (!tabVisible(next.tabId))
+                continue
+            return next.group !== cur.group
+        }
+        return false
+    }
+
     function tabIndexOf(id) {
         for (let i = 0; i < tabsModel.count; i++) {
             if (tabsModel.get(i).tabId === id)
@@ -113,6 +151,7 @@ PanelFrame {
     readonly property int subtitlesTabIndex: tabIndexOf("subtitles")
     readonly property int shapeTabIndex: tabIndexOf("shape")
     readonly property int textTabIndex: tabIndexOf("text")
+    readonly property int animationTabIndex: tabIndexOf("animation")
 
     // The Subtitles tab only exists for subtitle clips, so leaving it selected would show a blank
     // pane once the selection moves off one. Selecting a subtitle clip never opens the tab by
@@ -134,6 +173,12 @@ PanelFrame {
     // Same for the Text tab, which only exists for clips carrying a text style.
     function syncTextTab() {
         if (root.textTabIndex >= 0 && root.activeTab === root.textTabIndex && !root.hasTextStyle)
+            root.activeTab = 0
+    }
+
+    function syncAnimationTab() {
+        if (root.animationTabIndex >= 0 && root.activeTab === root.animationTabIndex
+                && !root.tabVisible("animation"))
             root.activeTab = 0
     }
 
@@ -202,43 +247,93 @@ PanelFrame {
             spacing: 0
 
             // Up/Down move between tabs once the rail has focus.
-            Column {
+            // Flickable so short panel heights can still reach lower icons.
+            Flickable {
                 id: propertiesTabRail
                 width: Theme.tabRailWidth
                 height: parent.height
-                topPadding: Theme.spacingSm
-                spacing: Theme.spacingXs
+                contentWidth: width
+                contentHeight: propertiesTabRailColumn.height
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: contentHeight > height
+                ScrollBar.vertical: AppScrollBar {
+                    policy: propertiesTabRail.contentHeight > propertiesTabRail.height
+                            ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
+                }
 
                 Accessible.role: Accessible.PageTabList
 
                 Keys.onUpPressed: function(event) {
-                    root.activeTab = (root.activeTab - 1 + tabsModel.count) % tabsModel.count
+                    let next = root.activeTab
+                    for (let step = 0; step < tabsModel.count; ++step) {
+                        next = (next - 1 + tabsModel.count) % tabsModel.count
+                        if (root.tabVisible(tabsModel.get(next).tabId)) {
+                            root.activeTab = next
+                            break
+                        }
+                    }
                     event.accepted = true
                 }
                 Keys.onDownPressed: function(event) {
-                    root.activeTab = (root.activeTab + 1) % tabsModel.count
+                    let next = root.activeTab
+                    for (let step = 0; step < tabsModel.count; ++step) {
+                        next = (next + 1) % tabsModel.count
+                        if (root.tabVisible(tabsModel.get(next).tabId)) {
+                            root.activeTab = next
+                            break
+                        }
+                    }
                     event.accepted = true
                 }
 
-                Repeater {
-                    model: tabsModel
-                    delegate: IconButton {
-                        required property int index
-                        required property var model
+                Column {
+                    id: propertiesTabRailColumn
+                    width: parent.width
+                    topPadding: Theme.spacingSm
+                    spacing: Theme.spacingXs
 
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        visible: (model.tabId !== "subtitles" || root.clipKind === "subtitle")
-                                 && (model.tabId !== "shape" || root.clipKind === "shape")
-                                 && (model.tabId !== "text" || root.hasTextStyle)
-                        glyph: root.tabIcons[model.icon]
-                        variant: "ghost"
-                        tooltip: model.label
-                        active: root.activeTab === index
-                        onClicked: root.activeTab = index
+                    Repeater {
+                        model: tabsModel
+                        delegate: Column {
+                            required property int index
+                            required property var model
 
-                        Accessible.role: Accessible.PageTab
-                        Accessible.name: model.label
-                        Accessible.checked: root.activeTab === index
+                            width: parent.width
+                            spacing: 0
+                            // Collapse so hidden contextual tabs leave no rail gap.
+                            visible: root.tabVisible(model.tabId)
+                            height: visible ? implicitHeight : 0
+
+                            IconButton {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                glyph: root.tabIcons[model.icon]
+                                variant: "ghost"
+                                tooltip: model.label
+                                active: root.activeTab === index
+                                onClicked: root.activeTab = index
+
+                                Accessible.role: Accessible.PageTab
+                                Accessible.name: model.label
+                                Accessible.checked: root.activeTab === index
+                            }
+
+                            Item {
+                                visible: root.showSeparatorAfter(index)
+                                width: parent.width
+                                height: visible ? Theme.spacingLg + Theme.borderWidth : 0
+
+                                Rectangle {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: Theme.iconSizeSm
+                                    height: Theme.borderWidth
+                                    radius: height / 2
+                                    color: Theme.panelBorder
+                                    opacity: 0.85
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -268,7 +363,25 @@ PanelFrame {
                 // Tall tabs (Audio/Effects) leave contentY deep; reset when switching.
                 Connections {
                     target: root
-                    function onActiveTabChanged() { tabFlick.contentY = 0 }
+                    function onActiveTabChanged() {
+                        tabFlick.contentY = 0
+                        tabColumn.opacity = 0
+                        tabFadeIn.restart()
+                    }
+                }
+
+                // Fade the new tab in rather than hard-cutting to it. Fade-in only,
+                // not a crossfade: the inspectors share a Column, which excludes
+                // invisible items from layout, so overlapping two of them would
+                // double-count height and jump the panel mid-transition.
+                NumberAnimation {
+                    id: tabFadeIn
+                    target: tabColumn
+                    property: "opacity"
+                    from: 0.0
+                    to: 1.0
+                    duration: Theme.durationBase
+                    easing.type: Theme.easing
                 }
 
                 Column {
@@ -301,10 +414,14 @@ PanelFrame {
                         visible: root.currentTabId === "transform"
                     }
 
+                    AnimationInspector {
+                        width: tabColumn.width
+                        visible: root.currentTabId === "animation"
+                    }
+
                     AudioInspector {
                         width: tabColumn.width
                         visible: root.currentTabId === "audio"
-                        onBrowseAudioEffectsRequested: root.browseAudioEffectsRequested()
                     }
 
                     SpeedFadeInspector {
@@ -337,6 +454,12 @@ PanelFrame {
                         width: tabColumn.width
                         visible: root.currentTabId === "effects"
                         onBrowseEffectsRequested: root.browseEffectsRequested()
+                    }
+
+                    AudioEffectsInspector {
+                        width: tabColumn.width
+                        visible: root.currentTabId === "audioEffects"
+                        onBrowseAudioEffectsRequested: root.browseAudioEffectsRequested()
                     }
                 }
             }

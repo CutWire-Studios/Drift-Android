@@ -23,6 +23,16 @@ Button {
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
 
+    // Press feedback. Set on the root, not on `background`: background and
+    // contentItem are siblings in a Control, so scaling the background alone
+    // would leave the label at full size. scale does not affect layout, so
+    // buttons packed in a Row do not reflow.
+    scale: root.down ? Theme.pressScale : 1.0
+
+    Behavior on scale {
+        NumberAnimation { duration: Theme.durationPress; easing.type: Theme.easing }
+    }
+
     Accessible.role: Accessible.Button
     Accessible.name: text.length > 0 ? text : tooltip
 

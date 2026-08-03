@@ -30,18 +30,10 @@ PanelFrame {
         cutHoverClip = -1
     }
 
-    // CapCut: V = Select, B = Blade. Escape while a cut tool is active is
-    // handled in Main.qml so it exits the tool without clearing the selection.
-    Shortcut {
-        sequence: "V"
-        context: Qt.ApplicationShortcut
-        onActivated: root.timelineTool = ""
-    }
-    Shortcut {
-        sequence: "B"
-        context: Qt.ApplicationShortcut
-        onActivated: root.timelineTool = "split"
-    }
+    // CapCut: V = Select, B = Blade. These are registered actions ("selectTool" /
+    // "bladeTool") so they appear in the shortcut list and can be rebound; the tool
+    // state lives here rather than in the backend, so Main.qml dispatches them
+    // alongside Escape, which exits the tool without clearing the selection.
 
     // Y offset of a track row within the track column (excludes ruler/bookmark).
     function trackOffsetY(index) {
@@ -50,7 +42,15 @@ PanelFrame {
             cursor += trackHeight(i) + Theme.trackGap
         return cursor
     }
-    readonly property real minZoom: 0.05
+    // Trailing empty runway after the last clip — constant pixel length at any
+    // zoom (viewport-relative), not a fixed number of seconds.
+    readonly property real timelineEndPadPx: Math.max(
+        Theme.timelineEndPadMinPx, flick.width * Theme.timelineEndPadFraction)
+
+    // Fixed floor for wheel/slider zoom-out. Not tied to project duration —
+    // use fitZoom() when you want the timeline fitted to the viewport.
+    // Low enough for multi-hour projects without live recalibration.
+    readonly property real minZoom: 0.0001
     readonly property real maxZoom: 40.0
     readonly property real pxPerSecond: Theme.pixelsPerSecondBase * zoom
     // Exposed for clip filmstrip viewport culling (Flickable ids are local).
@@ -59,13 +59,49 @@ PanelFrame {
     // Kept for ClipFilmstrip bindings shared with AndroidTimeline (wheel zoom bumps it).
     property int filmstripRefreshEpoch: 0
 
+    // Fit the whole project (plus end pad) into the timeline viewport.
+    function fitZoom() {
+        if (!(EditorState.durationSeconds > 0)) {
+            zoom = 1.0
+            flick.contentX = 0
+            return
+        }
+        const viewportW = Math.max(flick.width, 1)
+        const usable = Math.max(viewportW - timelineEndPadPx, 1)
+        const fit = usable / (EditorState.durationSeconds * Theme.pixelsPerSecondBase)
+        zoom = Math.max(minZoom, Math.min(maxZoom, fit))
+        flick.contentX = 0
+    }
+
+    // Keep `anchorSeconds` glued to the same viewport X after the scale change.
+    // Without this, zooming expands from the content origin and the playhead
+    // (or the point under the cursor) drifts off to the right.
+    function setZoomAround(newZoom, anchorSeconds, viewportX) {
+        const z = Math.max(minZoom, Math.min(maxZoom, newZoom))
+        if (z === zoom)
+            return
+        contentXAnimation.stop()
+        zoom = z
+        const newMaxX = Math.max(0, flick.contentWidth - flick.width)
+        flick.contentX = Math.max(0, Math.min(newMaxX,
+                                              anchorSeconds * pxPerSecond - viewportX))
+    }
+
+    // Toolbar / slider zoom: hold the playhead steady in the viewport.
+    function setZoom(newZoom) {
+        const anchorSeconds = Math.max(0, EditorState.playheadSeconds)
+        const viewportX = anchorSeconds * pxPerSecond - flick.contentX
+        setZoomAround(newZoom, anchorSeconds, viewportX)
+    }
+
     // Ruler tick interval (seconds): the smallest "nice" step whose labels still
     // have room to breathe at the current zoom, so timestamps never squash.
     readonly property real tickStepSeconds: {
         const minLabelPx = 66
         const needed = minLabelPx / pxPerSecond
         const steps = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30,
-                       60, 120, 300, 600, 900, 1800, 3600]
+                       60, 120, 300, 600, 900, 1800, 3600,
+                       7200, 10800, 14400, 21600, 43200]
         for (var i = 0; i < steps.length; i++)
             if (steps[i] >= needed)
                 return steps[i]
@@ -88,9 +124,16 @@ PanelFrame {
     readonly property int selectedTrack: EditorState.selectedTrack
     readonly property int selectedClip: EditorState.selectedClip
 
-    // Invisible extension above track rows while dragging (only when timeline already has clips).
-    readonly property real assetDropTopSlop: EditorState.draggingAssetIndex >= 0 && timelineHasClips()
-        ? Theme.newTrackHitSlop : 0
+    // True while a library asset is being dragged in from the media panel.
+    readonly property bool assetDragActive: EditorState.draggingAssetIndex >= 0
+
+    // Nothing here may depend on the drag: a reserved lane that appeared when a
+    // drag started shifted every track row, the Flickable's contentHeight and
+    // the drop overlay at the exact moment QDrag::exec() entered its nested
+    // event loop, so Mutter hit-tested against geometry that had just moved out
+    // from under it — the target vanished mid-drag and only the track already
+    // under the pointer would accept. A new track is signalled by an insertion
+    // line drawn over the tracks instead, which costs no layout.
 
     // Live snap guide (seconds; < 0 when hidden) shown while dragging a clip.
     property real snapGuideSeconds: -1
@@ -99,8 +142,11 @@ PanelFrame {
     property int dropTrackIndex: -1
     property real dropStartSeconds: 0
     property real dropDurationSeconds: 0
-    // True while dragging a library asset outside any compatible track row.
+    // True while a library asset would land on a brand-new track, and the index
+    // that track would be inserted at (0 = above everything, tracks.length =
+    // below everything).
     property bool dropCreatesNewTrack: false
+    property int dropNewTrackIndex: 0
     // Clip under an in-progress effect drag (for drop highlight).
     property int effectDropTrackIndex: -1
     property int effectDropClipIndex: -1
@@ -238,7 +284,7 @@ PanelFrame {
         if (trackIndex < 0 || trackIndex >= tracks.length)
             return -1
         const track = tracks[trackIndex]
-        if (track.type !== "video" && track.type !== "shape")
+        if (track.type !== "video" && track.type !== "shape" && track.type !== "text")
             return -1
         const seconds = xPixels / pxPerSecond
         const clips = track.clips
@@ -385,43 +431,88 @@ PanelFrame {
         return -1;
     }
 
+    // Depth of the "insert a new track here" band on a track row.
+    function newTrackEdge(index) {
+        return Math.min(Theme.newTrackHitSlop, trackHeight(index) / 4)
+    }
+
+    // Resolve a track-column y into a drop target, in the coordinates the track
+    // rows actually live in (no reserved lane, so column y == track y).
+    // Returns { newTrack: false, track: i } to land on an existing track, or
+    // { newTrack: true, insertIndex: n } to create one at that index.
+    //
+    // Landing on the top/bottom edge of a row means "new track above/below it",
+    // which is what makes a lane reachable underneath the last track — dropping
+    // in the empty space below the tracks appends one.
+    function assetDropTargetAtY(assetIndex, y) {
+        const count = tracks.length
+        if (count === 0)
+            return { "newTrack": true, "insertIndex": 0 }
+
+        var cursor = 0
+        for (var i = 0; i < count; i++) {
+            const h = trackHeight(i)
+            const rowEnd = cursor + h
+            // Claim the trailing gap too, so the 6px between rows resolves to a
+            // boundary rather than to nothing.
+            if (y < rowEnd + Theme.trackGap / 2) {
+                if (!EditorState.trackAcceptsAsset(i, assetIndex))
+                    return { "newTrack": true,
+                             "insertIndex": y < cursor + h / 2 ? i : i + 1 }
+                const edge = newTrackEdge(i)
+                // Only the topmost row needs a leading band: on every other row
+                // that boundary is already the previous row's trailing band, and
+                // claiming it twice just ate the middle of the track.
+                if (i === 0 && y < cursor + edge)
+                    return { "newTrack": true, "insertIndex": 0 }
+                if (y >= rowEnd - edge)
+                    return { "newTrack": true, "insertIndex": i + 1 }
+                return { "newTrack": false, "track": i }
+            }
+            cursor = rowEnd + Theme.trackGap
+        }
+        return { "newTrack": true, "insertIndex": count }
+    }
+
+    // Y of the boundary a new track would be inserted at, in track-column
+    // coordinates — where the insertion line is drawn.
+    function newTrackBoundaryY(insertIndex) {
+        var cursor = 0
+        for (var i = 0; i < insertIndex && i < tracks.length; i++)
+            cursor += trackHeight(i) + Theme.trackGap
+        return Math.max(0, cursor - Theme.trackGap / 2)
+    }
+
     function updateAssetDropPreview(assetIndex, dropX, dropY) {
         const duration = assetDurationSeconds(assetIndex)
         const desired = Math.max(0, dropX / pxPerSecond)
 
+        // Mirrors performAssetDrop: an empty project fills its existing track
+        // wherever you aim, rather than stacking a second one on top.
         if (!timelineHasClips()) {
-            const trackIdx = firstCompatibleTrackIndex(assetIndex)
-            if (trackIdx >= 0) {
+            const firstIdx = firstCompatibleTrackIndex(assetIndex)
+            if (firstIdx >= 0) {
                 dropCreatesNewTrack = false
-                showLandingPreview(trackIdx, desired, duration)
-            } else {
-                clearLandingPreview()
+                showLandingPreview(firstIdx, desired, duration)
+                return
             }
-            return
         }
 
-        if (assetDropTopSlop > 0 && dropY < assetDropTopSlop) {
-            const snapped = snapClipStart(desired, duration)
-            dropCreatesNewTrack = true
-            dropTrackIndex = -1
-            dropStartSeconds = snapped.start
-            dropDurationSeconds = duration
-            snapGuideSeconds = snapped.guide
-            return
-        }
+        const target = assetDropTargetAtY(assetIndex, dropY)
 
-        const trackIdx = trackIndexAtY(dropY - assetDropTopSlop)
-        if (trackIdx >= 0 && EditorState.trackAcceptsAsset(trackIdx, assetIndex)) {
+        if (!target.newTrack) {
             dropCreatesNewTrack = false
-            showLandingPreview(trackIdx, desired, duration)
-        } else {
-            const snapped = snapClipStart(desired, duration)
-            dropCreatesNewTrack = true
-            dropTrackIndex = -1
-            dropStartSeconds = snapped.start
-            dropDurationSeconds = duration
-            snapGuideSeconds = snapped.guide
+            showLandingPreview(target.track, desired, duration)
+            return
         }
+
+        const snapped = snapClipStart(desired, duration)
+        dropCreatesNewTrack = true
+        dropNewTrackIndex = target.insertIndex
+        dropTrackIndex = -1
+        dropStartSeconds = snapped.start
+        dropDurationSeconds = duration
+        snapGuideSeconds = snapped.guide
     }
 
     function performAssetDrop(assetIndex, dropX, dropY) {
@@ -430,23 +521,21 @@ PanelFrame {
             return
 
         function runAdd() {
+            // An empty project should fill its existing track rather than stack
+            // a second one on top of it.
             if (!timelineHasClips()) {
-                const trackIdx = firstCompatibleTrackIndex(assetIndex)
-                if (trackIdx >= 0)
-                    EditorState.addClipFromAssetAt(assetIndex, trackIdx, atSeconds)
-                return
+                const firstIdx = firstCompatibleTrackIndex(assetIndex)
+                if (firstIdx >= 0) {
+                    EditorState.addClipFromAssetAt(assetIndex, firstIdx, atSeconds)
+                    return
+                }
             }
 
-            if (assetDropTopSlop > 0 && dropY < assetDropTopSlop) {
-                EditorState.addClipFromAssetOnNewTrack(assetIndex, atSeconds)
-                return
-            }
-
-            const trackIdx = trackIndexAtY(dropY - assetDropTopSlop)
-            if (trackIdx >= 0 && EditorState.trackAcceptsAsset(trackIdx, assetIndex))
-                EditorState.addClipFromAssetAt(assetIndex, trackIdx, atSeconds)
+            const target = assetDropTargetAtY(assetIndex, dropY)
+            if (target.newTrack)
+                EditorState.addClipFromAssetOnNewTrackAt(assetIndex, target.insertIndex, atSeconds)
             else
-                EditorState.addClipFromAssetOnNewTrack(assetIndex, atSeconds)
+                EditorState.addClipFromAssetAt(assetIndex, target.track, atSeconds)
         }
 
         if (typeof Window !== "undefined" && Window.window && Window.window.configureAndAddAsset)
@@ -459,12 +548,12 @@ PanelFrame {
         const maxX = Math.max(0, flick.contentWidth - flick.width)
         const maxY = Math.max(0, flick.contentHeight - flick.height)
         if (wheel.modifiers & Qt.ControlModifier) {
-            const t = wheel.x / pxPerSecond
+            // Wheel MouseAreas live in content space, so wheel.x is already a
+            // content X — keep that time fixed under the cursor.
+            const anchorSeconds = Math.max(0, wheel.x / pxPerSecond)
             const viewportX = wheel.x - flick.contentX
             const factor = wheel.angleDelta.y > 0 ? 1.15 : 1.0 / 1.15
-            zoom = Math.max(minZoom, Math.min(maxZoom, zoom * factor))
-            const newMaxX = Math.max(0, flick.contentWidth - flick.width)
-            flick.contentX = Math.max(0, Math.min(newMaxX, t * pxPerSecond - viewportX))
+            setZoomAround(zoom * factor, anchorSeconds, viewportX)
             return
         }
 
@@ -498,6 +587,23 @@ PanelFrame {
         const m = Math.floor(total / 60);
         const s = total % 60;
         return m.toString().padStart(2, "0") + ":" + s.toString().padStart(2, "0");
+    }
+
+    property int renameClipTrack: -1
+    property int renameClipIndex: -1
+
+    function requestRenameClip(trackIndex, clipIndex) {
+        if (trackIndex < 0 || clipIndex < 0)
+            return
+        if (trackIndex >= root.tracks.length)
+            return
+        const clips = root.tracks[trackIndex].clips || []
+        if (clipIndex >= clips.length)
+            return
+        root.renameClipTrack = trackIndex
+        root.renameClipIndex = clipIndex
+        clipRenameField.text = clips[clipIndex].name || ""
+        clipRenameDialog.open()
     }
 
     function ensurePlayheadVisible() {
@@ -538,7 +644,7 @@ PanelFrame {
         target: flick
         property: "contentX"
         duration: Theme.durationBase
-        easing.type: Theme.easing
+        easing.type: Theme.easingInOut
     }
 
     Column {
@@ -644,12 +750,14 @@ PanelFrame {
                 readonly property real headerHeight: Theme.timelineRulerHeight
                                                      + Theme.timelineBookmarkRowHeight
 
-                contentWidth: Math.max(width, (EditorState.durationSeconds + 5) * root.pxPerSecond)
+                contentWidth: Math.max(width,
+                    EditorState.durationSeconds * root.pxPerSecond + root.timelineEndPadPx)
                 // Was `height`, so once the tracks were taller than the panel the
                 // lower ones were silently truncated and could not be reached at
                 // all. totalTracksHeight() was already computed but never used.
                 contentHeight: Math.max(height,
-                                        headerHeight + root.totalTracksHeight() + Theme.trackGap)
+                                        headerHeight + root.totalTracksHeight()
+                                        + Theme.trackGap)
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.horizontal: AppScrollBar { policy: ScrollBar.AlwaysOn }
@@ -671,54 +779,12 @@ PanelFrame {
                         onWheel: (wheel) => root.handleTimelineWheel(wheel)
                     }
 
-                    // Library asset drops
-                    DropArea {
-                        id: timelineAssetDrop
-                        enabled: EditorState.draggingAssetIndex >= 0
-                        opacity: 0
-                        x: 0
-                        y: Theme.timelineRulerHeight + Theme.timelineBookmarkRowHeight - root.assetDropTopSlop
-                        width: parent.width
-                        height: Math.max(root.totalTracksHeight() + root.assetDropTopSlop,
-                                         Theme.trackHeightVideo)
-                        z: 250
-                        keys: ["text/plain"]
-
-                        function assetIndexFromDrop(drop) {
-                            if (EditorState.draggingAssetIndex >= 0)
-                                return EditorState.draggingAssetIndex
-                            const text = drop.hasText ? drop.text : drop.getDataAsString("text/plain")
-                            const idx = parseInt(text)
-                            return isNaN(idx) ? -1 : idx
-                        }
-
-                        function updateAssetDrag(drop) {
-                            const assetIndex = assetIndexFromDrop(drop)
-                            if (assetIndex < 0) {
-                                root.clearLandingPreview()
-                                return
-                            }
-                            root.updateAssetDropPreview(assetIndex, drop.x, drop.y)
-                        }
-
-                        onEntered: (drop) => updateAssetDrag(drop)
-                        onPositionChanged: (drop) => updateAssetDrag(drop)
-                        onExited: root.clearLandingPreview()
-                        onDropped: (drop) => {
-                            drop.accept(Qt.CopyAction)
-                            const assetIndex = assetIndexFromDrop(drop)
-                            root.clearLandingPreview()
-                            root.performAssetDrop(assetIndex, drop.x, drop.y)
-                        }
-                    }
-
                     // Horizontal scroll / zoom wheel over track rows (below the drop overlay).
                     MouseArea {
                         x: 0
-                        y: Theme.timelineRulerHeight + Theme.timelineBookmarkRowHeight - root.assetDropTopSlop
+                        y: Theme.timelineRulerHeight + Theme.timelineBookmarkRowHeight
                         width: parent.width
-                        height: Math.max(root.totalTracksHeight() + root.assetDropTopSlop,
-                                         Theme.trackHeightVideo)
+                        height: Math.max(root.totalTracksHeight(), Theme.trackHeightVideo)
                         z: 150
                         acceptedButtons: Qt.NoButton
                         onWheel: (wheel) => root.handleTimelineWheel(wheel)
@@ -769,6 +835,8 @@ PanelFrame {
                                 if (pressed)
                                     scrubTo(mouse.x)
                             }
+                            // MouseArea would otherwise swallow wheel and block Ctrl-zoom.
+                            onWheel: (wheel) => root.handleTimelineWheel(wheel)
 
                             ThemedToolTip {
                                 text: qsTr("Click or drag to seek")
@@ -833,19 +901,43 @@ PanelFrame {
                             height: Theme.timelineBookmarkRowHeight
                             z: 2
 
+                            property int renameIndex: -1
+
                             Repeater {
                                 model: EditorState.bookmarks
-                                delegate: Rectangle {
-                                    x: modelData.seconds * root.pxPerSecond - width / 2
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: 8
-                                    height: 8
-                                    radius: 4
-                                    color: Theme.primary
-                                    z: 3
+                                delegate: Item {
+                                    id: bookmarkDelegate
+                                    x: (bookmarkMouse.dragging
+                                        ? bookmarkMouse.dragSeconds
+                                        : modelData.seconds) * root.pxPerSecond - width / 2
+                                    width: 10
+                                    height: parent.height
+                                    z: bookmarkMouse.containsMouse || bookmarkMouse.dragging ? 4 : 3
+
+                                    // Stem into the ruler so markers read as jump flags, not dots.
+                                    Rectangle {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        y: 0
+                                        width: 1
+                                        height: parent.height + 6
+                                        color: Theme.primary
+                                        opacity: 0.7
+                                    }
+
+                                    Rectangle {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: 8
+                                        height: 8
+                                        rotation: 45
+                                        radius: 1
+                                        color: Theme.primary
+                                        border.width: bookmarkMouse.containsMouse ? Theme.borderWidth : 0
+                                        border.color: Theme.primaryForeground
+                                    }
 
                                     ThemedToolTip {
-                                        visible: bookmarkMouse.containsMouse
+                                        visible: bookmarkMouse.containsMouse && !bookmarkMouse.dragging
                                         text: modelData.label + " @ "
                                               + root.formatTime(modelData.seconds)
                                     }
@@ -855,11 +947,90 @@ PanelFrame {
                                         anchors.fill: parent
                                         anchors.margins: -6
                                         hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        // Stop the seek strip from eating bookmark clicks.
+                                        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+                                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                        // Stop the seek strip from eating bookmark clicks / drags.
                                         preventStealing: true
-                                        onClicked: EditorState.goToBookmark(index)
+
+                                        property bool dragging: false
+                                        property bool didDrag: false
+                                        property real dragSeconds: modelData.seconds
+                                        property real pressX: 0
+
+                                        onPressed: (mouse) => {
+                                            if (mouse.button !== Qt.LeftButton)
+                                                return
+                                            didDrag = false
+                                            dragging = false
+                                            pressX = mouse.x
+                                            dragSeconds = modelData.seconds
+                                        }
+                                        onPositionChanged: (mouse) => {
+                                            if (!pressed || !(mouse.buttons & Qt.LeftButton))
+                                                return
+                                            if (!didDrag && Math.abs(mouse.x - pressX) < 3)
+                                                return
+                                            didDrag = true
+                                            dragging = true
+                                            const globalX = mapToItem(bookmarkRow, mouse.x, 0).x
+                                            dragSeconds = EditorState.snapTime(
+                                                Math.max(0, globalX / root.pxPerSecond))
+                                        }
+                                        onReleased: (mouse) => {
+                                            if (mouse.button === Qt.LeftButton && didDrag) {
+                                                EditorState.updateBookmark(
+                                                    index, dragSeconds, modelData.label)
+                                            }
+                                            dragging = false
+                                            // Keep didDrag through onClicked (fires after release).
+                                            Qt.callLater(function() { didDrag = false })
+                                        }
+                                        onClicked: (mouse) => {
+                                            if (mouse.button === Qt.RightButton) {
+                                                bookmarkContextMenu.bookmarkIndex = index
+                                                bookmarkContextMenu.bookmarkLabel = modelData.label
+                                                bookmarkContextMenu.bookmarkSeconds = modelData.seconds
+                                                bookmarkContextMenu.popup()
+                                                return
+                                            }
+                                            if (!didDrag)
+                                                EditorState.goToBookmark(index)
+                                        }
+                                        onDoubleClicked: (mouse) => {
+                                            if (mouse.button !== Qt.LeftButton)
+                                                return
+                                            bookmarkRow.renameIndex = index
+                                            bookmarkRenameField.text = modelData.label
+                                            bookmarkRenameDialog.open()
+                                        }
                                     }
+                                }
+                            }
+
+                            ThemedContextMenu {
+                                id: bookmarkContextMenu
+                                property int bookmarkIndex: -1
+                                property string bookmarkLabel: ""
+                                property real bookmarkSeconds: 0
+
+                                ThemedMenuItem {
+                                    text: qsTr("Go to bookmark")
+                                    icon.name: Theme.icons.bookmark
+                                    onTriggered: EditorState.goToBookmark(bookmarkContextMenu.bookmarkIndex)
+                                }
+                                ThemedMenuItem {
+                                    text: qsTr("Rename…")
+                                    onTriggered: {
+                                        bookmarkRow.renameIndex = bookmarkContextMenu.bookmarkIndex
+                                        bookmarkRenameField.text = bookmarkContextMenu.bookmarkLabel
+                                        bookmarkRenameDialog.open()
+                                    }
+                                }
+                                ThemedMenuSeparator { }
+                                ThemedMenuItem {
+                                    text: qsTr("Delete")
+                                    icon.name: Theme.icons.trash
+                                    onTriggered: EditorState.removeBookmark(bookmarkContextMenu.bookmarkIndex)
                                 }
                             }
                         }
@@ -935,19 +1106,6 @@ PanelFrame {
                         spacing: Theme.trackGap
                         z: 1
 
-                        // Landing preview when creating a new track above existing rows.
-                        Rectangle {
-                            visible: root.dropCreatesNewTrack
-                            x: root.dropStartSeconds * root.pxPerSecond
-                            width: root.dropDurationSeconds * root.pxPerSecond
-                            height: root.trackBaseHeight(EditorState.trackTypeForAsset(EditorState.draggingAssetIndex))
-                            radius: Theme.radiusSm
-                            color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.12)
-                            border.width: 2
-                            border.color: Theme.primary
-                            z: 5
-                        }
-
                         Repeater {
                             model: root.tracks.length
                             delegate: Rectangle {
@@ -1019,21 +1177,18 @@ PanelFrame {
                                             }
                                             return
                                         }
+                                        // Media fallback when the panel overlay does not
+                                        // receive the drag (seen on some Wayland compositors).
+                                        // drop.y is row-local, so lift it into track-column
+                                        // coordinates and reuse the same resolution the
+                                        // overlay uses — otherwise the two disagree about
+                                        // where the drop would land.
                                         const assetIndex = assetIndexFromDrop(drop)
                                         if (assetIndex < 0)
                                             return
-                                        const columnPos = trackRow.mapFromItem(timelineAssetDrop, drop.x, drop.y)
-                                        if (!EditorState.trackAcceptsAsset(trackRow.trackIndex, assetIndex))
-                                            return
-                                        if (!root.timelineHasClips())
-                                            return
-                                        if (root.assetDropTopSlop > 0 && columnPos.y < root.assetDropTopSlop)
-                                            return
-                                        if (root.trackIndexAtY(columnPos.y - root.assetDropTopSlop) !== trackRow.trackIndex)
-                                            return
-                                        const duration = root.assetDurationSeconds(assetIndex)
-                                        const desired = Math.max(0, drop.x / root.pxPerSecond)
-                                        root.showLandingPreview(trackRow.trackIndex, desired, duration)
+                                        root.updateAssetDropPreview(
+                                            assetIndex, drop.x,
+                                            root.trackOffsetY(trackRow.trackIndex) + drop.y)
                                     }
 
                                     onEntered: (drop) => updateAssetPreview(drop)
@@ -1079,24 +1234,21 @@ PanelFrame {
                                         const assetIndex = assetIndexFromDrop(drop)
                                         if (assetIndex < 0)
                                             return
-                                        const columnPos = trackRow.mapFromItem(timelineAssetDrop, drop.x, drop.y)
                                         root.clearLandingPreview()
-                                        root.performAssetDrop(assetIndex, drop.x, columnPos.y)
+                                        // Reconstruct track-column Y so performAssetDrop
+                                        // resolves the same target this row saw.
+                                        const dropY = root.trackOffsetY(trackRow.trackIndex)
+                                                    + drop.y
+                                        root.performAssetDrop(assetIndex, drop.x, dropY)
                                     }
                                 }
 
-                                Rectangle {
-                                    visible: root.dropCreatesNewTrack && trackRow.trackIndex === 0
-                                    anchors.top: parent.top
-                                    width: parent.width
-                                    height: 3
-                                    color: Theme.primary
-                                    z: 6
-                                }
-
                                 // Landing preview outline (library drop or clip move).
+                                // Hidden while creating a new track — that state uses the
+                                // reserved lane above, not a ghost on an existing row.
                                 Rectangle {
                                     visible: root.dropTrackIndex === trackRow.trackIndex
+                                             && !root.dropCreatesNewTrack
                                     x: root.dropStartSeconds * root.pxPerSecond
                                     width: root.dropDurationSeconds * root.pxPerSecond
                                     height: parent.height
@@ -1160,33 +1312,31 @@ PanelFrame {
                                         property var rightClip: partnerIndex >= 0
                                             ? root.tracks[trackRow.trackIndex].clips[partnerIndex]
                                             : null
-                                        property bool clipsLinked: partnerIndex >= 0
+                                        property bool physicallyOverlapping: leftClip && rightClip
+                                            && rightClip.start < (leftClip.start + leftClip.duration)
                                         property real regionStart: {
-                                            if (!hasTransition && !clipsLinked)
+                                            if (!leftClip || !rightClip)
                                                 return 0
                                             if (hasTransition && transitionData.start !== undefined)
                                                 return transitionData.start
-                                            if (!rightClip)
-                                                return 0
-                                            const leftEnd = leftClip.start + leftClip.duration
-                                            if (rightClip.start < leftEnd)
+                                            if (physicallyOverlapping)
                                                 return rightClip.start
-                                            return leftEnd - 0.25
+                                            return 0
                                         }
                                         property real regionEnd: {
-                                            if (!hasTransition && !clipsLinked)
+                                            if (!leftClip || !rightClip)
                                                 return 0
                                             if (hasTransition && transitionData.end !== undefined)
                                                 return transitionData.end
-                                            if (!rightClip)
-                                                return 0
-                                            const leftEnd = leftClip.start + leftClip.duration
-                                            if (rightClip.start < leftEnd)
-                                                return leftEnd
-                                            return leftEnd + 0.25
+                                            if (physicallyOverlapping)
+                                                return leftClip.start + leftClip.duration
+                                            return 0
                                         }
-                                        property bool showRegion: (trackType === "video" || trackType === "shape")
-                                                                  && clipsLinked
+                                        property bool showRegion: (trackType === "video"
+                                                                   || trackType === "shape"
+                                                                   || trackType === "text")
+                                                                  && leftClip && rightClip
+                                                                  && (physicallyOverlapping || hasTransition)
                                                                   && regionEnd > regionStart
 
                                         z: 10
@@ -1288,6 +1438,112 @@ PanelFrame {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Library asset drops — declared after track rows so Wayland's
+                    // Z-order DnD hit-test prefers this overlay. Do not set
+                    // opacity: 0: Item docs say opacity 0 disables mouse events,
+                    // and Mutter then never delivers drag moves to this DropArea.
+                    DropArea {
+                        id: timelineAssetDrop
+                        // No `enabled: draggingAssetIndex >= 0` gate: `keys` below
+                        // already excludes effect/shape/transition drags, and
+                        // gating on state written by the drag source in the same
+                        // tick meant that if it did not land before the first
+                        // DragEnter the overlay was skipped entirely — leaving only
+                        // the per-track DropAreas, which accept nothing but a
+                        // compatible track and never a new-track boundary.
+                        x: 0
+                        y: Theme.timelineRulerHeight + Theme.timelineBookmarkRowHeight
+                        width: parent.width
+                        // Extends past the last track to the bottom of the
+                        // content area: dropping in that empty space is how a
+                        // track gets appended below the existing ones.
+                        height: Math.max(root.totalTracksHeight(),
+                                         flick.contentHeight - flick.headerHeight)
+                        z: 250
+                        keys: ["text/plain"]
+
+                        function assetIndexFromDrop(drop) {
+                            if (EditorState.draggingAssetIndex >= 0)
+                                return EditorState.draggingAssetIndex
+                            const text = drop.hasText ? drop.text : drop.getDataAsString("text/plain")
+                            const idx = parseInt(text)
+                            return isNaN(idx) ? -1 : idx
+                        }
+
+                        function updateAssetDrag(drop) {
+                            const assetIndex = assetIndexFromDrop(drop)
+                            if (assetIndex < 0) {
+                                root.clearLandingPreview()
+                                return
+                            }
+                            root.updateAssetDropPreview(assetIndex, drop.x, drop.y)
+                        }
+
+                        onEntered: (drop) => updateAssetDrag(drop)
+                        onPositionChanged: (drop) => updateAssetDrag(drop)
+                        onExited: root.clearLandingPreview()
+                        onDropped: (drop) => {
+                            drop.accept(Qt.CopyAction)
+                            const assetIndex = assetIndexFromDrop(drop)
+                            root.clearLandingPreview()
+                            root.performAssetDrop(assetIndex, drop.x, drop.y)
+                        }
+                    }
+
+                    // New-track indicator: a full-height ghost lane straddling the
+                    // boundary the track would be inserted at, with the clip that
+                    // would land in it. An overlay rather than a reserved row, so
+                    // no DropArea geometry moves while a drag is live — and drawn
+                    // at real track height so it reads as a track, not a hairline.
+                    Item {
+                        id: newTrackIndicator
+                        // Not also gated on the drag being active: dropCreatesNewTrack
+                        // is only ever set during one, and is cleared on exit, drop
+                        // and abandon — an extra condition here is one more way for
+                        // the ghost to silently not appear.
+                        visible: root.dropCreatesNewTrack
+                        readonly property real laneHeight:
+                            root.trackBaseHeight(EditorState.trackTypeForAsset(
+                                                     EditorState.draggingAssetIndex))
+                        x: 0
+                        y: Theme.timelineRulerHeight + Theme.timelineBookmarkRowHeight
+                           + root.newTrackBoundaryY(root.dropNewTrackIndex)
+                           - laneHeight / 2
+                        width: parent.width
+                        height: laneHeight
+                        z: 240
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Theme.radiusSm
+                            color: Qt.rgba(Theme.panelBackground.r, Theme.panelBackground.g,
+                                           Theme.panelBackground.b, 0.92)
+                            border.width: Theme.borderWidth
+                            border.color: Theme.primary
+                        }
+
+                        // The boundary itself, so it is unambiguous which gap the
+                        // lane is going into.
+                        Rectangle {
+                            width: parent.width
+                            height: 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: Theme.primary
+                        }
+
+                        Rectangle {
+                            x: root.dropStartSeconds * root.pxPerSecond
+                            width: Math.max(2, root.dropDurationSeconds * root.pxPerSecond)
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.margins: 2
+                            radius: Theme.radiusSm
+                            color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.3)
+                            border.width: 2
+                            border.color: Theme.primary
                         }
                     }
 
@@ -1596,6 +1852,99 @@ PanelFrame {
         function onPlayheadSecondsChanged() {
             if (EditorState.playing)
                 root.ensurePlayheadVisible()
+        }
+        // A drag abandoned outside the timeline never fires onExited/onDropped
+        // on any DropArea here, so the landing outline used to stay painted.
+        function onDraggingAssetIndexChanged() {
+            if (EditorState.draggingAssetIndex < 0)
+                root.clearLandingPreview()
+        }
+    }
+
+    ThemedDialog {
+        id: bookmarkRenameDialog
+        title: qsTr("Rename bookmark")
+        acceptText: qsTr("Rename")
+        preferredWidth: Theme.dialogWidthSm
+
+        contentItem: Column {
+            width: parent ? parent.width : Theme.dialogWidthSm
+            spacing: Theme.spacingMd
+
+            ThemedLabel {
+                width: parent.width
+                text: qsTr("Label")
+                size: "sm"
+            }
+            ThemedTextField {
+                id: bookmarkRenameField
+                width: parent.width
+                placeholderText: qsTr("Bookmark name")
+                // Focus the field once the dialog is up so typing starts immediately.
+                Component.onCompleted: Qt.callLater(function() {
+                    if (bookmarkRenameDialog.visible)
+                        forceActiveFocus()
+                })
+            }
+        }
+
+        onOpened: {
+            bookmarkRenameField.forceActiveFocus()
+            bookmarkRenameField.selectAll()
+        }
+        onAccepted: {
+            if (bookmarkRow.renameIndex < 0)
+                return
+            const bookmarks = EditorState.bookmarks
+            if (bookmarkRow.renameIndex >= bookmarks.length)
+                return
+            const seconds = bookmarks[bookmarkRow.renameIndex].seconds
+            const label = bookmarkRenameField.text.trim()
+            EditorState.updateBookmark(bookmarkRow.renameIndex, seconds,
+                                       label.length > 0 ? label : qsTr("Bookmark"))
+            bookmarkRow.renameIndex = -1
+        }
+        onRejected: bookmarkRow.renameIndex = -1
+    }
+
+    ThemedDialog {
+        id: clipRenameDialog
+        title: qsTr("Rename clip")
+        acceptText: qsTr("Rename")
+        preferredWidth: Theme.dialogWidthSm
+
+        contentItem: Column {
+            width: parent ? parent.width : Theme.dialogWidthSm
+            spacing: Theme.spacingMd
+
+            ThemedLabel {
+                width: parent.width
+                text: qsTr("Name")
+                size: "sm"
+            }
+            ThemedTextField {
+                id: clipRenameField
+                width: parent.width
+                placeholderText: qsTr("Clip name")
+            }
+        }
+
+        onOpened: {
+            clipRenameField.forceActiveFocus()
+            clipRenameField.selectAll()
+        }
+        onAccepted: {
+            if (root.renameClipTrack < 0 || root.renameClipIndex < 0)
+                return
+            const label = clipRenameField.text.trim()
+            if (label.length > 0)
+                EditorState.setClipName(root.renameClipTrack, root.renameClipIndex, label)
+            root.renameClipTrack = -1
+            root.renameClipIndex = -1
+        }
+        onRejected: {
+            root.renameClipTrack = -1
+            root.renameClipIndex = -1
         }
     }
 }

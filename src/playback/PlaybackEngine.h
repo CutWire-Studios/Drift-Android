@@ -5,6 +5,7 @@
 #include "core/Project.h"
 #include "core/Time.h"
 #include "engine/AudioMixer.h"
+#include "engine/audio/ClipAudioRetimer.h"
 
 #include <QAudioFormat>
 #include <QAudioSink>
@@ -49,6 +50,7 @@ class PlaybackEngine : public QObject
     Q_PROPERTY(bool playing READ isPlaying NOTIFY playingChanged)
     Q_PROPERTY(QString previewQuality READ previewQuality WRITE setPreviewQuality NOTIFY previewQualityChanged)
     Q_PROPERTY(QString playbackMode READ playbackMode WRITE setPlaybackMode NOTIFY playbackModeChanged)
+    Q_PROPERTY(double playbackRate READ playbackRate WRITE setPlaybackRate NOTIFY playbackRateChanged)
 
 public:
     explicit PlaybackEngine(QObject *parent = nullptr);
@@ -69,6 +71,11 @@ public:
     // every frame is rendered and shown, silently and slower than realtime.
     QString playbackMode() const;
     void setPlaybackMode(const QString &mode);
+    // Timeline seconds covered per real second. Audio keeps its pitch at every rate; see fillAudio.
+    // Only the values the preview offers are accepted, so a typo in QML cannot put the transport
+    // somewhere the stretcher has never been tested.
+    double playbackRate() const { return m_playbackRate; }
+    void setPlaybackRate(double rate);
 
     Q_INVOKABLE void play();
     Q_INVOKABLE void pause();
@@ -84,6 +91,7 @@ signals:
     void playingChanged();
     void previewQualityChanged();
     void playbackModeChanged();
+    void playbackRateChanged();
     void playheadUsChanged(quint64 us);
 
 private:
@@ -118,6 +126,13 @@ private:
     std::atomic<bool> m_playing = false;
     QString m_previewQuality = QStringLiteral("full");
     QString m_playbackMode = QStringLiteral("fast");
+    // Not persisted, unlike quality and mode: a session left at 4x would otherwise come back at 4x
+    // with nothing to explain why playback runs away.
+    double m_playbackRate = 1.0;
+    // Global retiming for non-1x rates. Touched only from the audio thread; the GUI thread asks for
+    // a restart by bumping the generation below rather than reaching into its state.
+    drift::ClipAudioRetimer m_rateRetimer;
+    std::atomic<quint64> m_audioStreamGeneration{1};
     // Playhead position the in-flight quality-mode frame was requested for; a
     // seek that lands elsewhere while it renders must not be stepped over.
     drift::TimeUs m_qualityRequestUs = -1;

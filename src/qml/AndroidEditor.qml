@@ -45,6 +45,30 @@ Item {
             propertiesSheet.close()
     }
 
+    // Android Back, delegated from AndroidMain. Returns true when it consumed the press,
+    // so a sheet or dialog closes instead of the editor being popped out from under it.
+    function handleBack() {
+        if (topBar.menuOpen) {
+            topBar.closeMenu()
+            return true
+        }
+        if (exportProgressDialog.visible) {
+            exportProgressDialog.close()
+            return true
+        }
+        if (exportDialog.visible) {
+            exportDialog.close()
+            return true
+        }
+        if (packageProgressDialog.visible)
+            return true // a package render is running; swallow rather than abandon it
+        if (assetsSheet.opened || propertiesSheet.opened) {
+            root.closeSheets()
+            return true
+        }
+        return false
+    }
+
     function saveProject() {
         if (EditorState.currentProjectPath && EditorState.currentProjectPath.length > 0) {
             EditorState.saveProject(EditorState.fileUrl(EditorState.currentProjectPath))
@@ -89,22 +113,57 @@ Item {
             width: parent.width
             onBackRequested: root.backRequested()
             onExportRequested: exportDialog.openDialog()
+            onExportProgressRequested: {
+                exportProgressDialog.dismissed = false
+                exportProgressDialog.openDialog()
+            }
             onSaveRequested: root.saveProject()
             onPackageRequested: root.packageProject()
             onOpenRequested: root.openProject()
             onNewRequested: root.requestNewProject()
-            onLayoutRequested: layoutChooser.openFromSettings()
+            onLayoutRequested: Window.window.openLayoutChooser()
         }
 
         SplitView {
             id: editorSplit
             width: parent.width
             height: Math.max(0, parent.height - topBar.height - rail.height)
-            orientation: Qt.Vertical
+            // Landscape and multi-window leave roughly 260px of height, which a vertical
+            // split cannot divide into a usable preview and a usable timeline. Side by
+            // side it divides the axis there is room on instead.
+            readonly property bool sideBySide: width > height * 1.2
+            orientation: sideBySide ? Qt.Horizontal : Qt.Vertical
+
+            // Both minimums used to clamp to the whole pane (Math.min(height, ...)), so
+            // together they could demand more than the pane had and SplitView let the last
+            // item overflow behind the rail. They share a budget now: scaled down in
+            // proportion whenever the two wants exceed what is actually available.
+            readonly property real budget: Math.max(
+                0, (sideBySide ? width : height) - Theme.androidSplitterHeight)
+            readonly property real wantPreviewMin: Theme.androidPreviewTransportHeight + 72
+            readonly property real wantTimelineMin: Theme.androidEditActionsHeight + 120
+            // Side by side the axis being divided is width, and the two panes need very
+            // different amounts of it: the preview's transport is a five-button row, the
+            // timeline needs room for its track labels plus some visible seconds. Reusing
+            // the vertical numbers let the preview shrink to 120px — narrower than its own
+            // transport.
+            readonly property real wantPreviewMinW: 220
+            readonly property real wantTimelineMinW: Theme.androidTrackLabelsWidth + 160
+            readonly property real minScale: {
+                const want = sideBySide ? wantPreviewMinW + wantTimelineMinW
+                                        : wantPreviewMin + wantTimelineMin
+                return want > 0 ? Math.min(1, budget / want) : 1
+            }
+            readonly property real previewMin: wantPreviewMin * minScale
+            readonly property real timelineMin: wantTimelineMin * minScale
+            readonly property real previewMinW: wantPreviewMinW * minScale
+            readonly property real timelineMinW: wantTimelineMinW * minScale
 
             handle: Item {
-                implicitWidth: editorSplit.width
-                implicitHeight: Theme.androidSplitterHeight
+                implicitWidth: editorSplit.sideBySide ? Theme.androidSplitterHeight
+                                                      : editorSplit.width
+                implicitHeight: editorSplit.sideBySide ? editorSplit.height
+                                                       : Theme.androidSplitterHeight
 
                 Rectangle {
                     anchors.fill: parent
@@ -114,8 +173,8 @@ Item {
                 Rectangle {
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.verticalCenter: parent.verticalCenter
-                    width: 40
-                    height: 4
+                    width: editorSplit.sideBySide ? 4 : 40
+                    height: editorSplit.sideBySide ? 40 : 4
                     radius: 2
                     color: T.SplitHandle.pressed ? Theme.primary : Theme.panelBorder
                 }
@@ -123,7 +182,7 @@ Item {
                 MouseArea {
                     anchors.fill: parent
                     acceptedButtons: Qt.NoButton
-                    cursorShape: Qt.SplitVCursor
+                    cursorShape: editorSplit.sideBySide ? Qt.SplitHCursor : Qt.SplitVCursor
                 }
             }
 
@@ -132,21 +191,25 @@ Item {
                 // Avoid fixed mins larger than the first layout pass (height may be 0).
                 SplitView.preferredHeight: Math.min(
                     implicitHeight,
-                    Math.max(SplitView.minimumHeight, editorSplit.height * 0.42))
-                SplitView.minimumHeight: Math.min(
-                    editorSplit.height,
-                    Theme.androidPreviewTransportHeight + 72)
+                    Math.max(editorSplit.previewMin, editorSplit.height * 0.42))
+                SplitView.minimumHeight: editorSplit.previewMin
                 SplitView.maximumHeight: Math.max(
-                    SplitView.minimumHeight,
-                    editorSplit.height * 0.72)
+                    editorSplit.previewMin, editorSplit.height * 0.72)
+                // SplitView reads only the pair matching its current orientation, so both
+                // sets are declared rather than swapped.
+                SplitView.preferredWidth: Math.max(editorSplit.previewMinW,
+                                                   editorSplit.width * 0.45)
+                SplitView.minimumWidth: editorSplit.previewMinW
+                SplitView.maximumWidth: Math.max(editorSplit.previewMinW,
+                                                 editorSplit.width * 0.65)
             }
 
             Item {
                 id: timelinePane
                 SplitView.fillHeight: true
-                SplitView.minimumHeight: Math.min(
-                    editorSplit.height,
-                    Theme.androidEditActionsHeight + 120)
+                SplitView.fillWidth: true
+                SplitView.minimumHeight: editorSplit.timelineMin
+                SplitView.minimumWidth: editorSplit.timelineMinW
 
                 AndroidEditActions {
                     id: editActions
@@ -281,10 +344,6 @@ Item {
 
     PackageProgressDialog {
         id: packageProgressDialog
-    }
-
-    LayoutChooserDialog {
-        id: layoutChooser
     }
 
     Connections {

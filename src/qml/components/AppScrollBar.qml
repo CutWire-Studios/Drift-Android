@@ -9,18 +9,23 @@ ScrollBar {
     id: control
 
     padding: 2
+    hoverEnabled: true
 
     contentItem: Rectangle {
         implicitWidth: control.interactive ? 8 : 2
         implicitHeight: control.interactive ? 8 : 2
         radius: Math.min(width, height) / 2
-        color: control.pressed ? Theme.mutedForeground : Theme.panelBorder
+        color: control.pressed ? Theme.scrollbarHandlePressed
+                              : (control.hovered ? Theme.scrollbarHandleHover : Theme.scrollbarHandle)
         opacity: 0.0
 
         states: State {
             name: "active"
             when: control.policy === ScrollBar.AlwaysOn || (control.active && control.size < 1.0)
-            PropertyChanges { control.contentItem.opacity: 0.85 }
+            PropertyChanges {
+                target: control.contentItem
+                opacity: control.policy === ScrollBar.AlwaysOn ? 1.0 : 0.85
+            }
         }
 
         transitions: Transition {
@@ -36,7 +41,7 @@ ScrollBar {
     // a position indicator; transient bars keep an invisible track.
     background: Rectangle {
         radius: Math.min(width, height) / 2
-        color: Theme.panelBorder
-        opacity: control.policy === ScrollBar.AlwaysOn ? 0.2 : 0.0
+        color: Theme.scrollbarTrack
+        opacity: control.policy === ScrollBar.AlwaysOn ? 0.45 : 0.0
     }
 }

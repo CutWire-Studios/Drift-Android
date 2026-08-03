@@ -15,6 +15,8 @@ ApplicationWindow {
     property bool inEditor: false
     property bool forceClose: false
     property var _pendingAfterUnsaved: null
+    // The live AndroidEditor instance, so Back can ask it to close a sheet first.
+    property var editorPage: null
 
     function confirmIfDirty(action) {
         if (!EditorState.hasUnsavedChanges) {
@@ -102,7 +104,9 @@ ApplicationWindow {
     }
 
     onClosing: function (close) {
-        if (window.forceClose || !EditorState.hasUnsavedChanges)
+        // Opting in to reopening the last project means the autosave is restored on the
+        // next launch, so asking to save on the way out is a question already answered.
+        if (window.forceClose || !EditorState.hasUnsavedChanges || EditorState.reopenLastProject)
             return
         close.accepted = false
         confirmIfDirty(function () {
@@ -112,9 +116,38 @@ ApplicationWindow {
         })
     }
 
+    // Android's system Back. Order matters: a full-screen clip tool, then any open
+    // sheet/dialog, and only then the home/exit step — otherwise Back walked out of the
+    // editor from behind a modal that stayed on screen.
     Shortcut {
         sequences: [StandardKey.Back, "Esc"]
-        onActivated: window.goBack()
+        onActivated: {
+            if (window.toolWindowOpen) {
+                window.closeTopToolWindow()
+                return
+            }
+            if (window.closeTopModal())
+                return
+            if (window.editorPage && window.editorPage.handleBack())
+                return
+            window.goBack()
+        }
+    }
+
+    // Modals hosted here. They close on Escape, which Android's Back key is not, so
+    // without this Back left them on screen and walked out of the editor behind them.
+    // Ordered by how they stack: newest-opened first.
+    function closeTopModal() {
+        const modals = [projectSetupDialog, layoutChooserDialog, recoveryDialog, unsavedDialog,
+                        addonStartupDialog, addonManagerDialog, missingAddonsDialog, updateDialog,
+                        reverseProgressDialog, subtitleProgressDialog]
+        for (var i = 0; i < modals.length; ++i) {
+            if (modals[i] && modals[i].visible) {
+                modals[i].close()
+                return true
+            }
+        }
+        return false
     }
 
     ProjectSetupDialog { id: projectSetupDialog }
@@ -148,7 +181,37 @@ ApplicationWindow {
     }
 
     AddonManagerDialog { id: addonManagerDialog }
+    AddonStartupDialog { id: addonStartupDialog }
     MissingAddonsDialog { id: missingAddonsDialog }
+    UpdateDialog { id: updateDialog }
+    SubtitleProgressDialog { id: subtitleProgressDialog }
+    ReverseProgressDialog { id: reverseProgressDialog }
+
+    // Long-running clip tools. These are top-level Windows on desktop; on Android the
+    // platform gives each one the whole screen, so they read as full-screen pages that
+    // the system Back key dismisses (see the Back shortcut above).
+    SegmentationWindow { id: segmentationWindow }
+    DenoiseWindow { id: denoiseWindow }
+    SpeedCurveWindow { id: speedCurveWindow }
+    FadeCurveWindow { id: fadeCurveWindow }
+
+    // Every inspector reaches these through Window.window.<name>() — the same contract
+    // Main.qml offers on desktop. A missing one is a runtime TypeError, not a dead button.
+    function openSegmentation(track, clip, startSeconds, durationSeconds) {
+        segmentationWindow.openFor(track, clip, startSeconds, durationSeconds)
+    }
+
+    function openDenoise(track, clip, durationSeconds) {
+        denoiseWindow.openFor(track, clip, durationSeconds)
+    }
+
+    function openSpeedCurve(track, clip) {
+        speedCurveWindow.openFor(track, clip)
+    }
+
+    function openFadeCurve(track, clip) {
+        fadeCurveWindow.openFor(track, clip)
+    }
 
     function openAddonManager(kind) {
         if (kind === undefined)
@@ -157,13 +220,47 @@ ApplicationWindow {
             addonManagerDialog.openForKind(kind)
     }
 
+    function openExtras() {
+        if (addonStartupDialog.openForAttention())
+            return
+        openAddonManager()
+    }
+
+    function openUpdateDialog() {
+        updateDialog.open()
+    }
+
+    readonly property alias addonAttentionNeeded: addonStartupDialog.needsAttention
+
+    function refreshAddonAttention() {
+        addonStartupDialog.refreshAttention()
+    }
+
+    // True while any of the full-screen clip tools owns the display, so the editor's
+    // Back handling defers to them instead of popping the stack behind them.
+    readonly property bool toolWindowOpen: segmentationWindow.visible || denoiseWindow.visible
+                                           || speedCurveWindow.visible || fadeCurveWindow.visible
+
+    function closeTopToolWindow() {
+        if (segmentationWindow.visible)
+            segmentationWindow.close()
+        else if (denoiseWindow.visible)
+            denoiseWindow.close()
+        else if (speedCurveWindow.visible)
+            speedCurveWindow.close()
+        else if (fadeCurveWindow.visible)
+            fadeCurveWindow.close()
+    }
+
     Timer {
         id: recoveryOpenTimer
         interval: 150
         repeat: true
         property int attempts: 0
         onTriggered: {
-            if (!EditorState.recoveryAvailable) {
+            // Opting in to reopening the last project already restores the autosave, so
+            // asking about it as well is a question the user has answered once already.
+            if (!EditorState.recoveryAvailable || EditorState.reopenLastProject) {
                 stop()
                 attempts = 0
                 return
@@ -176,15 +273,28 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        // "Reopen last project" restores the autosave or the last clean .drift silently and
+        // lands straight in the editor; the home page would be a step backwards from it.
+        if (EditorState.restoreLastSessionIfEnabled()) {
+            Qt.callLater(window.showEditor)
+            return
+        }
         if (EditorState.recoveryAvailable)
             recoveryOpenTimer.start()
+        else
+            Qt.callLater(window.refreshAddonAttention)
     }
 
     Connections {
         target: EditorState
         function onRecoveryChanged() {
+            if (EditorState.reopenLastProject)
+                return
             if (EditorState.recoveryAvailable)
                 recoveryOpenTimer.start()
+        }
+        function onOpenSegmentationWindowRequested(track, clip, startSeconds, durationSeconds) {
+            segmentationWindow.openFor(track, clip, startSeconds, durationSeconds, true)
         }
         function onMissingAddons(addons) {
             missingAddonsDialog.openFor(addons)
@@ -205,17 +315,60 @@ ApplicationWindow {
             else
                 Toasts.error(qsTr("Couldn't create the shareable copy: %1").arg(message))
         }
+        function onSubtitleGenerationFinished(ok, message) {
+            if (ok)
+                Toasts.success(message.length > 0 ? message : qsTr("Captions created."))
+            else
+                Toasts.error(message.length > 0
+                             ? qsTr("Couldn’t create captions: %1").arg(message)
+                             : qsTr("Couldn’t create captions."))
+        }
+        // Severity comes from the backend. Inferring it by regexing the prose matched
+        // none of the real failure strings, so a corrupt-project open read as a neutral
+        // info toast that auto-dismissed like "Project saved".
         function onLastMessageChanged() {
             const message = EditorState.lastMessage
             if (message.length === 0)
                 return
-            if (/fail|error|could not|unable|invalid|denied/i.test(message))
-                Toasts.error(message)
-            else
-                Toasts.info(message)
+            switch (EditorState.lastMessageSeverity) {
+            case "error":   Toasts.error(message); break
+            case "warning": Toasts.warning(message); break
+            case "success": Toasts.success(message); break
+            default:        Toasts.info(message); break
+            }
         }
         function onTransformBlocked(reason) {
             Toasts.warning(reason)
+        }
+    }
+
+    // Backgrounding the app leaves the audio sink and the composite timer running, which
+    // keeps decoding video nobody can see and holds the audio focus. Android will kill the
+    // process for it eventually; pausing is the honest response to losing the foreground.
+    Connections {
+        target: Qt.application
+        function onStateChanged() {
+            if (Qt.application.state !== Qt.ApplicationActive && EditorState.playing)
+                EditorState.playback.pause()
+        }
+    }
+
+    Connections {
+        target: Addons
+        function onRefreshingChanged() {
+            if (!Addons.refreshing)
+                Qt.callLater(window.refreshAddonAttention)
+        }
+        function onCatalogChanged() { Qt.callLater(window.refreshAddonAttention) }
+        function onRemindEssentialChanged() { Qt.callLater(window.refreshAddonAttention) }
+        function onRemindUpdatesChanged() { Qt.callLater(window.refreshAddonAttention) }
+
+        // A download or signature failure only reaches the addon manager's status line,
+        // so a pack that failed while that dialog was closed failed silently.
+        function onTransferFailed(id, reason) {
+            if (reason === "Cancelled")
+                return
+            Toasts.error(qsTr("Couldn’t install “%1”: %2").arg(id).arg(reason))
         }
     }
 
@@ -237,6 +390,8 @@ ApplicationWindow {
     Component {
         id: editorComponent
         AndroidEditor {
+            Component.onCompleted: window.editorPage = this
+            Component.onDestruction: if (window.editorPage === this) window.editorPage = null
             onBackRequested: window.goBack()
             onGoHomeRequested: {
                 window.inEditor = false

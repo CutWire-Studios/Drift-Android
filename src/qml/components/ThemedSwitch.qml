@@ -44,8 +44,10 @@ Switch {
             color: Theme.primaryForeground
             scale: root.down ? 0.9 : 1.0
 
+            // Travel across the track is on-screen movement, not an entrance:
+            // ease-in-out, so it neither jerks off the mark nor overshoots.
             Behavior on x {
-                NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easingInOut }
             }
             Behavior on scale {
                 NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }

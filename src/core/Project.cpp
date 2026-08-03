@@ -98,6 +98,8 @@ QJsonArray effectsToJson(const QList<Effect> &effects)
             {QStringLiteral("catalogId"), effect.catalogId},
             {QStringLiteral("parameters"), params},
         };
+        if (!effect.enabled)
+            object.insert(QStringLiteral("enabled"), false);
         if (!paramKeyframes.isEmpty())
             object.insert(QStringLiteral("paramKeyframes"), paramKeyframes);
         array.append(object);
@@ -113,6 +115,7 @@ QList<Effect> effectsFromJson(const QJsonArray &array)
         Effect effect;
         effect.name = object.value(QStringLiteral("name")).toString();
         effect.catalogId = object.value(QStringLiteral("catalogId")).toString();
+        effect.enabled = object.value(QStringLiteral("enabled")).toBool(true);
         const QJsonObject params = object.value(QStringLiteral("parameters")).toObject();
         for (auto it = params.constBegin(); it != params.constEnd(); ++it)
             effect.parameters.insert(it.key(), it.value().toVariant());
@@ -194,6 +197,7 @@ QJsonObject textStyleToJson(const TextStyle &s)
         {QStringLiteral("wordWrap"), s.wordWrap},
         {QStringLiteral("lineHeight"), s.lineHeight},
         {QStringLiteral("letterSpacing"), s.letterSpacing},
+        {QStringLiteral("outlineEnabled"), s.outlineEnabled},
         {QStringLiteral("outlineWidth"), s.outlineWidth},
         {QStringLiteral("outlineColor"), s.outlineColor.name(QColor::HexArgb)},
         {QStringLiteral("shadowEnabled"), s.shadowEnabled},
@@ -253,6 +257,11 @@ TextStyle textStyleFromJson(const QJsonObject &o)
     s.letterSpacing = o.value(QStringLiteral("letterSpacing")).toDouble(s.letterSpacing);
     s.outlineWidth = o.value(QStringLiteral("outlineWidth")).toDouble(s.outlineWidth);
     s.outlineColor = QColor(o.value(QStringLiteral("outlineColor")).toString(s.outlineColor.name(QColor::HexArgb)));
+    // Projects written before outlineEnabled treated any positive width as on.
+    if (o.contains(QStringLiteral("outlineEnabled")))
+        s.outlineEnabled = o.value(QStringLiteral("outlineEnabled")).toBool(s.outlineEnabled);
+    else
+        s.outlineEnabled = s.outlineWidth > 0.0;
     s.shadowEnabled = o.value(QStringLiteral("shadowEnabled")).toBool(s.shadowEnabled);
     s.shadowOffsetX = o.value(QStringLiteral("shadowOffsetX")).toDouble(s.shadowOffsetX);
     s.shadowOffsetY = o.value(QStringLiteral("shadowOffsetY")).toDouble(s.shadowOffsetY);
@@ -502,6 +511,9 @@ QJsonObject clipToJson(const Clip &clip)
         {QStringLiteral("fadeInUs"), static_cast<double>(clip.fadeInUs)},
         {QStringLiteral("fadeOutUs"), static_cast<double>(clip.fadeOutUs)},
         {QStringLiteral("fadeCurve"), fadeCurveToString(clip.fadeCurve)},
+        {QStringLiteral("fadeShape"), clip.fadeShape.toJson()},
+        {QStringLiteral("animIn"), clipAnimationToJson(clip.animIn)},
+        {QStringLiteral("animOut"), clipAnimationToJson(clip.animOut)},
         {QStringLiteral("timelineStartUs"), static_cast<double>(clip.timelineStart)},
         {QStringLiteral("timelineDurationUs"), static_cast<double>(clip.timelineDuration)},
         {QStringLiteral("srcInUs"), static_cast<double>(clip.srcIn)},
@@ -582,6 +594,9 @@ Clip clipFromJsonV2(const QJsonObject &object, int canvasW = 1920, int canvasH =
     clip.fadeInUs = static_cast<TimeUs>(object.value(QStringLiteral("fadeInUs")).toDouble());
     clip.fadeOutUs = static_cast<TimeUs>(object.value(QStringLiteral("fadeOutUs")).toDouble());
     clip.fadeCurve = fadeCurveFromString(object.value(QStringLiteral("fadeCurve")).toString());
+    clip.fadeShape = FadeShape::fromJson(object.value(QStringLiteral("fadeShape")).toArray());
+    clip.animIn = clipAnimationFromJson(object.value(QStringLiteral("animIn")).toObject());
+    clip.animOut = clipAnimationFromJson(object.value(QStringLiteral("animOut")).toObject());
     clip.timelineStart = static_cast<TimeUs>(object.value(QStringLiteral("timelineStartUs")).toDouble());
     clip.timelineDuration = static_cast<TimeUs>(object.value(QStringLiteral("timelineDurationUs")).toDouble());
     clip.srcIn = static_cast<TimeUs>(object.value(QStringLiteral("srcInUs")).toDouble());

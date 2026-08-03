@@ -287,19 +287,22 @@ Item {
             }
 
             ThemedSlider {
+                id: innerRatioSlider
+                label: qsTr("Inner radius")
                 width: parent.width
                 from: 0.05
                 to: 0.95
                 stepSize: 0.01
-                value: root.shapeStyle.innerRatio
+                Binding on value {
+                    when: !innerRatioSlider.pressed
+                    value: root.shapeStyle.innerRatio
+                }
                 onMoved: root.setShapeKey("innerRatio", value)
                 onPressedChanged: {
-                    if (pressed) {
+                    if (pressed)
                         EditorState.beginPreviewDrag(qsTr("Shape style changed"))
-                    } else {
+                    else
                         EditorState.commitPreviewDrag()
-                        value = Qt.binding(() => root.shapeStyle.innerRatio)
-                    }
                 }
             }
         }
@@ -312,19 +315,22 @@ Item {
             ThemedLabel { text: qsTr("Head size") }
 
             ThemedSlider {
+                id: headSizeSlider
+                label: qsTr("Head size")
                 width: parent.width
                 from: 0.05
                 to: 0.9
                 stepSize: 0.01
-                value: root.shapeStyle.headSize
+                Binding on value {
+                    when: !headSizeSlider.pressed
+                    value: root.shapeStyle.headSize
+                }
                 onMoved: root.setShapeKey("headSize", value)
                 onPressedChanged: {
-                    if (pressed) {
+                    if (pressed)
                         EditorState.beginPreviewDrag(qsTr("Shape style changed"))
-                    } else {
+                    else
                         EditorState.commitPreviewDrag()
-                        value = Qt.binding(() => root.shapeStyle.headSize)
-                    }
                 }
             }
         }
@@ -337,19 +343,22 @@ Item {
             ThemedLabel { text: qsTr("Thickness") }
 
             ThemedSlider {
+                id: thicknessSlider
+                label: qsTr("Thickness")
                 width: parent.width
                 from: 0.05
                 to: 1.0
                 stepSize: 0.01
-                value: root.shapeStyle.thickness
+                Binding on value {
+                    when: !thicknessSlider.pressed
+                    value: root.shapeStyle.thickness
+                }
                 onMoved: root.setShapeKey("thickness", value)
                 onPressedChanged: {
-                    if (pressed) {
+                    if (pressed)
                         EditorState.beginPreviewDrag(qsTr("Shape style changed"))
-                    } else {
+                    else
                         EditorState.commitPreviewDrag()
-                        value = Qt.binding(() => root.shapeStyle.thickness)
-                    }
                 }
             }
         }
@@ -368,38 +377,44 @@ Item {
             }
 
             ThemedSlider {
+                id: tailXSlider
+                label: qsTr("Tail position")
                 width: parent.width
                 from: 0.08
                 to: 0.92
                 stepSize: 0.01
-                value: root.shapeStyle.tailX
+                Binding on value {
+                    when: !tailXSlider.pressed
+                    value: root.shapeStyle.tailX
+                }
                 onMoved: root.setShapeKey("tailX", value)
                 onPressedChanged: {
-                    if (pressed) {
+                    if (pressed)
                         EditorState.beginPreviewDrag(qsTr("Shape style changed"))
-                    } else {
+                    else
                         EditorState.commitPreviewDrag()
-                        value = Qt.binding(() => root.shapeStyle.tailX)
-                    }
                 }
             }
 
             ThemedLabel { text: qsTr("Tail size") }
 
             ThemedSlider {
+                id: tailSizeSlider
+                label: qsTr("Tail size")
                 width: parent.width
                 from: 0.05
                 to: 0.5
                 stepSize: 0.01
-                value: root.shapeStyle.tailSize
+                Binding on value {
+                    when: !tailSizeSlider.pressed
+                    value: root.shapeStyle.tailSize
+                }
                 onMoved: root.setShapeKey("tailSize", value)
                 onPressedChanged: {
-                    if (pressed) {
+                    if (pressed)
                         EditorState.beginPreviewDrag(qsTr("Shape style changed"))
-                    } else {
+                    else
                         EditorState.commitPreviewDrag()
-                        value = Qt.binding(() => root.shapeStyle.tailSize)
-                    }
                 }
             }
         }

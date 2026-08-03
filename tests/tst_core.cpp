@@ -3,7 +3,9 @@
 #include <QColor>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSet>
 
+#include "core/ClipAnimation.h"
 #include "core/Keyframe.h"
 #include "core/Project.h"
 #include "core/ShapePath.h"
@@ -29,6 +31,7 @@ private slots:
     void keyframeNearestQuery();
     void projectSerializationRoundTrip();
     void projectMetadataRoundTrip();
+    void effectColorParamSurvivesRoundTrip();
     void clipTransformSerialization();
     void legacyFractionalTransformMigration();
     void volumeKeyframeSerialization();
@@ -73,8 +76,11 @@ private slots:
     void legacyTransitionJsonStillLoads();
     void transitionAudioCurves();
     void physicalOverlapTransitionWindow();
+    void clampClipStartNoOverlapPushesPastBlockers();
+    void clampTrimEdgesIgnoreExistingOverlaps();
     void backgroundSerialization();
     void fadeSerializationAndMultiplier();
+    void clipAnimationSerializationAndSample();
     void rebaseClipLayoutFreezesImplicitSize();
     void rebaseClipLayoutShiftsKeyframedPosition();
 };
@@ -364,6 +370,39 @@ void CoreTest::projectSerializationRoundTrip()
     QCOMPARE(loaded.tracks()[0].clips[0].timelineStart, clip.timelineStart);
     QCOMPARE(loaded.bookmarks().size(), 1);
     QCOMPARE(loaded.bookmarks()[0].label, QStringLiteral("Mark"));
+}
+
+// A colour parameter is stored as a "#rrggbb" string rather than a number, so it has to survive the
+// project file as one. Effect params round-trip through QVariant, and a silent coercion to double
+// here would reach the shader as black.
+void CoreTest::effectColorParamSurvivesRoundTrip()
+{
+    drift::Project project;
+
+    drift::Clip clip;
+    clip.id = QStringLiteral("clip-1");
+    clip.type = drift::ClipType::Video;
+    clip.timelineDuration = drift::secondsToUs(5.0);
+
+    drift::Effect effect;
+    effect.catalogId = QStringLiteral("face_lipstick");
+    effect.parameters.insert(QStringLiteral("shade"), QStringLiteral("#b03048"));
+    effect.parameters.insert(QStringLiteral("opacity"), 0.8);
+    effect.parameters.insert(QStringLiteral("coverInner"), true);
+    clip.effects.append(effect);
+    project.tracks()[0].clips.append(clip);
+
+    QString error;
+    const drift::Project loaded = drift::Project::fromJson(project.toJson(), &error);
+    QVERIFY(error.isEmpty());
+    QCOMPARE(loaded.tracks()[0].clips.size(), 1);
+    const drift::Effect &out = loaded.tracks()[0].clips[0].effects.at(0);
+
+    const QVariant shade = out.parameters.value(QStringLiteral("shade"));
+    QCOMPARE(shade.typeId(), QMetaType::QString);
+    QCOMPARE(shade.toString(), QStringLiteral("#b03048"));
+    QCOMPARE(out.parameters.value(QStringLiteral("opacity")).toDouble(), 0.8);
+    QCOMPARE(out.parameters.value(QStringLiteral("coverInner")).toBool(), true);
 }
 
 void CoreTest::clipTransformSerialization()
@@ -735,6 +774,7 @@ void CoreTest::textStyleAndBlendModeSerialization()
     clip.textStyle.wordWrap = false;
     clip.textStyle.lineHeight = 1.6;
     clip.textStyle.letterSpacing = 3.5;
+    clip.textStyle.outlineEnabled = true;
     clip.textStyle.outlineWidth = 2.5;
     clip.textStyle.outlineColor = QColor(255, 0, 0);
     clip.textStyle.shadowEnabled = true;
@@ -790,6 +830,7 @@ void CoreTest::textStyleAndBlendModeSerialization()
     QCOMPARE(s.wordWrap, false);
     QCOMPARE(s.lineHeight, 1.6);
     QCOMPARE(s.letterSpacing, 3.5);
+    QCOMPARE(s.outlineEnabled, true);
     QCOMPARE(s.outlineWidth, 2.5);
     QCOMPARE(s.outlineColor, QColor(255, 0, 0));
     QCOMPARE(s.shadowEnabled, true);
@@ -870,6 +911,34 @@ void CoreTest::legacyBoldMigratesToFontWeight()
     QCOMPARE(weightForLegacy({{QStringLiteral("pixelSize"), 40}}), 700);
     // A new-format style wins over any stale bold flag.
     QCOMPARE(weightForLegacy({{QStringLiteral("bold"), false}, {QStringLiteral("fontWeight"), 900}}), 900);
+
+    // Pre-outlineEnabled projects treated any positive width as on.
+    {
+        QJsonObject clip{
+            {QStringLiteral("id"), QStringLiteral("c1")},
+            {QStringLiteral("type"), QStringLiteral("text")},
+            {QStringLiteral("textContent"), QStringLiteral("Hi")},
+            {QStringLiteral("timelineStart"), 0},
+            {QStringLiteral("timelineDuration"), 1000000},
+            {QStringLiteral("textStyle"), QJsonObject{{QStringLiteral("outlineWidth"), 3.0}}},
+        };
+        QJsonObject track{
+            {QStringLiteral("type"), QStringLiteral("text")},
+            {QStringLiteral("clips"), QJsonArray{clip}},
+        };
+        QJsonObject project{
+            {QStringLiteral("version"), 2},
+            {QStringLiteral("width"), 1920},
+            {QStringLiteral("height"), 1080},
+            {QStringLiteral("fps"), 30},
+            {QStringLiteral("tracks"), QJsonArray{track}},
+        };
+        QString err;
+        const drift::Project loaded = drift::Project::fromJson(project, &err);
+        QVERIFY(err.isEmpty());
+        QCOMPARE(loaded.tracks().at(0).clips.at(0).textStyle.outlineEnabled, true);
+        QCOMPARE(loaded.tracks().at(0).clips.at(0).textStyle.outlineWidth, 3.0);
+    }
 }
 
 void CoreTest::textPresetsAreWellFormed()
@@ -881,12 +950,14 @@ void CoreTest::textPresetsAreWellFormed()
     for (const drift::TextPreset &preset : presets) {
         QVERIFY(!preset.id.isEmpty());
         QVERIFY(!preset.label.isEmpty());
+        QVERIFY(!preset.sampleText.isEmpty());
         QVERIFY(!ids.contains(preset.id));
         ids.insert(preset.id);
         QVERIFY(preset.style.pixelSize > 0);
         QVERIFY(!preset.style.fontFamily.isEmpty());
         QVERIFY(preset.style.fontWeight >= 100 && preset.style.fontWeight <= 900);
         QCOMPARE(drift::textStyleForPresetId(preset.id)->fontFamily, preset.style.fontFamily);
+        QCOMPARE(drift::textPresetForId(preset.id)->label, preset.label);
 
         // A pack's accent has to be usable: a stride that advances, a size that renders, and an
         // override that actually changes something when a rule picks words out.
@@ -1935,6 +2006,69 @@ void CoreTest::physicalOverlapTransitionWindow()
     QCOMPARE(endUs, drift::secondsToUs(2.0));
 }
 
+void CoreTest::clampClipStartNoOverlapPushesPastBlockers()
+{
+    drift::Track track;
+    track.type = drift::TrackType::Video;
+
+    drift::Clip blocker;
+    blocker.id = QStringLiteral("blocker");
+    blocker.timelineStart = drift::secondsToUs(1.0);
+    blocker.timelineDuration = drift::secondsToUs(2.0);
+    track.clips.append(blocker);
+
+    drift::Clip moving;
+    moving.id = QStringLiteral("moving");
+    moving.timelineDuration = drift::secondsToUs(1.0);
+
+    const QSet<QString> exclude{moving.id};
+    // Dropping into the blocker should land just after it.
+    QCOMPARE(drift::clampClipStartNoOverlap(track, exclude, drift::secondsToUs(1.5),
+                                            moving.timelineDuration),
+             drift::secondsToUs(3.0));
+    // Abutting the blocker is allowed.
+    QCOMPARE(drift::clampClipStartNoOverlap(track, exclude, drift::secondsToUs(3.0),
+                                            moving.timelineDuration),
+             drift::secondsToUs(3.0));
+    // Clear space before the blocker stays put.
+    QCOMPARE(drift::clampClipStartNoOverlap(track, exclude, 0, moving.timelineDuration), 0);
+}
+
+void CoreTest::clampTrimEdgesIgnoreExistingOverlaps()
+{
+    drift::Track track;
+    track.type = drift::TrackType::Video;
+
+    drift::Clip left;
+    left.id = QStringLiteral("left");
+    left.timelineStart = 0;
+    left.timelineDuration = drift::secondsToUs(2.0);
+
+    drift::Clip mid;
+    mid.id = QStringLiteral("mid");
+    mid.timelineStart = drift::secondsToUs(1.0); // already overlaps left
+    mid.timelineDuration = drift::secondsToUs(2.0);
+
+    drift::Clip right;
+    right.id = QStringLiteral("right");
+    right.timelineStart = drift::secondsToUs(4.0);
+    right.timelineDuration = drift::secondsToUs(1.0);
+
+    track.clips.append(left);
+    track.clips.append(mid);
+    track.clips.append(right);
+
+    const QSet<QString> excludeMid{mid.id};
+    // Extending mid left must not jump past the already-overlapping left clip.
+    QCOMPARE(drift::clampClipStartAgainstLeftNeighbors(track, excludeMid, mid.timelineStart,
+                                                       drift::secondsToUs(0.5)),
+             drift::secondsToUs(0.5));
+    // Extending mid right stops at the abutting/gapped right neighbor.
+    QCOMPARE(drift::clampClipEndNoOverlap(track, excludeMid, mid.timelineEnd(),
+                                          drift::secondsToUs(4.5)),
+             drift::secondsToUs(4.0));
+}
+
 void CoreTest::backgroundSerialization()
 {
     // Default background is opaque black / Color and must survive a round-trip.
@@ -2008,11 +2142,94 @@ void CoreTest::fadeSerializationAndMultiplier()
     QVERIFY(qAbs(c.fadeMultiplier(c.timelineStart + drift::secondsToUs(1.5)) - 1.0) < 1e-6);
     QVERIFY(qAbs(c.fadeMultiplier(c.timelineEnd() - drift::secondsToUs(1.0)) - 0.5) < 1e-6);
 
+    // Presets must diverge early in the fade so Smooth / Natural are audible and visible.
+    // (Smoothstep equals Linear at t=0.5, so sample at quarter-fade.)
+    drift::Clip smooth = c;
+    smooth.fadeCurve = drift::FadeCurve::Smooth;
+    drift::Clip natural = c;
+    natural.fadeCurve = drift::FadeCurve::EqualPower;
+    const drift::TimeUs earlyIn = c.timelineStart + drift::secondsToUs(0.25);
+    const double linearEarly = c.fadeMultiplier(earlyIn);
+    const double smoothEarly = smooth.fadeMultiplier(earlyIn);
+    const double naturalEarly = natural.fadeMultiplier(earlyIn);
+    QVERIFY(smoothEarly < linearEarly - 0.05);
+    QVERIFY(naturalEarly > linearEarly + 0.05);
+
+    // Custom shape round-trips and drives the multiplier.
+    drift::Clip custom = c;
+    custom.fadeCurve = drift::FadeCurve::Custom;
+    custom.fadeShape.setPoints({QPointF(0.0, 0.0), QPointF(0.5, 0.25), QPointF(1.0, 1.0)});
+    project.tracks()[0].clips[0] = custom;
+    const drift::Project customLoaded = drift::Project::fromJson(project.toJson(), &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const drift::Clip &cc = customLoaded.tracks()[0].clips[0];
+    QCOMPARE(cc.fadeCurve, drift::FadeCurve::Custom);
+    QVERIFY(!cc.fadeShape.isEmpty());
+    const drift::TimeUs midIn = c.timelineStart + drift::secondsToUs(0.5);
+    QVERIFY(qAbs(cc.fadeMultiplier(midIn) - 0.25) < 1e-6);
+
     // A clip with no fades is always fully present.
     drift::Clip plain;
     plain.timelineStart = 0;
     plain.timelineDuration = drift::secondsToUs(2.0);
     QCOMPARE(plain.fadeMultiplier(drift::secondsToUs(1.0)), 1.0);
+}
+
+void CoreTest::clipAnimationSerializationAndSample()
+{
+    drift::Project project;
+    project.tracks().clear();
+    project.tracks().append(drift::Track{.type = drift::TrackType::Video});
+
+    drift::Clip clip;
+    clip.id = QStringLiteral("anim-clip");
+    clip.type = drift::ClipType::Shape;
+    clip.timelineStart = 0;
+    clip.timelineDuration = drift::secondsToUs(2.0);
+    clip.animIn = {drift::ClipAnimKind::Fade, drift::secondsToUs(1.0), drift::ClipAnimEase::Linear,
+                   drift::FadeCurve::Linear};
+    clip.animOut = {drift::ClipAnimKind::ZoomIn, drift::secondsToUs(0.5), drift::ClipAnimEase::EaseOut,
+                    drift::FadeCurve::EqualPower};
+    project.tracks()[0].clips.append(clip);
+
+    QString error;
+    const drift::Project loaded = drift::Project::fromJson(project.toJson(), &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const drift::Clip &c = loaded.tracks()[0].clips[0];
+    QCOMPARE(c.animIn.kind, drift::ClipAnimKind::Fade);
+    QCOMPARE(c.animIn.durationUs, drift::secondsToUs(1.0));
+    QCOMPARE(c.animIn.curve, drift::FadeCurve::Linear);
+    QCOMPARE(c.animOut.kind, drift::ClipAnimKind::ZoomIn);
+    QCOMPARE(c.animOut.curve, drift::FadeCurve::EqualPower);
+
+    // Fade kind owns opacity via fadeMultiplier (not body-anim sample).
+    QVERIFY(qAbs(c.fadeMultiplier(drift::secondsToUs(0.5)) - 0.5) < 1e-6);
+    const drift::ClipAnimSample midIn =
+        drift::evaluateClipAnimation(c.timelineStart, c.timelineDuration, c.animIn, {},
+                                     drift::secondsToUs(0.5), 100.0, 100.0);
+    QVERIFY(qAbs(midIn.opacity - 1.0) < 1e-6);
+
+    drift::Clip zoom;
+    zoom.timelineStart = 0;
+    zoom.timelineDuration = drift::secondsToUs(2.0);
+    zoom.animIn = {drift::ClipAnimKind::ZoomIn, drift::secondsToUs(1.0), drift::ClipAnimEase::Linear,
+                   drift::FadeCurve::Linear};
+    const drift::ClipAnimSample zoomMid =
+        drift::evaluateClipAnimation(zoom.timelineStart, zoom.timelineDuration, zoom.animIn, {},
+                                     drift::secondsToUs(0.5), 100.0, 100.0);
+    QVERIFY(qAbs(zoomMid.scale - 0.8) < 1e-6); // 0.6 + 0.4 * 0.5
+    QVERIFY(zoomMid.scale < 1.0);
+
+    // Smooth style bends motion progress vs linear at quarter-time.
+    drift::Clip smoothZoom = zoom;
+    smoothZoom.animIn.curve = drift::FadeCurve::Smooth;
+    const drift::ClipAnimSample smoothMid =
+        drift::evaluateClipAnimation(smoothZoom.timelineStart, smoothZoom.timelineDuration,
+                                     smoothZoom.animIn, {}, drift::secondsToUs(0.25), 100.0, 100.0);
+    const drift::ClipAnimSample linearQuarter =
+        drift::evaluateClipAnimation(zoom.timelineStart, zoom.timelineDuration, zoom.animIn, {},
+                                     drift::secondsToUs(0.25), 100.0, 100.0);
+    QVERIFY(smoothMid.scale < linearQuarter.scale - 0.01);
 }
 
 // A canvas resize must not move or rescale anything: clips that relied on the

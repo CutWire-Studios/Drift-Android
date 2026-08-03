@@ -2,6 +2,7 @@
 
 #include "AddonRegistry.h"
 
+#include <QColor>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -127,7 +128,12 @@ bool parseParameters(const QJsonArray &params, QList<drift::EffectParamSpec> *ou
         if (spec.label.isEmpty())
             spec.label = spec.key;
         const QString type = p.value(QStringLiteral("type")).toString(QStringLiteral("float"));
-        spec.isBoolean = (type == QLatin1String("bool") || type == QLatin1String("boolean"));
+        if (type == QLatin1String("bool") || type == QLatin1String("boolean"))
+            spec.type = drift::EffectParamType::Bool;
+        else if (type == QLatin1String("color") || type == QLatin1String("colour"))
+            spec.type = drift::EffectParamType::Color;
+        else
+            spec.type = drift::EffectParamType::Float;
         spec.min = p.value(QStringLiteral("minValue")).toDouble(p.value(QStringLiteral("min")).toDouble(0.0));
         spec.max = p.value(QStringLiteral("maxValue")).toDouble(p.value(QStringLiteral("max")).toDouble(1.0));
         spec.defaultValue =
@@ -136,6 +142,21 @@ bool parseParameters(const QJsonArray &params, QList<drift::EffectParamSpec> *ou
         if (spec.key.isEmpty()) {
             fail(errorOut, QStringLiteral("parameter missing identifier"));
             return false;
+        }
+        if (spec.type == drift::EffectParamType::Color) {
+            QString hex = p.value(QStringLiteral("defaultValue")).toString();
+            if (hex.isEmpty())
+                hex = p.value(QStringLiteral("default")).toString();
+            const QColor color(hex);
+            if (!hex.startsWith(QLatin1Char('#')) || !color.isValid()) {
+                fail(errorOut, QStringLiteral("parameter '%1' has an invalid colour default '%2'")
+                                   .arg(spec.key, hex));
+                return false;
+            }
+            // Normalized here so the project file, the swatch and the uniform all agree on one
+            // spelling. Alpha is dropped on purpose: colours bind as vec3, and a package that
+            // wants transparency declares a separate opacity float.
+            spec.defaultColorHex = color.name(QColor::HexRgb);
         }
         if (gpuBackend && drift::isReservedGpuUniform(spec.key)) {
             fail(errorOut,

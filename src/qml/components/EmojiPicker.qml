@@ -172,6 +172,10 @@ Popup {
                     radius: Theme.radiusSm
                     color: cellHover.hovered ? Theme.popoverHover : "transparent"
 
+                    Behavior on color {
+                        ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                    }
+
                     Text {
                         anchors.centerIn: parent
                         text: cell.modelData.emoji

@@ -1,9 +1,23 @@
 #pragma once
 
 #include <QList>
+#include <QMetaType>
 #include <QString>
+#include <QVector>
 
 namespace drift {
+
+// A vecN[] uniform carried through the parameter map. Only the engine produces these — the face
+// contour loops are the one thing too large to spell out as named scalars, and 128 points would
+// otherwise mean 256 uniformLocation() lookups per pass.
+//
+// Never reaches Effect::parameters, so it never has to survive JSON: applyFaceUniforms injects it
+// into the transient map that resolvedEffectParameters hands to the executor.
+struct GpuFloatArray
+{
+    QVector<float> values;
+    int tupleSize = 2; // 2 -> vec2[], 3 -> vec3[]
+};
 
 // Uniforms the executor binds itself, from its own state rather than from the parameter map.
 // Binding them again from a parameter of the same name would just overwrite the real value.
@@ -78,3 +92,5 @@ struct GpuEffectDefinition
 };
 
 } // namespace drift
+
+Q_DECLARE_METATYPE(drift::GpuFloatArray)

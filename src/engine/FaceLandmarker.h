@@ -9,9 +9,37 @@
 
 namespace drift {
 
-// Everything a face warp shader needs, in normalized frame coordinates (0..1, top-left origin).
-// The full 478-point mesh is deliberately not kept: the effects are radial warps around a handful
-// of anchors, and a baked track of anchors is two orders of magnitude smaller than one of meshes.
+// Slices of FaceAnchors::contour. The loops a cosmetic shader needs are kept; the rest of the
+// 478-point mesh still is not, because a baked track of every vertex is an order of magnitude
+// larger again and nothing draws with it.
+//
+// Every loop is closed: the last point connects back to the first. The eyelid arcs are slices of
+// the eye rings rather than separate loops, so their points are stored once.
+namespace contour {
+
+struct Span
+{
+    int offset;
+    int count;
+};
+
+inline constexpr Span kOval{0, 36};
+inline constexpr Span kLipOuter{36, 20};
+inline constexpr Span kLipInner{56, 20};
+inline constexpr Span kEyeLeft{76, 16};
+inline constexpr Span kEyeRight{92, 16};
+inline constexpr Span kBrowLeft{108, 10};
+inline constexpr Span kBrowRight{118, 10};
+inline constexpr int kTotalPoints = 128;
+
+// Open arcs along the upper lids, which is where liner and shadow sit. Both eye rings are wound
+// so that the first nine points run along the upper lid from inner to outer corner.
+inline constexpr Span kEyeLeftUpper{76, 9};
+inline constexpr Span kEyeRightUpper{92, 9};
+
+} // namespace contour
+
+// Everything a face shader needs, in normalized frame coordinates (0..1, top-left origin).
 struct FaceAnchors
 {
     bool valid = false;
@@ -34,6 +62,29 @@ struct FaceAnchors
     double angle = 0.0;      // radians; rotation of the eye line away from horizontal
     double eyeRadius = 0.0;  // iris radius, the natural falloff scale for eye warps
     double score = 0.0;      // detector confidence, kept for tracking decisions
+
+    // Contour loops, indexed by the spans above. Unlike the anchors, these are stored already in
+    // width-normalized space (uv with y scaled by the frame aspect) — every shader that uses them
+    // does distance maths, and pre-converting means the SDF is correct without a per-point step.
+    //
+    // Either empty or exactly contour::kTotalPoints long. Never partially filled.
+    bool hasContours = false;
+    QList<QPointF> contour;
+    QPointF cheekLeft;  // uv, like the other anchors. MediaPipe has no cheek contour, so these
+    QPointF cheekRight; // are centroids of four mid-cheek vertices, which are far steadier.
+
+    // Head orientation as a unit quaternion rather than Euler angles: pitch reaches +/-90 when
+    // someone looks at the floor, and three separate seam handlers in both the interpolator and
+    // the smoother is more code than one nlerp.
+    bool hasPose = false;
+    double poseQx = 0.0;
+    double poseQy = 0.0;
+    double poseQz = 0.0;
+    double poseQw = 1.0;
+    double poseScale = 0.0; // interocular distance, width-normalized: the head's own unit of length
+    double poseOx = 0.0;    // origin (eye midpoint), width-normalized 3D
+    double poseOy = 0.0;
+    double poseOz = 0.0;
 };
 
 // MediaPipe's face mesh on ONNX Runtime: YuNet v2 finds faces, face_landmark_with_attention turns

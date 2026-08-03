@@ -30,10 +30,59 @@ Item {
     property string trackType: panel.tracks[trackIndex].type
     property bool showWaveform: panel.tracks[trackIndex].showWaveform === true
     property var clipEffects: clipData.effects || []
+    property var clipAudioEffects: clipData.audioEffects || []
+    readonly property bool hasAnyEffects: clipEffects.length > 0 || clipAudioEffects.length > 0
+    readonly property string effectsLabelText: {
+        const names = []
+        for (var i = 0; i < clipEffects.length; i++) {
+            const fx = clipEffects[i]
+            const label = fx.label || qsTr("Effect")
+            names.push(fx.enabled === false ? qsTr("%1 (off)").arg(label) : label)
+        }
+        for (var j = 0; j < clipAudioEffects.length; j++) {
+            const afx = clipAudioEffects[j]
+            const alabel = afx.label || qsTr("Effect")
+            names.push(afx.enabled === false ? qsTr("%1 (off)").arg(alabel) : alabel)
+        }
+        return names.join(" · ")
+    }
     property bool effectDropTarget: panel.effectDropTrackIndex === trackIndex
                                     && panel.effectDropClipIndex === clipIndex
-    readonly property bool timelineFadeHandles: trackType !== "text"
-                                                && trackType !== "subtitle"
+    // Subtitles keep cue-owned timing; text clips use the same edge fades as video.
+    readonly property bool timelineFadeHandles: trackType !== "subtitle"
+
+    // Gain along a fade ramp (progress 0..1). Mirrors Clip::shapeFade / FadeShape.
+    function fadeGainAt(progress) {
+        const t = Math.max(0, Math.min(1, progress))
+        const curve = clipItem.clipData.fadeCurve || "smooth"
+        if (curve === "linear")
+            return t
+        if (curve === "equalPower")
+            return Math.sin(t * Math.PI * 0.5)
+        if (curve === "custom") {
+            const pts = clipItem.clipData.fadeShape || []
+            if (pts.length < 2)
+                return t
+            if (t <= pts[0].t)
+                return pts[0].g
+            if (t >= pts[pts.length - 1].t)
+                return pts[pts.length - 1].g
+            for (let i = 0; i + 1 < pts.length; ++i) {
+                const a = pts[i]
+                const b = pts[i + 1]
+                if (t < a.t || t > b.t)
+                    continue
+                const span = b.t - a.t
+                if (Math.abs(span) < 1e-9)
+                    return b.g
+                const u = (t - a.t) / span
+                return a.g + (b.g - a.g) * u
+            }
+            return pts[pts.length - 1].g
+        }
+        // smooth (smoothstep)
+        return t * t * (3.0 - 2.0 * t)
+    }
 
     // Premiere-style trim pointer (vertical bar + arrow), sized to this clip.
     readonly property int trimCursorSide: leftTrimMouse.containsMouse ? -1
@@ -47,6 +96,8 @@ Item {
     Component.onDestruction: {
         if (trimCursorSide !== 0)
             EditorState.setTimelineTrimCursor(0, 0)
+        if (lifted && typeof panel.setScrollLocked === "function")
+            panel.setScrollLocked(false)
     }
 
     // Trim handles stay on whenever selected.
@@ -72,7 +123,7 @@ Item {
     // and clamped so it can never swallow a
     // short (25px) text or subtitle row.
     readonly property real headerBandHeight: {
-        const wanted = clipEffects.length > 0
+        const wanted = clipItem.hasAnyEffects
             ? Theme.clipHeaderBandHeight * 1.6
             : Theme.clipHeaderBandHeight
         return Math.min(wanted, Math.max(0, height * 0.5))
@@ -129,6 +180,24 @@ Item {
         value: Theme.clipSelectionRingWidth
     }
 
+    // No `Behavior on y` here. A drop settle looks appealing but cannot work at this
+    // seam: onReleased reads clipItem.y through mapToItem to decide the target track,
+    // and MouseArea.drag writes y directly during the drag. Animating y makes that
+    // read lag the pointer, so trackIndexAtY resolves back to the origin track and a
+    // cross-track drag silently becomes a same-track move. Gating the Behavior on
+    // drag.active does not save it — Qt clears drag.active only after onReleased
+    // returns, so y is already reset by then and the settle never plays anyway.
+    // Touch: the hold has to be visible or there is no way to know the clip is now
+    // liftable rather than still waiting. Lifts the clip out of the row and above its
+    // neighbours for as long as the finger owns it.
+    readonly property bool lifted: clipItem.touchMode
+                                  && (clipMouse.moveArmed || clipMouse.drag.active)
+    z: lifted ? 10 : 0
+    scale: lifted ? 1.03 : 1.0
+    Behavior on scale {
+        NumberAnimation { duration: Theme.durationPress; easing.type: Theme.easing }
+    }
+
     Rectangle {
         id: clipBackground
         anchors.fill: parent
@@ -138,7 +207,8 @@ Item {
         color: {
             const base = panel.clipColor(
                 clipItem.trackType === "shape" ? "graphic" : clipItem.trackType)
-            return clipMouse.containsMouse ? Qt.lighter(base, 1.15) : base
+            const lit = clipMouse.containsMouse || clipItem.lifted
+            return lit ? Qt.lighter(base, 1.15) : base
         }
         border.width: clipItem.effectDropTarget
                       ? Theme.borderWidthFocus
@@ -171,23 +241,42 @@ Item {
                                         (clipItem.clipData.fadeIn || 0) * panel.pxPerSecond))
             height: parent.height
             visible: width > 0.5
+            // Curve / custom shape changes must redraw even when width is unchanged.
+            property string curveKey: (clipItem.clipData.fadeCurve || "smooth")
+                                      + "|" + JSON.stringify(clipItem.clipData.fadeShape || [])
             onWidthChanged: requestPaint()
             onHeightChanged: requestPaint()
+            onCurveKeyChanged: requestPaint()
             onPaint: {
                 var ctx = getContext("2d")
                 ctx.reset()
+                if (width < 0.5 || height < 0.5)
+                    return
                 ctx.fillStyle = "rgba(0,0,0,0.38)"
                 ctx.strokeStyle = "rgba(255,255,255,0.9)"
                 ctx.lineWidth = 1.5
+                const steps = Math.max(8, Math.min(64, Math.ceil(width / 2)))
                 ctx.beginPath()
                 ctx.moveTo(0, 0)
                 ctx.lineTo(width, 0)
-                ctx.lineTo(0, height)
+                for (let i = steps; i >= 0; --i) {
+                    const t = i / steps
+                    const g = clipItem.fadeGainAt(t)
+                    ctx.lineTo(t * width, height * (1.0 - g))
+                }
                 ctx.closePath()
                 ctx.fill()
                 ctx.beginPath()
-                ctx.moveTo(0, height)
-                ctx.lineTo(width, 0)
+                for (let i = 0; i <= steps; ++i) {
+                    const t = i / steps
+                    const g = clipItem.fadeGainAt(t)
+                    const x = t * width
+                    const y = height * (1.0 - g)
+                    if (i === 0)
+                        ctx.moveTo(x, y)
+                    else
+                        ctx.lineTo(x, y)
+                }
                 ctx.stroke()
             }
         }
@@ -201,24 +290,43 @@ Item {
             height: parent.height
             x: parent.width - width
             visible: width > 0.5
+            property string curveKey: (clipItem.clipData.fadeCurve || "smooth")
+                                      + "|" + JSON.stringify(clipItem.clipData.fadeShape || [])
             onWidthChanged: requestPaint()
             onHeightChanged: requestPaint()
             onXChanged: requestPaint()
+            onCurveKeyChanged: requestPaint()
             onPaint: {
                 var ctx = getContext("2d")
                 ctx.reset()
+                if (width < 0.5 || height < 0.5)
+                    return
                 ctx.fillStyle = "rgba(0,0,0,0.38)"
                 ctx.strokeStyle = "rgba(255,255,255,0.9)"
                 ctx.lineWidth = 1.5
+                const steps = Math.max(8, Math.min(64, Math.ceil(width / 2)))
+                // Fade-out: progress from full (left of wedge) to silent (right edge).
                 ctx.beginPath()
-                ctx.moveTo(width, 0)
-                ctx.lineTo(0, 0)
-                ctx.lineTo(width, height)
+                ctx.moveTo(0, 0)
+                ctx.lineTo(width, 0)
+                for (let i = steps; i >= 0; --i) {
+                    const t = i / steps
+                    const g = clipItem.fadeGainAt(1.0 - t)
+                    ctx.lineTo(t * width, height * (1.0 - g))
+                }
                 ctx.closePath()
                 ctx.fill()
                 ctx.beginPath()
-                ctx.moveTo(width, height)
-                ctx.lineTo(0, 0)
+                for (let i = 0; i <= steps; ++i) {
+                    const t = i / steps
+                    const g = clipItem.fadeGainAt(1.0 - t)
+                    const x = t * width
+                    const y = height * (1.0 - g)
+                    if (i === 0)
+                        ctx.moveTo(x, y)
+                    else
+                        ctx.lineTo(x, y)
+                }
                 ctx.stroke()
             }
         }
@@ -285,13 +393,8 @@ Item {
 
                 Text {
                     width: parent.width
-                    visible: clipItem.clipEffects.length > 0
-                    text: {
-                        const names = []
-                        for (var i = 0; i < clipItem.clipEffects.length; i++)
-                            names.push(clipItem.clipEffects[i].label || qsTr("Effect"))
-                        return names.join(" · ")
-                    }
+                    visible: clipItem.hasAnyEffects
+                    text: clipItem.effectsLabelText
                     color: Theme.panelSecondaryForeground
                     font.pixelSize: Theme.fontSizeTiny
                     font.family: Theme.fontFamily
@@ -327,13 +430,8 @@ Item {
 
             Text {
                 width: parent.width
-                visible: clipItem.clipEffects.length > 0
-                text: {
-                    const names = []
-                    for (var i = 0; i < clipItem.clipEffects.length; i++)
-                        names.push(clipItem.clipEffects[i].label || qsTr("Effect"))
-                    return names.join(" · ")
-                }
+                visible: clipItem.hasAnyEffects
+                text: clipItem.effectsLabelText
                 color: Theme.panelSecondaryForeground
                 font.pixelSize: Theme.fontSizeTiny
                 font.family: Theme.fontFamily
@@ -462,16 +560,27 @@ Item {
         // Right-click opens the clip menu; the app
         // previously had no context menus at all.
         acceptedButtons: Qt.LeftButton | Qt.RightButton
-        drag.target: heldMenu ? null : clipItem
+        // On touch a clip only becomes draggable after a deliberate press-and-hold.
+        // Holding the grab from the first touch (preventStealing over a surface that is
+        // mostly clips) meant the Flickable could never pan, so a timeline with any
+        // content in it could not be scrolled at all.
+        //
+        // Arming goes through drag.target, not preventStealing: MouseArea copies
+        // preventStealing into its private stealMouse flag once, in mousePressEvent, and
+        // drag activation needs keepMouseGrab && stealMouse. Raising preventStealing
+        // after the press sets only keepMouseGrab, which then blocks the branch that
+        // would have set stealMouse — leaving the clip grabbed and permanently
+        // undraggable. A null drag.target skips the drag block entirely instead, so the
+        // Flickable steals at its own threshold and panning works.
+        drag.target: clipItem.touchMode ? (moveArmed ? clipItem : null) : clipItem
         drag.axis: Drag.XAndYAxis
-        // Higher threshold on touch so slight finger jitter doesn't start a move
-        // before a long-press menu, and Flickable pans stay distinguishable.
-        drag.threshold: clipItem.touchMode ? 24 : 8
+        // Once armed the finger is already down and still, so any motion is the move.
+        drag.threshold: clipItem.touchMode ? 0 : 8
         drag.minimumX: Theme.clipSelectionRingWidth
         // Allow dropping onto any track, not just the immediate neighbours.
         drag.minimumY: -Math.max(clipItem.trackRow.height, panel.totalTracksHeight())
         drag.maximumY: Math.max(clipItem.trackRow.height * 2, panel.totalTracksHeight())
-        preventStealing: true
+        preventStealing: !clipItem.touchMode
         pressAndHoldInterval: clipItem.touchMode ? 450 : 800
         property int originTrack: clipItem.trackIndex
         property int originClip: clipItem.clipIndex
@@ -483,17 +592,26 @@ Item {
         // True only for the span we treat as a move, so the landing preview stops
         // updating the moment the clip is dropped.
         property bool moving: false
-        // Long-press opened the context menu; ignore the following click/release move.
-        property bool heldMenu: false
+        // Touch only: the hold has been recognised and the clip is now draggable.
+        // Releasing without moving opens the context menu instead.
+        property bool moveArmed: false
+
+        // Where inside the clip the finger landed, so the autoscroll driver below can
+        // recompute the pointer's viewport position each tick instead of guessing at
+        // the clip's centre (which for a clip wider than the viewport is never in it).
+        property real grabX: 0
+        property real grabY: 0
 
         onPressed: (mouse) => {
             originTrack = clipItem.trackIndex
             originClip = clipItem.clipIndex
             moveOriginX = clipItem.clipData.start * panel.pxPerSecond
                           + Theme.clipSelectionRingWidth
+            grabX = mouse.x + clipItem.edgeMargin
+            grabY = mouse.y
             didDrag = false
             moving = false
-            heldMenu = false
+            moveArmed = false
             if (mouse.button === Qt.RightButton) {
                 // Right-click selects, then opens the menu.
                 if (!clipItem.selected)
@@ -506,18 +624,19 @@ Item {
             else
                 EditorState.selectClip(clipItem.trackIndex, clipItem.clipIndex)
         }
+        // Hold, then move to drag; hold and let go to get the menu. One gesture serves
+        // both, which is what leaves the plain drag free for the Flickable to pan with.
         onPressAndHold: (mouse) => {
             if (!clipItem.touchMode || mouse.button === Qt.RightButton)
                 return
             if (didDrag || drag.active)
                 return
-            heldMenu = true
+            moveArmed = true
             if (!clipItem.selected)
                 EditorState.selectClip(clipItem.trackIndex, clipItem.clipIndex)
-            clipContextMenu.popup()
         }
         onClicked: (mouse) => {
-            if (mouse.button === Qt.RightButton || didDrag || heldMenu)
+            if (mouse.button === Qt.RightButton || didDrag)
                 return
             if ((mouse.modifiers & Qt.ShiftModifier) !== 0)
                 EditorState.addToSelection(clipItem.trackIndex, clipItem.clipIndex)
@@ -576,6 +695,11 @@ Item {
                 icon.name: Theme.icons.copyPlus
                 onTriggered: EditorState.duplicateSelectedClip()
             }
+            ThemedMenuItem {
+                text: qsTr("Rename…")
+                icon.name: Theme.icons.pencil
+                onTriggered: clipItem.panel.requestRenameClip(clipItem.trackIndex, clipItem.clipIndex)
+            }
             ThemedMenuSeparator { }
             ThemedMenuItem {
                 text: qsTr("Delete")
@@ -584,17 +708,21 @@ Item {
             }
         }
         onReleased: {
-            const moved = !heldMenu && (drag.active || didDrag)
+            const moved = drag.active || didDrag
+            // Armed but never moved: the hold was a request for the menu.
+            const wantsMenu = clipItem.touchMode && moveArmed && !moved
             didDrag = false
             moving = false
+            moveArmed = false
             // Clear follow before committing so partners don't keep the drag
             // offset on top of the new model start for a frame.
             panel.clearMoveFollow()
             panel.clearLandingPreview()
             if (!moved) {
-                // Snap back if a long-press menu aborted an in-progress drag.
-                if (heldMenu)
+                if (wantsMenu) {
                     clipItem.y = Theme.clipSelectionRingWidth
+                    clipContextMenu.popup()
+                }
                 return
             }
             const newStart = (clipItem.x - Theme.clipSelectionRingWidth) / panel.pxPerSecond
@@ -609,8 +737,6 @@ Item {
                 EditorState.moveClip(originTrack, originClip, newStart)
         }
         onPositionChanged: {
-            if (heldMenu)
-                return
             if (pressed && drag.active) {
                 didDrag = true
                 if (!moving) {
@@ -623,9 +749,68 @@ Item {
         onCanceled: {
             didDrag = false
             moving = false
-            heldMenu = false
+            moveArmed = false
             panel.clearMoveFollow()
             panel.clearLandingPreview()
+        }
+    }
+
+    // Edge autoscroll while a clip is being dragged on touch. Guarded on the panel
+    // actually offering it, because this file is shared with the desktop TimelinePanel
+    // (same pattern as panel.openClipProperties).
+    // Armed means this clip owns the gesture. The Flickable is told to stop competing for
+    // it rather than the MouseArea trying to hold the grab: raising preventStealing after
+    // the press sets keepMouseGrab without stealMouse, and drag activation needs both.
+    onLiftedChanged: {
+        if (clipItem.touchMode && typeof panel.setScrollLocked === "function")
+            panel.setScrollLocked(clipItem.lifted)
+    }
+    Timer {
+        id: dragAutoScroll
+        interval: 16
+        repeat: true
+        running: clipItem.touchMode && clipMouse.moving && clipMouse.drag.active
+                 && typeof panel.dragEdgeScroll === "function"
+
+        // Ramps with how far past the edge the finger is, so a nudge creeps and a
+        // finger pinned to the edge travels.
+        function step(depth) { return Math.min(24, 6 + depth * 0.4) }
+
+        onTriggered: {
+            const px = clipItem.x + clipMouse.grabX - panel.timelineViewX
+            const py = clipItem.mapToItem(timelineColumn, 0, clipMouse.grabY).y
+                       + panel.seekHeaderHeight - panel.timelineViewY
+            // Bands are a fraction of the axis, capped: the timeline pane is only ~120px
+            // tall at its minimum, and fixed 48px bands there would meet in the middle and
+            // leave every position inside one — scrolling on any drag, in one direction,
+            // forever. The seek strip is pinned to the top of the viewport, so the vertical
+            // band starts below it.
+            const edgeX = Math.min(48, panel.timelineViewW * 0.25)
+            const usableTop = panel.seekHeaderHeight
+            const usableH = Math.max(0, panel.timelineViewH - usableTop)
+            const edgeY = Math.min(48, usableH * 0.25)
+            var dx = 0
+            var dy = 0
+            if (px < edgeX)
+                dx = -step(edgeX - px)
+            else if (px > panel.timelineViewW - edgeX)
+                dx = step(px - (panel.timelineViewW - edgeX))
+            if (edgeY > 0) {
+                if (py < usableTop + edgeY)
+                    dy = -step(usableTop + edgeY - py)
+                else if (py > panel.timelineViewH - edgeY)
+                    dy = step(py - (panel.timelineViewH - edgeY))
+            }
+            if (dx === 0 && dy === 0)
+                return
+
+            const applied = panel.dragEdgeScroll(dx, dy)
+            // Qt recomputes the drag target's position from a *scene* anchor mapped
+            // through the parent's current transform, so the scroll delta is already
+            // folded into the next move event — adding it here does not double-count,
+            // it only keeps the clip under the finger while no move events arrive.
+            clipItem.x += applied.x
+            clipItem.y += applied.y
         }
     }
 
@@ -639,7 +824,8 @@ Item {
         radius: 6.5
         y: 2
         z: 40
-        visible: clipItem.timelineFadeHandles && clipItem.selected && clipItem.width > 26
+        visible: clipItem.timelineFadeHandles && !clipItem.touchMode
+                 && clipItem.selected && clipItem.width > 26
         color: Theme.primary
         border.color: Theme.onMedia
         border.width: 2
@@ -693,7 +879,8 @@ Item {
         radius: 6.5
         y: 2
         z: 40
-        visible: clipItem.timelineFadeHandles && clipItem.selected && clipItem.width > 26
+        visible: clipItem.timelineFadeHandles && !clipItem.touchMode
+                 && clipItem.selected && clipItem.width > 26
         color: Theme.primary
         border.color: Theme.onMedia
         border.width: 2
@@ -783,8 +970,14 @@ Item {
             anchors.leftMargin: -clipItem.trimHotspotExtra
             anchors.rightMargin: -4
             // Leave the top corner for the fade-in dot.
-            anchors.topMargin: clipItem.timelineFadeHandles && clipItem.showTrimHandles ? 16 : -6
+            anchors.topMargin: clipItem.timelineFadeHandles && clipItem.showTrimHandles
+                               && !clipItem.touchMode ? 16 : -6
             anchors.bottomMargin: -6
+            // Same reason as the move drag: these are ~38px strips at both edges of
+            // every clip and they hold the grab, so on touch they turned each clip
+            // boundary into another place the timeline could not be panned. Only the
+            // selected clip — the one actually showing trim handles — arms them.
+            enabled: !clipItem.touchMode || clipItem.showTrimHandles
             preventStealing: true
             hoverEnabled: true
             cursorShape: Qt.BlankCursor
@@ -849,8 +1042,14 @@ Item {
             anchors.leftMargin: -4
             anchors.rightMargin: -clipItem.trimHotspotExtra
             // Leave the top corner for the fade-out dot.
-            anchors.topMargin: clipItem.timelineFadeHandles && clipItem.showTrimHandles ? 16 : -6
+            anchors.topMargin: clipItem.timelineFadeHandles && clipItem.showTrimHandles
+                               && !clipItem.touchMode ? 16 : -6
             anchors.bottomMargin: -6
+            // Same reason as the move drag: these are ~38px strips at both edges of
+            // every clip and they hold the grab, so on touch they turned each clip
+            // boundary into another place the timeline could not be panned. Only the
+            // selected clip — the one actually showing trim handles — arms them.
+            enabled: !clipItem.touchMode || clipItem.showTrimHandles
             preventStealing: true
             hoverEnabled: true
             cursorShape: Qt.BlankCursor

@@ -11,6 +11,8 @@ Item {
     property string glyph: ""
     property real iconSize: 16
     property color iconColor: Theme.mutedForeground
+    // Set for loader glyphs, which otherwise render as a frozen circle.
+    property bool spinning: false
 
     implicitWidth: iconSize
     implicitHeight: iconSize
@@ -29,9 +31,21 @@ Item {
     }
 
     MultiEffect {
+        id: tint
         anchors.fill: iconImage
         source: iconImage
         colorization: 1.0
         colorizationColor: root.iconColor
+
+        // The MultiEffect *samples* iconImage, so rotating the Image has no
+        // visible effect — the effect item itself is what has to turn.
+        RotationAnimator {
+            target: tint
+            from: 0
+            to: 360
+            duration: 1100          // matches CircularProgress.qml
+            loops: Animation.Infinite
+            running: root.spinning && root.visible
+        }
     }
 }

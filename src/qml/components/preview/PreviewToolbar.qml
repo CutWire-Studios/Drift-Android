@@ -65,12 +65,61 @@ Item {
     // letting the whole row shrink instead of overlap.
     Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
 
-    IconButton {
+    Row {
         Layout.alignment: Qt.AlignVCenter
-        glyph: toolbar.panel.playing ? Theme.icons.pause : Theme.icons.play
-        variant: "text"
-        tooltip: toolbar.panel.playing ? qsTr("Pause") : qsTr("Play")
-        onClicked: EditorState.togglePlayback()
+        spacing: Theme.spacingXs
+
+        // Jump amount comes from the modifiers held at click time rather than from a separate
+        // control: three amounts in each direction would be six more buttons in a row that has to
+        // stay centred. AbstractButton.clicked carries no modifiers, hence the query into Qt.
+        function jumpStep() {
+            const modifiers = EditorState.keyboardModifiers()
+            if (modifiers & Qt.ControlModifier)
+                return 10
+            if (modifiers & Qt.ShiftModifier)
+                return 5
+            return 1
+        }
+
+        IconButton {
+            anchors.verticalCenter: parent.verticalCenter
+            glyph: Theme.icons.rewind
+            variant: "text"
+            tooltip: qsTr("Jump back 1s · Shift for 5s · Ctrl for 10s")
+            onClicked: EditorState.jumpSeconds(-parent.jumpStep())
+        }
+
+        IconButton {
+            anchors.verticalCenter: parent.verticalCenter
+            glyph: Theme.icons.stepBack
+            variant: "text"
+            tooltip: qsTr("Previous frame")
+            onClicked: EditorState.stepFrames(-1)
+        }
+
+        IconButton {
+            anchors.verticalCenter: parent.verticalCenter
+            glyph: toolbar.panel.playing ? Theme.icons.pause : Theme.icons.play
+            variant: "text"
+            tooltip: toolbar.panel.playing ? qsTr("Pause") : qsTr("Play")
+            onClicked: EditorState.togglePlayback()
+        }
+
+        IconButton {
+            anchors.verticalCenter: parent.verticalCenter
+            glyph: Theme.icons.stepForward
+            variant: "text"
+            tooltip: qsTr("Next frame")
+            onClicked: EditorState.stepFrames(1)
+        }
+
+        IconButton {
+            anchors.verticalCenter: parent.verticalCenter
+            glyph: Theme.icons.fastForward
+            variant: "text"
+            tooltip: qsTr("Jump forward 1s · Shift for 5s · Ctrl for 10s")
+            onClicked: EditorState.jumpSeconds(parent.jumpStep())
+        }
     }
 
     Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
@@ -102,7 +151,7 @@ Item {
             id: qualityCombo
             anchors.verticalCenter: parent.verticalCenter
             implicitHeight: Theme.controlHeightSm
-            width: implicitContentWidth + leftPadding + rightPadding
+            width: widestContentWidth + leftPadding + rightPadding
             leftPadding: Theme.spacingMd
             rightPadding: Theme.spacing2xl
             font.pixelSize: Theme.fontSizeXs
@@ -115,10 +164,30 @@ Item {
         }
 
         ThemedComboBox {
+            id: speedCombo
+            anchors.verticalCenter: parent.verticalCenter
+            implicitHeight: Theme.controlHeightSm
+            width: widestContentWidth + leftPadding + rightPadding
+            leftPadding: Theme.spacingMd
+            rightPadding: Theme.spacing2xl
+            font.pixelSize: Theme.fontSizeXs
+            readonly property var values: [0.25, 0.5, 1.0, 1.5, 2.0, 4.0]
+            model: ["0.25×", "0.5×", "1×", "1.5×", "2×", "4×"]
+            // Quality mode steps one frame per completed render and never opens the audio sink, so
+            // there is no real-time rate for a speed to be a multiple of.
+            enabled: EditorState.playback.playbackMode !== "quality"
+            tooltip: enabled
+                     ? qsTr("Playback speed")
+                     : qsTr("Playback speed applies to Fast mode; Quality mode is not real time")
+            currentIndex: Math.max(0, values.indexOf(EditorState.playback.playbackRate))
+            onActivated: EditorState.playback.playbackRate = values[currentIndex]
+        }
+
+        ThemedComboBox {
             id: playbackModeCombo
             anchors.verticalCenter: parent.verticalCenter
             implicitHeight: Theme.controlHeightSm
-            width: implicitContentWidth + leftPadding + rightPadding
+            width: widestContentWidth + leftPadding + rightPadding
             leftPadding: Theme.spacingMd
             rightPadding: Theme.spacing2xl
             font.pixelSize: Theme.fontSizeXs

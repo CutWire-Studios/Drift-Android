@@ -29,8 +29,19 @@ Popup {
     x: 0
     y: 0
 
+    // SafeArea attaches to Items, and a Popup is not one, so the insets are read off the
+    // sheet's own content item — which fills the overlay and therefore carries them.
+    readonly property real safeTop: sheetRoot.SafeArea.margins.top
+    readonly property real safeBottom: sheetRoot.SafeArea.margins.bottom
+    readonly property real safeLeft: sheetRoot.SafeArea.margins.left
+    readonly property real safeRight: sheetRoot.SafeArea.margins.right
+
     readonly property real collapsedHeight: Math.round(height * sheetHeightFraction)
-    readonly property real expandedHeight: Math.round(height * sheetExpandedFraction)
+    // 92% of the screen clears the status bar on a plain device but not one with a
+    // cutout, where the sheet header slid underneath it. Clamped against the real inset.
+    readonly property real expandedHeight:
+        Math.round(Math.min(height * sheetExpandedFraction,
+                            height - safeTop - Theme.spacingLg))
     readonly property real dismissHeight: Math.round(height * Theme.androidSheetDismissFraction)
 
     // Source of truth for panel height (drag + snap both write here).
@@ -177,6 +188,7 @@ Popup {
     }
 
     contentItem: Item {
+        id: sheetRoot
         anchors.fill: parent
 
         MouseArea {
@@ -282,6 +294,11 @@ Popup {
                 anchors.right: parent.right
                 anchors.top: header.bottom
                 anchors.bottom: parent.bottom
+                // The sheet is anchored to the screen edge, so its last row and its
+                // side edges sit under the gesture bar and any landscape cutout.
+                anchors.bottomMargin: root.safeBottom
+                anchors.leftMargin: root.safeLeft
+                anchors.rightMargin: root.safeRight
                 clip: true
             }
         }

@@ -23,9 +23,20 @@ public:
     bool isRunning() const { return m_running.load(std::memory_order_acquire); }
     drift::TimeUs pausedAt() const { return m_pausedAtUs; }
 
+    // How much timeline one second of sink output covers. The sink always runs at the project
+    // sample rate; speed changes how far the timeline moves per rendered sample, and the retiming
+    // that keeps the audio listenable happens above this class. Only set while stopped — the
+    // positions below are derived from the total sample count, so changing it mid-run would
+    // retroactively rescale everything already rendered.
+    void setRate(double rate);
+    double rate() const { return m_rate; }
+
     // Produce side: where the mixer should generate the next buffer.
     drift::TimeUs produceTimeUs() const;
     void onAudioSamplesRendered(int sampleCount);
+    // Sink-domain position: rendered samples as elapsed time, without the rate applied. This is
+    // what a post-mix retimer's output cursor advances by, which is real time, not timeline time.
+    drift::TimeUs renderedFramesUs() const;
 
     // Playback side: the position currently audible, wall-interpolated between
     // sink updates for smoothness. This is the timeline's visible playhead.
@@ -40,6 +51,7 @@ private:
     std::atomic<int64_t> m_audioSamplesRendered{0};
     std::atomic<bool> m_running{false};
     int m_sampleRate = 48000;
+    double m_rate = 1.0;
 
     // Playback anchor (guarded together so time never tears across the two).
     mutable QMutex m_anchorMutex;

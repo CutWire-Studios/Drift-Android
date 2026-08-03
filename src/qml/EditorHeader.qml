@@ -270,12 +270,80 @@ Rectangle {
             Layout.alignment: Qt.AlignVCenter
             spacing: Theme.spacingLg
 
-            IconButton {
-                glyph: Theme.icons.puzzle
-                variant: "ghost"
-                tooltip: qsTr("Extras")
+            // Extras. Pulses with a red shockwave while essential packs or updates need
+            // attention — the dialog itself never opens on its own (see UpdateDialog).
+            Item {
+                id: extrasButton
+                width: Theme.iconButtonSize
+                height: Theme.iconButtonSize
                 anchors.verticalCenter: parent.verticalCenter
-                onClicked: root.Window.window.openAddonManager()
+
+                readonly property bool attention: {
+                    const win = root.Window.window
+                    return win && win.addonAttentionNeeded
+                }
+
+                // Expanding rings behind the icon — reads as a soft shockwave, not a badge.
+                Repeater {
+                    model: 2
+
+                    Item {
+                        id: wave
+                        required property int index
+
+                        anchors.centerIn: parent
+                        width: extrasButton.width
+                        height: extrasButton.height
+                        scale: 0.85
+                        opacity: 0
+                        visible: extrasButton.attention
+                        z: -1
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: width / 2
+                            color: "transparent"
+                            border.width: 2
+                            border.color: Theme.destructive
+                        }
+
+                        SequentialAnimation {
+                            running: extrasButton.attention
+                            loops: Animation.Infinite
+
+                            PauseAnimation { duration: wave.index * 700 }
+                            ParallelAnimation {
+                                NumberAnimation {
+                                    target: wave
+                                    property: "opacity"
+                                    from: 0.55
+                                    to: 0
+                                    duration: 1400
+                                    easing.type: Easing.OutCubic
+                                }
+                                NumberAnimation {
+                                    target: wave
+                                    property: "scale"
+                                    from: 0.85
+                                    to: 1.75
+                                    duration: 1400
+                                    easing.type: Easing.OutCubic
+                                }
+                            }
+                            PauseAnimation { duration: (1 - wave.index) * 700 }
+                        }
+                    }
+                }
+
+                IconButton {
+                    anchors.fill: parent
+                    glyph: Theme.icons.puzzle
+                    variant: "ghost"
+                    tooltip: extrasButton.attention
+                             ? qsTr("Recommended packs and updates")
+                             : qsTr("Extras")
+                    onClicked: root.Window.window.openExtras()
+                }
             }
 
             // Only exists while there is a newer release to tell the user about; the check itself

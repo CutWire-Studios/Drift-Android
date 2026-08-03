@@ -64,12 +64,10 @@ Column {
     function syncEditors() {
         if (editing)
             return
-        if (useSlider) {
-            if (!valueSlider.pressed)
-                valueSlider.value = currentValue
-        } else if (!valueField.activeFocus) {
+        // Slider value tracks currentValue via Binding when !pressed; assigning
+        // here would break that Binding the same way a live `value:` does.
+        if (!useSlider && !valueField.activeFocus)
             valueField.text = formatValue(currentValue)
-        }
     }
 
     function formatValue(v) {
@@ -315,11 +313,17 @@ Column {
 
             ThemedSlider {
                 id: valueSlider
-                width: parent.width - readout.width - parent.spacing
+                label: root.propDef.label
+                width: parent.width - readoutBox.width - parent.spacing
                 anchors.verticalCenter: parent.verticalCenter
                 from: root.sliderFrom
                 to: root.sliderTo
-                value: root.currentValue
+                // Keep the playhead/model binding off while pressed — same as
+                // PreviewPanel scrub — so preview ticks cannot fight the drag.
+                Binding on value {
+                    when: !valueSlider.pressed && !root.editing
+                    value: root.currentValue
+                }
                 onMoved: {
                     root.liveValue = value
                     EditorState.showKeyframeGraphProperty(root.propDef.key)
@@ -335,20 +339,182 @@ Column {
                     } else {
                         EditorState.commitPreviewDrag()
                         root.editing = false
-                        value = root.currentValue
                     }
                 }
             }
 
-            Text {
-                id: readout
-                width: Math.max(44, implicitWidth)
+            // The readout doubles as a button: a slider cannot land on an exact
+            // value, so clicking it opens a small editor to type one.
+            Item {
+                id: readoutBox
+                width: Math.max(48, readout.implicitWidth + Theme.spacingMd * 2)
+                height: Theme.controlHeightSm
                 anchors.verticalCenter: parent.verticalCenter
-                horizontalAlignment: Text.AlignRight
-                text: root.displayReadout(root.displayedValue)
-                color: Theme.panelForeground
-                font.family: Theme.monoFontFamily
-                font.pixelSize: Theme.fontSizeSm
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: Theme.radiusSm
+                    color: readoutArea.containsMouse || valuePopup.opened
+                           ? Theme.panelAccent : "transparent"
+
+                    Behavior on color {
+                        ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                    }
+                }
+
+                Text {
+                    id: readout
+                    anchors.right: parent.right
+                    anchors.rightMargin: Theme.spacingMd
+                    anchors.verticalCenter: parent.verticalCenter
+                    horizontalAlignment: Text.AlignRight
+                    text: root.displayReadout(root.displayedValue)
+                    color: Theme.panelForeground
+                    font.family: Theme.monoFontFamily
+                    font.pixelSize: Theme.fontSizeSm
+                }
+
+                MouseArea {
+                    id: readoutArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: valuePopup.openEditor()
+                }
+
+                ThemedToolTip {
+                    text: qsTr("Click to type an exact %1").arg(root.propDef.label.toLowerCase())
+                    visible: readoutArea.containsMouse && !valuePopup.opened
+                }
+
+                Popup {
+                    id: valuePopup
+
+                    // Right-aligned under the readout, which keeps it inside the
+                    // inspector panel however narrow the panel is docked.
+                    x: readoutBox.width - width
+                    y: readoutBox.height + Theme.spacingXs
+                    width: 172
+                    padding: Theme.spacingLg
+                    modal: false
+                    dim: false
+                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+                    // Escape and clicking away discard; only Enter writes a key.
+                    function openEditor() {
+                        editField.text = root.formatValue(root.currentValue)
+                        open()
+                        editField.forceActiveFocus()
+                        editField.selectAll()
+                    }
+
+                    function apply() {
+                        const v = root.parseInput(editField.text)
+                        if (!isNaN(v))
+                            root.commitValue(Math.max(root.sliderFrom,
+                                                      Math.min(root.sliderTo, v)))
+                        close()
+                    }
+
+                    background: Rectangle {
+                        color: Theme.panelBackground
+                        border.width: Theme.borderWidth
+                        border.color: Theme.panelBorder
+                        radius: Theme.radiusMd
+                    }
+
+                    // Opacity plus scale, matching ThemedContextMenu.
+                    enter: Transition {
+                        ParallelAnimation {
+                            NumberAnimation {
+                                property: "opacity"
+                                from: 0.0
+                                to: 1.0
+                                duration: Theme.durationBase
+                                easing.type: Theme.easing
+                            }
+                            NumberAnimation {
+                                property: "scale"
+                                from: 0.96
+                                to: 1.0
+                                duration: Theme.durationBase
+                                easing.type: Theme.easing
+                            }
+                        }
+                    }
+
+                    exit: Transition {
+                        ParallelAnimation {
+                            NumberAnimation {
+                                property: "opacity"
+                                from: 1.0
+                                to: 0.0
+                                duration: Theme.durationFast
+                                easing.type: Theme.easing
+                            }
+                            NumberAnimation {
+                                property: "scale"
+                                from: 1.0
+                                to: 0.96
+                                duration: Theme.durationFast
+                                easing.type: Theme.easing
+                            }
+                        }
+                    }
+
+                    contentItem: Column {
+                        spacing: Theme.spacingSm
+
+                        Row {
+                            width: parent.width
+
+                            Text {
+                                width: parent.width / 2
+                                text: root.propDef.label
+                                color: Theme.panelForeground
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontSizeXs
+                                font.weight: Font.Medium
+                                elide: Text.ElideRight
+                            }
+
+                            Text {
+                                width: parent.width / 2
+                                horizontalAlignment: Text.AlignRight
+                                text: root.displayReadout(root.sliderFrom) + "–"
+                                      + root.displayReadout(root.sliderTo)
+                                color: Theme.mutedForeground
+                                font.family: Theme.monoFontFamily
+                                font.pixelSize: Theme.fontSizeTiny
+                            }
+                        }
+
+                        Item {
+                            width: parent.width
+                            height: editField.height
+
+                            ThemedTextField {
+                                id: editField
+                                width: parent.width
+                                verticalAlignment: TextInput.AlignVCenter
+                                rightPadding: root.unit.length > 0 || root.percent
+                                              ? Theme.spacingLg + 14 : Theme.spacingLg
+                                onAccepted: valuePopup.apply()
+                            }
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.rightMargin: Theme.spacingLg
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: root.unit.length > 0 || root.percent
+                                text: root.percent ? "%" : root.unit
+                                color: Theme.mutedForeground
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontSizeXs
+                            }
+                        }
+                    }
+                }
             }
         }
     }

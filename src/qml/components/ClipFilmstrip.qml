@@ -76,9 +76,18 @@ Item {
             return 0
         var span = lastTileInBody - firstVisibleTile + 1
         if (viewW <= 0) {
-            // No viewport (Speed Curve): at most one pass of the strip frames.
-            return Math.min(span, Math.max(frameCount, 1))
+            // No viewport (Speed Curve): one pass of the strip frames across the body. Trimming
+            // slides the grid off the tile boundary, so the pass needs one more tile to reach the
+            // right edge — without it the body ends in a blank sliver. Assumes frameWidth is about
+            // width/frameCount, which is what a viewport-less caller sets.
+            return Math.min(span, Math.max(frameCount, 1) + 1)
         }
+        // A clip entirely outside the viewport still clamps to a tile inside its own body, so
+        // without this it would instantiate — and queue decodes for — a full screenful. With
+        // several clips on the timeline that multiplies every pan by the clip count.
+        var pad = frameWidth
+        if (worldX + width < viewX - pad || worldX > viewX + viewW + pad)
+            return 0
         var count = Math.ceil(viewW / Math.max(1, frameWidth)) + 3
         return Math.min(span, Math.max(1, count))
     }
@@ -181,8 +190,10 @@ Item {
                 onStatusChanged: {
                     if (tile.index !== 0)
                         return
-                    // Only Ready counts — Error must not hide the skeleton forever.
-                    if (status === Image.Ready)
+                    // Error clears it too: `loading` is !firstFrameReady, so leaving it
+                    // false on a failed decode pinned the skeleton over the clip forever
+                    // rather than falling through to the placeholder chrome.
+                    if (status === Image.Ready || status === Image.Error)
                         root.firstFrameReady = true
                 }
             }

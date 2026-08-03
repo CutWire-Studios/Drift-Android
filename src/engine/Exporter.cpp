@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QImage>
 
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -16,8 +17,10 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/dict.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/rational.h>
 #include <libswscale/swscale.h>
 }
 
@@ -70,10 +73,10 @@ const VideoCodecDef kVideoCodecs[] = {
     {"av1_svt", "AV1 (SVT)", kLibSvtAv1, AV_PIX_FMT_YUV420P, RateMode::Crf, true, kSvtPresets, "6", 35, "mp4"},
     {"av1_svt_10", "AV1 10-bit (SVT)", kLibSvtAv1, AV_PIX_FMT_YUV420P10LE, RateMode::Crf, true, kSvtPresets, "6", 35,
      "mkv"},
-    {"ffv1", "FFV1", kFfv1, AV_PIX_FMT_YUV420P, RateMode::Lossless, false, nullptr, nullptr, 0, "mkv"},
-    {"h264", "H.264 (x264)", kLibx264, AV_PIX_FMT_YUV420P, RateMode::Crf, true, kX264Presets, "medium", 23, "mp4"},
+    {"ffv1", "FFV1", kFfv1, AV_PIX_FMT_YUV444P, RateMode::Lossless, false, nullptr, nullptr, 0, "mkv"},
+    {"h264", "H.264 (x264)", kLibx264, AV_PIX_FMT_YUV420P, RateMode::Crf, true, kX264Presets, "medium", 18, "mp4"},
     {"h264_10", "H.264 10-bit (x264)", kLibx264, AV_PIX_FMT_YUV420P10LE, RateMode::Crf, true, kX264Presets, "medium",
-     23, "mkv"},
+     18, "mkv"},
     {"h265", "H.265 (x265)", kLibx265, AV_PIX_FMT_YUV420P, RateMode::Crf, true, kX264Presets, "medium", 28, "mp4"},
     {"h265_10", "H.265 10-bit (x265)", kLibx265, AV_PIX_FMT_YUV420P10LE, RateMode::Crf, true, kX264Presets, "medium",
      28, "mkv"},
@@ -221,18 +224,25 @@ bool encodeWriteFrame(AVFormatContext *fmt, AVCodecContext *codec, AVStream *str
 
 AVSampleFormat pickSampleFmt(const AVCodec *codec)
 {
-    if (!codec || !codec->sample_fmts)
+    const void *configs = nullptr;
+    if (!codec
+        || avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0, &configs,
+                                        nullptr)
+            < 0
+        || !configs)
         return AV_SAMPLE_FMT_FLTP;
+
+    const auto *fmts = static_cast<const AVSampleFormat *>(configs);
     // Prefer planar float, then planar s16, then first listed.
-    for (const AVSampleFormat *p = codec->sample_fmts; *p != AV_SAMPLE_FMT_NONE; ++p) {
+    for (const AVSampleFormat *p = fmts; *p != AV_SAMPLE_FMT_NONE; ++p) {
         if (*p == AV_SAMPLE_FMT_FLTP)
             return *p;
     }
-    for (const AVSampleFormat *p = codec->sample_fmts; *p != AV_SAMPLE_FMT_NONE; ++p) {
+    for (const AVSampleFormat *p = fmts; *p != AV_SAMPLE_FMT_NONE; ++p) {
         if (*p == AV_SAMPLE_FMT_S16P)
             return *p;
     }
-    return codec->sample_fmts[0];
+    return fmts[0];
 }
 
 void fillAudioFrame(AVFrame *frame, AVSampleFormat fmt, const float *interleaved, int samples)
@@ -330,6 +340,272 @@ void applyVideoPreset(AVCodecContext *vctx, const VideoCodecDef &def, const Expo
     av_opt_set(vctx->priv_data, "preset", preset.constData(), 0);
 }
 
+// libav muxer name for an audio-only container id (may differ from the file extension).
+QByteArray audioOnlyMuxerName(const QString &container)
+{
+    if (container == QLatin1String("m4a"))
+        return QByteArrayLiteral("ipod");
+    return container.toUtf8();
+}
+
+// Drift's SDR pipeline is BT.709 limited-range end-to-end (GPU NV12 decode + export).
+void applySdrBt709Tags(AVCodecContext *vctx)
+{
+    if (!vctx)
+        return;
+    vctx->color_range = AVCOL_RANGE_MPEG;
+    vctx->colorspace = AVCOL_SPC_BT709;
+    vctx->color_primaries = AVCOL_PRI_BT709;
+    vctx->color_trc = AVCOL_TRC_BT709;
+}
+
+void applySdrBt709Tags(AVFrame *frame)
+{
+    if (!frame)
+        return;
+    frame->color_range = AVCOL_RANGE_MPEG;
+    frame->colorspace = AVCOL_SPC_BT709;
+    frame->color_primaries = AVCOL_PRI_BT709;
+    frame->color_trc = AVCOL_TRC_BT709;
+}
+
+// RGB (full) → YUV (limited) with BT.709 coefficients. Without this, swscale
+// defaults to BT.601 and players that assume BT.709 for HD shift the hues.
+bool configureExportSws(SwsContext *sws)
+{
+    if (!sws)
+        return false;
+    const int *coeff = sws_getCoefficients(SWS_CS_ITU709);
+    // brightness=0, contrast=1<<16, saturation=1<<16 are identity.
+    return sws_setColorspaceDetails(sws, coeff, 1 /* src full-range RGB */, coeff,
+                                    0 /* dst limited-range YUV */, 0, 1 << 16, 1 << 16)
+           >= 0;
+}
+
+void applyExportMetadata(AVFormatContext *fmt, const ExportSettings &settings)
+{
+    if (!fmt || !settings.audioOnly)
+        return;
+    auto setIf = [fmt](const char *key, const QString &value) {
+        if (value.isEmpty())
+            return;
+        const QByteArray utf8 = value.toUtf8();
+        av_dict_set(&fmt->metadata, key, utf8.constData(), 0);
+    };
+    setIf("title", settings.metadataTitle);
+    setIf("artist", settings.metadataArtist);
+    setIf("album", settings.metadataAlbum);
+    setIf("comment", settings.metadataComment);
+}
+
+bool runAudioOnlyExport(const drift::Project &project, const ExportSettings &settings, const QString &outputPath,
+                        QString *errorOut, const Exporter::ProgressFn &onProgress)
+{
+    const AudioCodecDef *adef = findAudioDef(settings.audioCodecId);
+    if (!adef) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Unknown audio codec selection");
+        return false;
+    }
+
+    const AVCodec *acodec = findEncoder(adef->encoderNames);
+    if (!acodec) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Selected audio encoder is not available");
+        return false;
+    }
+
+    const int sampleRate = project.sampleRate() > 0 ? project.sampleRate() : 48000;
+    const drift::TimeUs durationUs = project.durationUs();
+    if (durationUs <= 0) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Timeline is empty");
+        return false;
+    }
+
+    const int64_t totalAudioSamples =
+        qMax<int64_t>(0, std::llround(static_cast<double>(durationUs) * sampleRate / 1e6));
+
+    AVFormatContext *fmt = nullptr;
+    AVCodecContext *actx = nullptr;
+    AVStream *astream = nullptr;
+    AVFrame *aframe = nullptr;
+    AVPacket *pkt = nullptr;
+    bool ok = false;
+    bool cancelled = false;
+    bool headerWritten = false;
+    QString error;
+
+    const QByteArray outUtf8 = outputPath.toUtf8();
+    avformat_alloc_output_context2(&fmt, nullptr, nullptr, outUtf8.constData());
+    if (!fmt) {
+        const QString container = Exporter::preferredAudioOnlyContainer(settings.audioCodecId);
+        const QByteArray muxer = audioOnlyMuxerName(container);
+        avformat_alloc_output_context2(&fmt, nullptr, muxer.constData(), outUtf8.constData());
+    }
+    if (!fmt) {
+        error = QStringLiteral("Could not determine output format");
+        goto cleanup;
+    }
+
+    {
+        astream = avformat_new_stream(fmt, nullptr);
+        if (!astream) {
+            error = QStringLiteral("Could not create output stream");
+            goto cleanup;
+        }
+
+        actx = avcodec_alloc_context3(acodec);
+        if (!actx) {
+            error = QStringLiteral("Could not allocate audio encoder");
+            goto cleanup;
+        }
+
+        const AVSampleFormat audioFmt = pickSampleFmt(acodec);
+        actx->sample_fmt = audioFmt;
+        actx->sample_rate = sampleRate;
+        av_channel_layout_default(&actx->ch_layout, 2);
+        if (!adef->lossless)
+            actx->bit_rate = static_cast<int64_t>(qMax(32, settings.audioBitrateKbps)) * 1000;
+        actx->time_base = AVRational{1, sampleRate};
+        if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
+            actx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+
+        if (avcodec_open2(actx, acodec, nullptr) < 0) {
+            error = QStringLiteral("Could not open the audio encoder");
+            goto cleanup;
+        }
+
+        avcodec_parameters_from_context(astream->codecpar, actx);
+        astream->time_base = actx->time_base;
+
+        const int frameSize = actx->frame_size > 0 ? actx->frame_size : 1024;
+
+        if (!(fmt->oformat->flags & AVFMT_NOFILE)) {
+            if (avio_open(&fmt->pb, outUtf8.constData(), AVIO_FLAG_WRITE) < 0) {
+                error = QStringLiteral("Could not open the output file");
+                goto cleanup;
+            }
+        }
+
+        applyExportMetadata(fmt, settings);
+
+        if (avformat_write_header(fmt, nullptr) < 0) {
+            error = QStringLiteral("Could not write the file header");
+            goto cleanup;
+        }
+        headerWritten = true;
+
+        pkt = av_packet_alloc();
+        aframe = av_frame_alloc();
+        if (!pkt || !aframe) {
+            error = QStringLiteral("Out of memory");
+            goto cleanup;
+        }
+
+        aframe->format = audioFmt;
+        aframe->sample_rate = sampleRate;
+        av_channel_layout_copy(&aframe->ch_layout, &actx->ch_layout);
+        aframe->nb_samples = frameSize;
+        if (av_frame_get_buffer(aframe, 0) < 0) {
+            error = QStringLiteral("Could not allocate the audio frame");
+            goto cleanup;
+        }
+
+        AudioMixer mixer;
+        mixer.setProject(&project);
+
+        std::vector<float> audioBuffer;
+        int64_t audioSamplesGenerated = 0;
+        int64_t audioPts = 0;
+
+        auto flushAudioFrames = [&](bool drainAll) -> bool {
+            while (static_cast<int64_t>(audioBuffer.size()) >= static_cast<int64_t>(frameSize) * 2) {
+                if (av_frame_make_writable(aframe) < 0) {
+                    error = QStringLiteral("Audio frame not writable");
+                    return false;
+                }
+                aframe->nb_samples = frameSize;
+                fillAudioFrame(aframe, audioFmt, audioBuffer.data(), frameSize);
+                aframe->pts = audioPts;
+                audioPts += frameSize;
+                if (!encodeWriteFrame(fmt, actx, astream, aframe, pkt, &error))
+                    return false;
+                audioBuffer.erase(audioBuffer.begin(), audioBuffer.begin() + frameSize * 2);
+            }
+            if (drainAll && !audioBuffer.empty()) {
+                const int remaining = static_cast<int>(audioBuffer.size() / 2);
+                if (av_frame_make_writable(aframe) < 0) {
+                    error = QStringLiteral("Audio frame not writable");
+                    return false;
+                }
+                aframe->nb_samples = remaining;
+                fillAudioFrame(aframe, audioFmt, audioBuffer.data(), remaining);
+                aframe->pts = audioPts;
+                audioPts += remaining;
+                if (!encodeWriteFrame(fmt, actx, astream, aframe, pkt, &error))
+                    return false;
+                audioBuffer.clear();
+            }
+            return true;
+        };
+
+        while (audioSamplesGenerated < totalAudioSamples) {
+            if (onProgress && totalAudioSamples > 0
+                && !onProgress(static_cast<double>(audioSamplesGenerated) / totalAudioSamples)) {
+                cancelled = true;
+                break;
+            }
+
+            const int64_t chunkSamples = qMin<int64_t>(frameSize * 8, totalAudioSamples - audioSamplesGenerated);
+            const size_t base = audioBuffer.size();
+            audioBuffer.resize(base + static_cast<size_t>(chunkSamples) * 2);
+            const drift::TimeUs audioStartUs = static_cast<drift::TimeUs>(
+                (audioSamplesGenerated * drift::kUsPerSecond) / sampleRate);
+            mixer.mix(audioStartUs, static_cast<int>(chunkSamples), sampleRate, audioBuffer.data() + base);
+            audioSamplesGenerated += chunkSamples;
+            if (!flushAudioFrames(false))
+                goto cleanup;
+        }
+
+        if (!cancelled) {
+            if (!flushAudioFrames(true))
+                goto cleanup;
+            if (!encodeWriteFrame(fmt, actx, astream, nullptr, pkt, &error))
+                goto cleanup;
+            if (av_write_trailer(fmt) < 0) {
+                error = QStringLiteral("Could not finalize the file");
+                goto cleanup;
+            }
+            ok = true;
+        }
+    }
+
+cleanup:
+    if (aframe)
+        av_frame_free(&aframe);
+    if (pkt)
+        av_packet_free(&pkt);
+    if (actx)
+        avcodec_free_context(&actx);
+    if (fmt) {
+        if (headerWritten && !ok && fmt->pb)
+            av_write_trailer(fmt);
+        if (fmt->pb && !(fmt->oformat->flags & AVFMT_NOFILE))
+            avio_closep(&fmt->pb);
+        avformat_free_context(fmt);
+    }
+
+    if (!ok && QFile::exists(outputPath))
+        QFile::remove(outputPath);
+
+    if (!ok && errorOut) {
+        *errorOut = cancelled ? QStringLiteral("Export cancelled")
+                              : (error.isEmpty() ? QStringLiteral("Export failed") : error);
+    }
+    return ok;
+}
+
 } // namespace
 
 const QList<ExportScalePreset> &Exporter::scalePresets()
@@ -413,8 +689,36 @@ QString Exporter::preferredContainer(const QString &videoCodecId, const QString 
     return QStringLiteral("mkv");
 }
 
-QStringList Exporter::saveFilters(const QString &container)
+QString Exporter::preferredAudioOnlyContainer(const QString &audioCodecId)
 {
+    if (audioCodecId == QLatin1String("aac"))
+        return QStringLiteral("m4a");
+    if (audioCodecId == QLatin1String("mp3"))
+        return QStringLiteral("mp3");
+    if (audioCodecId == QLatin1String("opus"))
+        return QStringLiteral("opus");
+    if (audioCodecId == QLatin1String("ac3"))
+        return QStringLiteral("ac3");
+    if (audioCodecId == QLatin1String("flac"))
+        return QStringLiteral("flac");
+    return QStringLiteral("m4a");
+}
+
+QStringList Exporter::saveFilters(const QString &container, bool audioOnly)
+{
+    if (audioOnly) {
+        if (container == QLatin1String("m4a"))
+            return {QStringLiteral("AAC audio (*.m4a)")};
+        if (container == QLatin1String("mp3"))
+            return {QStringLiteral("MP3 audio (*.mp3)")};
+        if (container == QLatin1String("opus"))
+            return {QStringLiteral("Opus audio (*.opus)")};
+        if (container == QLatin1String("ac3"))
+            return {QStringLiteral("AC3 audio (*.ac3)")};
+        if (container == QLatin1String("flac"))
+            return {QStringLiteral("FLAC audio (*.flac)")};
+        return {QStringLiteral("Audio files (*.*)")};
+    }
     if (container == QLatin1String("webm"))
         return {QStringLiteral("WebM video (*.webm)")};
     if (container == QLatin1String("mkv"))
@@ -422,8 +726,21 @@ QStringList Exporter::saveFilters(const QString &container)
     return {QStringLiteral("MP4 video (*.mp4)"), QStringLiteral("Matroska video (*.mkv)")};
 }
 
-QString Exporter::defaultSuffix(const QString &container)
+QString Exporter::defaultSuffix(const QString &container, bool audioOnly)
 {
+    if (audioOnly) {
+        if (container == QLatin1String("m4a"))
+            return QStringLiteral("m4a");
+        if (container == QLatin1String("mp3"))
+            return QStringLiteral("mp3");
+        if (container == QLatin1String("opus"))
+            return QStringLiteral("opus");
+        if (container == QLatin1String("ac3"))
+            return QStringLiteral("ac3");
+        if (container == QLatin1String("flac"))
+            return QStringLiteral("flac");
+        return QStringLiteral("m4a");
+    }
     if (container == QLatin1String("webm"))
         return QStringLiteral("webm");
     if (container == QLatin1String("mkv"))
@@ -475,6 +792,52 @@ QVariantList Exporter::scaleOptions(int projectWidth, int projectHeight)
     return out;
 }
 
+QVariantList Exporter::frameRateOptions(int projectFps)
+{
+    struct FrameRatePreset
+    {
+        const char *id;
+        int num;
+        int den;
+        const char *label;
+    };
+
+    // NTSC rates carry a 1001 denominator; an integer fps could not express them,
+    // which is why ExportSettings keeps the rate rational.
+    static const FrameRatePreset presets[] = {
+        {"23.976", 24000, 1001, "23.976 fps (NTSC film)"},
+        {"24", 24, 1, "24 fps"},
+        {"25", 25, 1, "25 fps (PAL)"},
+        {"29.97", 30000, 1001, "29.97 fps (NTSC)"},
+        {"30", 30, 1, "30 fps"},
+        {"48", 48, 1, "48 fps"},
+        {"50", 50, 1, "50 fps"},
+        {"59.94", 60000, 1001, "59.94 fps (NTSC)"},
+        {"60", 60, 1, "60 fps"},
+        {"120", 120, 1, "120 fps"},
+        {"240", 240, 1, "240 fps"},
+    };
+
+    QVariantList out;
+    // 0/1 means "whatever the project is set to", so the export follows later
+    // project-setup changes instead of pinning the rate at dialog time.
+    out.append(QVariantMap{
+        {QStringLiteral("id"), QStringLiteral("project")},
+        {QStringLiteral("label"), QStringLiteral("Same as project (%1 fps)").arg(qMax(1, projectFps))},
+        {QStringLiteral("fpsNum"), 0},
+        {QStringLiteral("fpsDen"), 1},
+    });
+    for (const FrameRatePreset &preset : presets) {
+        out.append(QVariantMap{
+            {QStringLiteral("id"), QString::fromLatin1(preset.id)},
+            {QStringLiteral("label"), QString::fromLatin1(preset.label)},
+            {QStringLiteral("fpsNum"), preset.num},
+            {QStringLiteral("fpsDen"), preset.den},
+        });
+    }
+    return out;
+}
+
 ExportSettings Exporter::defaultSettings()
 {
     ExportSettings s;
@@ -485,7 +848,7 @@ ExportSettings Exporter::defaultSettings()
         const QVariantMap m = videoCodecById(id);
         if (m.value(QStringLiteral("available")).toBool()) {
             s.videoCodecId = id;
-            s.crf = m.value(QStringLiteral("defaultCrf"), 23).toInt();
+            s.crf = m.value(QStringLiteral("defaultCrf"), 18).toInt();
             s.videoPreset = m.value(QStringLiteral("defaultPreset")).toString();
             if (s.videoPreset.isEmpty())
                 s.videoPreset = QStringLiteral("medium");
@@ -512,6 +875,19 @@ ExportSettings Exporter::settingsFromMap(const QVariantMap &map)
     ExportSettings s = defaultSettings();
     if (map.contains(QStringLiteral("targetHeight")))
         s.targetHeight = map.value(QStringLiteral("targetHeight")).toInt();
+    if (map.contains(QStringLiteral("fpsNum")))
+        s.fpsNum = map.value(QStringLiteral("fpsNum")).toInt();
+    if (map.contains(QStringLiteral("fpsDen")))
+        s.fpsDen = map.value(QStringLiteral("fpsDen")).toInt();
+    // Anything nonsensical falls back to the project rate rather than producing a
+    // broken time_base the muxer would reject.
+    if (s.fpsNum <= 0 || s.fpsDen <= 0) {
+        s.fpsNum = 0;
+        s.fpsDen = 1;
+    } else if (static_cast<int64_t>(s.fpsNum) > static_cast<int64_t>(kMaxExportFps) * s.fpsDen) {
+        s.fpsNum = kMaxExportFps;
+        s.fpsDen = 1;
+    }
     if (map.contains(QStringLiteral("videoCodecId")))
         s.videoCodecId = map.value(QStringLiteral("videoCodecId")).toString();
     if (map.contains(QStringLiteral("rateControl")))
@@ -526,12 +902,25 @@ ExportSettings Exporter::settingsFromMap(const QVariantMap &map)
         s.audioCodecId = map.value(QStringLiteral("audioCodecId")).toString();
     if (map.contains(QStringLiteral("audioBitrateKbps")))
         s.audioBitrateKbps = map.value(QStringLiteral("audioBitrateKbps")).toInt();
+    if (map.contains(QStringLiteral("audioOnly")))
+        s.audioOnly = map.value(QStringLiteral("audioOnly")).toBool();
+    if (map.contains(QStringLiteral("metadataTitle")))
+        s.metadataTitle = map.value(QStringLiteral("metadataTitle")).toString();
+    if (map.contains(QStringLiteral("metadataArtist")))
+        s.metadataArtist = map.value(QStringLiteral("metadataArtist")).toString();
+    if (map.contains(QStringLiteral("metadataAlbum")))
+        s.metadataAlbum = map.value(QStringLiteral("metadataAlbum")).toString();
+    if (map.contains(QStringLiteral("metadataComment")))
+        s.metadataComment = map.value(QStringLiteral("metadataComment")).toString();
     return s;
 }
 
 bool Exporter::run(const drift::Project &project, const ExportSettings &settings, const QString &outputPath,
                    QString *errorOut, const ProgressFn &onProgress)
 {
+    if (settings.audioOnly)
+        return runAudioOnlyExport(project, settings, outputPath, errorOut, onProgress);
+
     const int projW = project.width();
     const int projH = project.height();
     if (projW <= 0 || projH <= 0) {
@@ -560,7 +949,16 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
     int outH = 0;
     scaleSize(projW, projH, settings.targetHeight, outW, outH);
 
-    const int fps = qMax(1, project.fps());
+    // The export rate is independent of the project rate: sampling the timeline
+    // faster pulls extra frames out of the source wherever it has them, which is
+    // what makes slowed clips look smooth.
+    AVRational frameRate{qMax(1, project.fps()), 1};
+    if (settings.fpsNum > 0 && settings.fpsDen > 0)
+        frameRate = AVRational{settings.fpsNum, settings.fpsDen};
+    av_reduce(&frameRate.num, &frameRate.den, frameRate.num, frameRate.den, INT_MAX);
+    const AVRational frameTb{frameRate.den, frameRate.num};
+    const double fpsValue = av_q2d(frameRate);
+
     const int sampleRate = project.sampleRate() > 0 ? project.sampleRate() : 48000;
     const drift::TimeUs durationUs = project.durationUs();
     if (durationUs <= 0) {
@@ -569,7 +967,8 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
         return false;
     }
 
-    const int64_t totalFrames = qMax<int64_t>(1, std::llround(static_cast<double>(durationUs) * fps / 1e6));
+    const int64_t totalFrames =
+        qMax<int64_t>(1, std::llround(static_cast<double>(durationUs) * fpsValue / 1e6));
     const int64_t totalAudioSamples =
         qMax<int64_t>(0, std::llround(static_cast<double>(durationUs) * sampleRate / 1e6));
 
@@ -625,10 +1024,11 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
         vctx->width = outW;
         vctx->height = outH;
         vctx->pix_fmt = vdef->pixFmt;
-        vctx->time_base = AVRational{1, fps};
-        vctx->framerate = AVRational{fps, 1};
-        vctx->gop_size = fps * 2;
+        vctx->time_base = frameTb;
+        vctx->framerate = frameRate;
+        vctx->gop_size = qMax(1, static_cast<int>(std::llround(fpsValue * 2.0)));
         vctx->max_b_frames = 2;
+        applySdrBt709Tags(vctx);
         if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
             vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
 
@@ -677,10 +1077,16 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
         }
         headerWritten = true;
 
-        sws = sws_getContext(projW, projH, AV_PIX_FMT_RGBA, outW, outH, outPixFmt, SWS_BILINEAR, nullptr,
+        // Lanczos when down/upscaling; bicubic is enough for a pure format convert.
+        const int swsFlags = (projW != outW || projH != outH) ? SWS_LANCZOS : SWS_BICUBIC;
+        sws = sws_getContext(projW, projH, AV_PIX_FMT_RGBA, outW, outH, outPixFmt, swsFlags, nullptr,
                              nullptr, nullptr);
         if (!sws) {
             error = QStringLiteral("Could not create the scaler");
+            goto cleanup;
+        }
+        if (!configureExportSws(sws)) {
+            error = QStringLiteral("Could not configure export colour conversion");
             goto cleanup;
         }
 
@@ -755,7 +1161,8 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
                 break;
             }
 
-            const drift::TimeUs t = static_cast<drift::TimeUs>(std::llround(static_cast<double>(i) * 1e6 / fps));
+            const drift::TimeUs t = static_cast<drift::TimeUs>(
+                std::llround(static_cast<double>(i) * 1e6 * frameRate.den / frameRate.num));
             QImage img = compositor.compositeAt(t);
             if (img.isNull()) {
                 img = QImage(projW, projH, QImage::Format_RGBA8888);
@@ -775,12 +1182,15 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
                 const int srcStride[4] = {static_cast<int>(img.bytesPerLine()), 0, 0, 0};
                 sws_scale(sws, srcData, srcStride, 0, projH, vframe->data, vframe->linesize);
             }
+            applySdrBt709Tags(vframe);
             vframe->pts = i;
             if (!encodeWriteFrame(fmt, vctx, vstream, vframe, pkt, &error))
                 goto cleanup;
 
+            // Integer math keeps A/V in exact lockstep even on 1001-denominator rates.
             const int64_t targetSamples =
-                qMin(totalAudioSamples, ((i + 1) * static_cast<int64_t>(sampleRate)) / fps);
+                qMin(totalAudioSamples,
+                     ((i + 1) * static_cast<int64_t>(sampleRate) * frameRate.den) / frameRate.num);
             const int need = static_cast<int>(targetSamples - audioSamplesGenerated);
             if (need > 0) {
                 const size_t base = audioBuffer.size();

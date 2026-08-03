@@ -42,7 +42,7 @@ Item {
 
         Text {
             visible: root.clipKind !== "audio"
-            text: qsTr("How layers mix")
+            text: qsTr("Blend mode")
             color: Theme.mutedForeground
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontSizeXs

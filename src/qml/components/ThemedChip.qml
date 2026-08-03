@@ -33,6 +33,13 @@ AbstractButton {
     implicitHeight: chipHeight
     height: chipHeight
 
+    // Press feedback — see the note in ThemedButton.qml.
+    scale: root.down ? Theme.pressScale : 1.0
+
+    Behavior on scale {
+        NumberAnimation { duration: Theme.durationPress; easing.type: Theme.easing }
+    }
+
     Accessible.role: Accessible.RadioButton
     Accessible.name: root.text
     Accessible.checked: root.selected

@@ -28,7 +28,8 @@ Item {
                                                                        "wordWrap": true,
                                                                        "lineHeight": 1.2,
                                                                        "letterSpacing": 0,
-                                                                       "outlineWidth": 0,
+                                                                       "outlineEnabled": false,
+                                                                       "outlineWidth": 2,
                                                                        "outlineColor": "#ff000000",
                                                                        "shadowEnabled": false,
                                                                        "shadowOffsetX": 0,
@@ -99,6 +100,15 @@ Item {
         EditorState.setTextStyle(EditorState.selectedTrack, EditorState.selectedClip, patch)
     }
 
+    function setOutlineEnabled(on) {
+        const patch = { "outlineEnabled": on }
+        // Turning on with a zero width would look like a no-op; seed a usable default.
+        if (on && root.textStyle.outlineWidth <= 0)
+            patch.outlineWidth = 2
+        EditorState.setTextStyle(EditorState.selectedTrack, EditorState.selectedClip, patch)
+    }
+
+
     // Nested style groups: the C++ side takes the same partial-patch shape one level down.
     function setTextGroupKey(group, key, value) {
         const inner = {}
@@ -150,8 +160,6 @@ Item {
             letterSpacingField.value = s.letterSpacing
         if (outlineWidthField && !outlineWidthField.activeFocus)
             outlineWidthField.value = s.outlineWidth
-        if (outlineColorField && !outlineColorField.activeFocus)
-            outlineColorField.text = s.outlineColor
         if (shadowOffsetXField && !shadowOffsetXField.activeFocus)
             shadowOffsetXField.value = s.shadowOffsetX
         if (shadowOffsetYField && !shadowOffsetYField.activeFocus)
@@ -160,10 +168,6 @@ Item {
             shadowBlurField.value = s.shadowBlur
         if (shadowOpacityField && !shadowOpacityField.activeFocus)
             shadowOpacityField.value = s.shadowOpacity
-        if (shadowColorField && !shadowColorField.activeFocus)
-            shadowColorField.text = s.shadowColor
-        if (boxColorField && !boxColorField.activeFocus)
-            boxColorField.text = s.boxColor
         if (boxPaddingField && !boxPaddingField.activeFocus)
             boxPaddingField.value = s.boxPadding
         if (boxRadiusField && !boxRadiusField.activeFocus)
@@ -206,24 +210,23 @@ Item {
     Column {
         id: contentCol
         width: root.width
-        spacing: Theme.spacingXl
+        spacing: Theme.spacingMd
 
-        Column {
-            width: root.width
-            spacing: 4
+        CollapsibleSection {
+            width: parent.width
+            title: qsTr("Content")
+            collapsible: false
+            showSeparator: false
             visible: root.clipKind === "text"
-            Text {
-                text: qsTr("Text content")
-                color: Theme.mutedForeground
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontSizeXs
-            }
+
             ThemedTextArea {
                 id: textContentField
                 width: parent.width
                 height: 80
                 onTextChanged: {
                     if (root.clipKind !== "text")
+                        return
+                    if ((root.clipData.textContent || "") === text)
                         return
                     EditorState.previewSetClipTextContent(
                         EditorState.selectedTrack, EditorState.selectedClip, text)
@@ -233,75 +236,26 @@ Item {
             }
         }
 
-        Column {
-            width: root.width
-            spacing: 8
+        CollapsibleSection {
+            width: parent.width
+            title: qsTr("Style")
+            expanded: true
             visible: root.hasTextStyle
 
             Text {
-                text: qsTr("Style packs")
+                text: qsTr("Style pack")
                 color: Theme.mutedForeground
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.fontSizeXs
             }
 
-            // Cards render through the real rasterizer (image://textstyle), so what a
-            // pack looks like here is what the compositor draws — accents included.
-            Grid {
-                id: packGrid
+            TextStylePackPicker {
                 width: parent.width
-                columns: 2
-                spacing: 8
-                readonly property real cellWidth: (width - spacing * (columns - 1)) / columns
-
-                Repeater {
-                    model: EditorState.textPresets()
-                    delegate: Column {
-                        id: packCard
-                        required property var modelData
-                        readonly property bool selected: root.textStyle.packId === modelData.id
-                        width: packGrid.cellWidth
-                        spacing: 3
-
-                        Text {
-                            width: parent.width
-                            text: packCard.modelData.label
-                            elide: Text.ElideRight
-                            color: packCard.selected ? Theme.primary : Theme.mutedForeground
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.fontSizeXs
-                        }
-
-                        Rectangle {
-                            width: parent.width
-                            height: Math.round(width * 0.45)
-                            radius: Theme.radiusSm
-                            color: Theme.panelSecondaryBg
-                            border.width: packCard.selected ? Theme.borderWidthFocus : Theme.borderWidth
-                            border.color: packCard.selected ? Theme.primary : Theme.panelSecondaryBorder
-                            clip: true
-
-                            Image {
-                                anchors.fill: parent
-                                anchors.margins: 2
-                                asynchronous: true
-                                fillMode: Image.Pad
-                                source: "image://textstyle/" + packCard.modelData.id
-                                sourceSize.width: Math.max(1, Math.round(width))
-                                sourceSize.height: Math.max(1, Math.round(height))
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: EditorState.applyTextPreset(
-                                               EditorState.selectedTrack,
-                                               EditorState.selectedClip,
-                                               packCard.modelData.id)
-                            }
-                        }
-                    }
-                }
+                packId: root.textStyle.packId || ""
+                onPackPicked: id => EditorState.applyTextPreset(
+                                   EditorState.selectedTrack,
+                                   EditorState.selectedClip,
+                                   id)
             }
 
             Text {
@@ -333,7 +287,6 @@ Item {
                     ThemedComboBox {
                         id: fontWeightBox
                         width: parent.width
-                        // Only the weights this family actually ships.
                         model: root.availableWeights.map(
                                    w => root.weightLabels[w] || String(w))
                         currentIndex: Math.max(0, root.availableWeights.indexOf(root.textStyle.fontWeight))
@@ -415,7 +368,6 @@ Item {
                             color: Theme.panelForeground
                             font.family: Theme.monoFontFamily
                             font.pixelSize: Theme.fontSizeSm
-                            // Rejects malformed input instead of silently applying a typo.
                             readonly property bool validHex:
                                 /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(text)
                             errorText: validHex || text.length === 0 ? "" : qsTr("Enter a color like #FF0000")
@@ -437,7 +389,6 @@ Item {
                         width: 60
                         text: qsTr("Italic")
                         checked: root.textStyle.italic
-                        // Single-face display fonts have no italic.
                         enabled: root.familyHasItalic
                         tooltip: root.familyHasItalic
                                  ? qsTr("Italicise the text")
@@ -446,11 +397,14 @@ Item {
                     }
                 }
             }
+        }
 
-            // Alignment groups. These were two visually identical
-            // rows of L/C/R and T/M/B boxes, distinguishable only
-            // by their tooltips; they now carry real icons and are
-            // keyboard-operable.
+        CollapsibleSection {
+            width: parent.width
+            title: qsTr("Layout")
+            expanded: true
+            visible: root.hasTextStyle
+
             Row {
                 width: parent.width
                 spacing: Theme.spacingMd
@@ -551,603 +505,493 @@ Item {
                 tooltip: qsTr("Wrap long lines inside the text box instead of overflowing")
                 onClicked: root.setTextStyleKey("wordWrap", !root.textStyle.wordWrap)
             }
+        }
 
-            Text {
-                text: qsTr("Outline")
-                HoverHandler { id: tipHover808 }
-                ThemedToolTip { text: qsTr("Outline around each letter"); visible: tipHover808.hovered }
-                color: Theme.mutedForeground
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontSizeXs
-            }
+        CollapsibleSection {
+            width: parent.width
+            title: qsTr("Appearance")
+            expanded: false
+            visible: root.hasTextStyle
 
-            Row {
+            CollapsibleSection {
                 width: parent.width
-                spacing: 8
+                title: qsTr("Outline")
+                tooltip: qsTr("Outline around each letter")
+                collapsible: false
+                showSeparator: false
+                showSwitch: true
+                switchChecked: root.textStyle.outlineEnabled
+                switchTooltip: qsTr("Draw an outline around each letter")
+                onSwitchToggled: on => root.setOutlineEnabled(on)
 
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Width")
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    ThemedNumberField {
-                        id: outlineWidthField
-                        to: 100
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 0.5
-                        from: 0
-                        onEdited: v => root.setTextStyleKey("outlineWidth", v)
-                    }
-                }
+                Row {
+                    width: parent.width
+                    spacing: 8
 
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Color")
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    Row {
-                        spacing: 6
-                        Rectangle {
-                            width: Theme.spacing3xl
-                            height: Theme.spacing3xl
-                            radius: Theme.radiusSm
-                            anchors.verticalCenter: parent.verticalCenter
-                            color: root.textStyle.outlineColor
-                            border.width: swatch_outlineColor.containsMouse ? Theme.borderWidthFocus : Theme.borderWidth
-                            border.color: swatch_outlineColor.containsMouse ? Theme.primary : Theme.panelBorder
-
-                            Behavior on border.color {
-                                ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
-                            }
-
-                            ThemedToolTip {
-                                text: qsTr("Choose outline colour")
-                                visible: swatch_outlineColor.containsMouse
-                            }
-
-                            MouseArea {
-                                id: swatch_outlineColor
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    styleColorDialog.targetStyleKey = "outlineColor"
-                                    styleColorDialog.selectedColor = root.textStyle.outlineColor
-                                    styleColorDialog.open()
-                                }
-                            }
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Width")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
                         }
-                        ThemedTextField {
-                            id: outlineColorField
-                            width: 92
-                            text: root.textStyle.outlineColor
-                            color: Theme.panelForeground
-                            font.family: Theme.monoFontFamily
-                            font.pixelSize: Theme.fontSizeSm
-                            // Rejects malformed input instead of silently applying a typo.
-                            readonly property bool validHex:
-                                /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(text)
-                            errorText: validHex || text.length === 0 ? "" : qsTr("Enter a color like #FF0000")
-                            onEditingFinished: if (validHex) root.setTextStyleKey("outlineColor", text)
+                        ThemedNumberField {
+                            id: outlineWidthField
+                            to: 100
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 0.5
+                            from: 0
+                            onEdited: v => root.setTextStyleKey("outlineWidth", v)
+                        }
+                    }
+
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Color")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ColorSwatchField {
+                            hex: root.textStyle.outlineColor
+                            tooltip: qsTr("Choose outline colour")
+                            onEdited: value => root.setTextStyleKey("outlineColor", value)
                         }
                     }
                 }
             }
 
-            ThemedToggleButton {
-                width: 96
-                text: qsTr("Shadow")
-                checked: root.textStyle.shadowEnabled
+            CollapsibleSection {
+                width: parent.width
+                title: qsTr("Shadow")
                 tooltip: qsTr("Draw a drop shadow behind the text")
-                onClicked: root.setTextStyleKey("shadowEnabled", !root.textStyle.shadowEnabled)
-            }
+                collapsible: false
+                showSeparator: false
+                showSwitch: true
+                switchChecked: root.textStyle.shadowEnabled
+                switchTooltip: qsTr("Draw a drop shadow behind the text")
+                onSwitchToggled: on => root.setTextStyleKey("shadowEnabled", on)
 
-            Row {
-                width: parent.width
-                spacing: 8
-                visible: root.textStyle.shadowEnabled
+                Row {
+                    width: parent.width
+                    spacing: 8
 
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Offset X")
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    ThemedNumberField {
-                        id: shadowOffsetXField
-                        to: 500
-                        from: -500
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 1
-                        onEdited: v => root.setTextStyleKey("shadowOffsetX", v)
-                    }
-                }
-
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Offset Y")
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    ThemedNumberField {
-                        id: shadowOffsetYField
-                        to: 500
-                        from: -500
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 1
-                        onEdited: v => root.setTextStyleKey("shadowOffsetY", v)
-                    }
-                }
-            }
-
-            Row {
-                width: parent.width
-                spacing: 8
-                visible: root.textStyle.shadowEnabled
-
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Blur")
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    ThemedNumberField {
-                        id: shadowBlurField
-                        to: 100
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 1
-                        from: 0
-                        onEdited: v => root.setTextStyleKey("shadowBlur", v)
-                    }
-                }
-
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Opacity")
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    ThemedNumberField {
-                        id: shadowOpacityField
-                        width: parent.width
-                        decimals: 2
-                        step: 0.05
-                        from: 0
-                        to: 1
-                        onEdited: v => root.setTextStyleKey("shadowOpacity", v)
-                    }
-                }
-            }
-
-            Row {
-                width: parent.width
-                spacing: 6
-                visible: root.textStyle.shadowEnabled
-
-                Text {
-                    text: qsTr("Shadow color")
-                    color: Theme.mutedForeground
-                    font.family: Theme.fontFamily
-                    font.pixelSize: Theme.fontSizeXs
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-                Rectangle {
-                    width: Theme.spacing3xl
-                    height: Theme.spacing3xl
-                    radius: Theme.radiusSm
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: root.textStyle.shadowColor
-                    border.width: swatch_shadowColor.containsMouse ? Theme.borderWidthFocus : Theme.borderWidth
-                    border.color: swatch_shadowColor.containsMouse ? Theme.primary : Theme.panelBorder
-
-                    Behavior on border.color {
-                        ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Offset X")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: shadowOffsetXField
+                            to: 500
+                            from: -500
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 1
+                            onEdited: v => root.setTextStyleKey("shadowOffsetX", v)
+                        }
                     }
 
-                    ThemedToolTip {
-                        text: qsTr("Choose shadow colour")
-                        visible: swatch_shadowColor.containsMouse
-                    }
-
-                    MouseArea {
-                        id: swatch_shadowColor
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            styleColorDialog.targetStyleKey = "shadowColor"
-                            styleColorDialog.selectedColor = root.textStyle.shadowColor
-                            styleColorDialog.open()
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Offset Y")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: shadowOffsetYField
+                            to: 500
+                            from: -500
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 1
+                            onEdited: v => root.setTextStyleKey("shadowOffsetY", v)
                         }
                     }
                 }
-                ThemedTextField {
-                    id: shadowColorField
-                    width: 92
-                    text: root.textStyle.shadowColor
-                    color: Theme.panelForeground
-                    font.family: Theme.monoFontFamily
-                    font.pixelSize: Theme.fontSizeSm
-                    // Rejects malformed input instead of silently applying a typo.
-                    readonly property bool validHex:
-                        /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(text)
-                    errorText: validHex || text.length === 0 ? "" : qsTr("Enter a color like #FF0000")
-                    onEditingFinished: if (validHex) root.setTextStyleKey("shadowColor", text)
+
+                Row {
+                    width: parent.width
+                    spacing: 8
+
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Blur")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: shadowBlurField
+                            to: 100
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 1
+                            from: 0
+                            onEdited: v => root.setTextStyleKey("shadowBlur", v)
+                        }
+                    }
+
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Opacity")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: shadowOpacityField
+                            width: parent.width
+                            decimals: 2
+                            step: 0.05
+                            from: 0
+                            to: 1
+                            onEdited: v => root.setTextStyleKey("shadowOpacity", v)
+                        }
+                    }
+                }
+
+                Column {
+                    width: parent.width
+                    spacing: 4
+                    Text {
+                        text: qsTr("Shadow colour")
+                        color: Theme.mutedForeground
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.fontSizeXs
+                    }
+                    ColorSwatchField {
+                        hex: root.textStyle.shadowColor
+                        tooltip: qsTr("Choose shadow colour")
+                        onEdited: value => root.setTextStyleKey("shadowColor", value)
+                    }
                 }
             }
 
-            ThemedToggleButton {
-                width: 96
-                text: qsTr("Background")
-                checked: root.textStyle.boxEnabled
+            CollapsibleSection {
+                width: parent.width
+                title: qsTr("Background")
                 tooltip: qsTr("Draw a filled box behind the text")
-                onClicked: root.setTextStyleKey("boxEnabled", !root.textStyle.boxEnabled)
-            }
+                collapsible: false
+                showSeparator: false
+                showSwitch: true
+                switchChecked: root.textStyle.boxEnabled
+                switchTooltip: qsTr("Draw a filled box behind the text")
+                onSwitchToggled: on => root.setTextStyleKey("boxEnabled", on)
 
-            Row {
-                width: parent.width
-                spacing: 6
-                visible: root.textStyle.boxEnabled
+                ColorSwatchField {
+                    hex: root.textStyle.boxColor
+                    tooltip: qsTr("Choose background colour")
+                    onEdited: value => root.setTextStyleKey("boxColor", value)
+                }
 
-                Rectangle {
-                    width: Theme.spacing3xl
-                    height: Theme.spacing3xl
-                    radius: Theme.radiusSm
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: root.textStyle.boxColor
-                    border.width: swatch_boxColor.containsMouse ? Theme.borderWidthFocus : Theme.borderWidth
-                    border.color: swatch_boxColor.containsMouse ? Theme.primary : Theme.panelBorder
+                Row {
+                    width: parent.width
+                    spacing: 8
 
-                    Behavior on border.color {
-                        ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Padding")
+                            HoverHandler { id: tipHover1088 }
+                            ThemedToolTip { text: qsTr("Space between the text and the edge of its background box"); visible: tipHover1088.hovered }
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: boxPaddingField
+                            to: 500
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 1
+                            from: 0
+                            onEdited: v => root.setTextStyleKey("boxPadding", v)
+                        }
                     }
 
-                    ThemedToolTip {
-                        text: qsTr("Choose background colour")
-                        visible: swatch_boxColor.containsMouse
-                    }
-
-                    MouseArea {
-                        id: swatch_boxColor
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            styleColorDialog.targetStyleKey = "boxColor"
-                            styleColorDialog.selectedColor = root.textStyle.boxColor
-                            styleColorDialog.open()
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Corner radius")
+                            HoverHandler { id: tipHover1109 }
+                            ThemedToolTip { text: qsTr("Roundness of the background box corners"); visible: tipHover1109.hovered }
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: boxRadiusField
+                            to: 500
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 1
+                            from: 0
+                            onEdited: v => root.setTextStyleKey("boxRadius", v)
                         }
                     }
                 }
-                ThemedTextField {
-                    id: boxColorField
-                    width: 92
-                    text: root.textStyle.boxColor
-                    color: Theme.panelForeground
-                    font.family: Theme.monoFontFamily
-                    font.pixelSize: Theme.fontSizeSm
-                    // Rejects malformed input instead of silently applying a typo.
-                    readonly property bool validHex:
-                        /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(text)
-                    errorText: validHex || text.length === 0 ? "" : qsTr("Enter a color like #FF0000")
-                    onEditingFinished: if (validHex) root.setTextStyleKey("boxColor", text)
-                }
             }
 
-            Row {
+            CollapsibleSection {
                 width: parent.width
-                spacing: 8
-                visible: root.textStyle.boxEnabled
-
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Padding")
-                        HoverHandler { id: tipHover1088 }
-                        ThemedToolTip { text: qsTr("Space between the text and the edge of its background box"); visible: tipHover1088.hovered }
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    ThemedNumberField {
-                        id: boxPaddingField
-                        to: 500
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 1
-                        from: 0
-                        onEdited: v => root.setTextStyleKey("boxPadding", v)
-                    }
-                }
-
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Corner radius")
-                        HoverHandler { id: tipHover1109 }
-                        ThemedToolTip { text: qsTr("Roundness of the background box corners"); visible: tipHover1109.hovered }
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    ThemedNumberField {
-                        id: boxRadiusField
-                        to: 500
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 1
-                        from: 0
-                        onEdited: v => root.setTextStyleKey("boxRadius", v)
-                    }
-                }
-            }
-
-            ThemedToggleButton {
-                width: 96
-                text: qsTr("Glow")
-                checked: root.textStyle.glowEnabled
+                title: qsTr("Glow")
                 tooltip: qsTr("Coloured bloom around the letters, with no offset")
-                onClicked: root.setTextStyleKey("glowEnabled", !root.textStyle.glowEnabled)
-            }
+                collapsible: false
+                showSeparator: false
+                showSwitch: true
+                switchChecked: root.textStyle.glowEnabled
+                switchTooltip: qsTr("Coloured bloom around the letters, with no offset")
+                onSwitchToggled: on => root.setTextStyleKey("glowEnabled", on)
 
-            Row {
-                width: parent.width
-                spacing: 8
-                visible: root.textStyle.glowEnabled
+                Row {
+                    width: parent.width
+                    spacing: 8
 
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Radius")
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Radius")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: glowRadiusField
+                            to: 200
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 1
+                            from: 0
+                            onEdited: v => root.setTextStyleKey("glowRadius", v)
+                        }
                     }
-                    ThemedNumberField {
-                        id: glowRadiusField
-                        to: 200
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 1
-                        from: 0
-                        onEdited: v => root.setTextStyleKey("glowRadius", v)
+
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Opacity")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: glowOpacityField
+                            to: 1
+                            width: parent.width
+                            decimals: 2
+                            step: 0.05
+                            from: 0
+                            onEdited: v => root.setTextStyleKey("glowOpacity", v)
+                        }
                     }
                 }
 
                 Column {
-                    width: (parent.width - parent.spacing) / 2
+                    width: parent.width
                     spacing: 4
                     Text {
-                        text: qsTr("Opacity")
+                        text: qsTr("Glow colour")
                         color: Theme.mutedForeground
                         font.pixelSize: Theme.fontSizeXs
                         font.family: Theme.fontFamily
                     }
-                    ThemedNumberField {
-                        id: glowOpacityField
-                        to: 1
-                        width: parent.width
-                        decimals: 2
-                        step: 0.05
-                        from: 0
-                        onEdited: v => root.setTextStyleKey("glowOpacity", v)
+                    ColorSwatchField {
+                        hex: root.textStyle.glowColor
+                        tooltip: qsTr("Choose glow colour")
+                        onEdited: value => root.setTextStyleKey("glowColor", value)
                     }
                 }
             }
 
-            Column {
+            CollapsibleSection {
                 width: parent.width
-                spacing: 4
-                visible: root.textStyle.glowEnabled
-                Text {
-                    text: qsTr("Glow colour")
-                    color: Theme.mutedForeground
-                    font.pixelSize: Theme.fontSizeXs
-                    font.family: Theme.fontFamily
-                }
-                ColorSwatchField {
-                    hex: root.textStyle.glowColor
-                    tooltip: qsTr("Choose glow colour")
-                    onEdited: value => root.setTextStyleKey("glowColor", value)
-                }
-            }
-
-            ThemedToggleButton {
-                width: 128
-                text: qsTr("Word highlight")
-                checked: root.textStyle.wordHighlight.enabled
+                title: qsTr("Word highlight")
                 tooltip: qsTr("Filled pill behind every word, sized to the word itself")
-                onClicked: root.setTextGroupKey("wordHighlight", "enabled",
-                                                !root.textStyle.wordHighlight.enabled)
-            }
+                collapsible: false
+                showSeparator: false
+                showSwitch: true
+                switchChecked: root.textStyle.wordHighlight.enabled
+                switchTooltip: qsTr("Filled pill behind every word, sized to the word itself")
+                onSwitchToggled: on => root.setTextGroupKey("wordHighlight", "enabled", on)
 
-            Row {
-                width: parent.width
-                spacing: 8
-                visible: root.textStyle.wordHighlight.enabled
+                Row {
+                    width: parent.width
+                    spacing: 8
 
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Thickness")
-                        HoverHandler { id: tipHoverHlPad }
-                        ThemedToolTip { text: qsTr("How far the pill extends past the word"); visible: tipHoverHlPad.hovered }
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Thickness")
+                            HoverHandler { id: tipHoverHlPad }
+                            ThemedToolTip { text: qsTr("How far the pill extends past the word"); visible: tipHoverHlPad.hovered }
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: wordHighlightPaddingField
+                            to: 200
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 1
+                            from: 0
+                            onEdited: v => root.setTextGroupKey("wordHighlight", "padding", v)
+                        }
                     }
-                    ThemedNumberField {
-                        id: wordHighlightPaddingField
-                        to: 200
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 1
-                        from: 0
-                        onEdited: v => root.setTextGroupKey("wordHighlight", "padding", v)
+
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Corner radius")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: wordHighlightRadiusField
+                            to: 200
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 1
+                            from: 0
+                            onEdited: v => root.setTextGroupKey("wordHighlight", "radius", v)
+                        }
                     }
                 }
 
                 Column {
-                    width: (parent.width - parent.spacing) / 2
+                    width: parent.width
                     spacing: 4
                     Text {
-                        text: qsTr("Corner radius")
+                        text: qsTr("Highlight colour")
                         color: Theme.mutedForeground
                         font.pixelSize: Theme.fontSizeXs
                         font.family: Theme.fontFamily
                     }
-                    ThemedNumberField {
-                        id: wordHighlightRadiusField
-                        to: 200
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 1
-                        from: 0
-                        onEdited: v => root.setTextGroupKey("wordHighlight", "radius", v)
+                    ColorSwatchField {
+                        hex: root.textStyle.wordHighlight.color
+                        tooltip: qsTr("Choose highlight colour")
+                        onEdited: value => root.setTextGroupKey("wordHighlight", "color", value)
                     }
                 }
             }
 
-            Column {
+            CollapsibleSection {
                 width: parent.width
-                spacing: 4
-                visible: root.textStyle.wordHighlight.enabled
-                Text {
-                    text: qsTr("Highlight colour")
-                    color: Theme.mutedForeground
-                    font.pixelSize: Theme.fontSizeXs
-                    font.family: Theme.fontFamily
-                }
-                ColorSwatchField {
-                    hex: root.textStyle.wordHighlight.color
-                    tooltip: qsTr("Choose highlight colour")
-                    onEdited: value => root.setTextGroupKey("wordHighlight", "color", value)
-                }
-            }
-
-            ThemedToggleButton {
-                width: 96
-                text: qsTr("Underline")
-                checked: root.textStyle.underlineEnabled
+                title: qsTr("Underline")
                 tooltip: qsTr("Draw a rule under each line of text")
-                onClicked: root.setTextStyleKey("underlineEnabled", !root.textStyle.underlineEnabled)
-            }
+                collapsible: false
+                showSeparator: false
+                showSwitch: true
+                switchChecked: root.textStyle.underlineEnabled
+                switchTooltip: qsTr("Draw a rule under each line of text")
+                onSwitchToggled: on => root.setTextStyleKey("underlineEnabled", on)
 
-            Row {
-                width: parent.width
-                spacing: 8
-                visible: root.textStyle.underlineEnabled
+                Row {
+                    width: parent.width
+                    spacing: 8
+
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Thickness")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: underlineWidthField
+                            to: 100
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 0.5
+                            from: 0
+                            onEdited: v => root.setTextStyleKey("underlineWidth", v)
+                        }
+                    }
+
+                    Column {
+                        width: (parent.width - parent.spacing) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Offset")
+                            HoverHandler { id: tipHoverUnderlineOffset }
+                            ThemedToolTip { text: qsTr("Gap between the baseline and the rule"); visible: tipHoverUnderlineOffset.hovered }
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: underlineOffsetField
+                            to: 200
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 1
+                            from: -200
+                            onEdited: v => root.setTextStyleKey("underlineOffset", v)
+                        }
+                    }
+                }
 
                 Column {
-                    width: (parent.width - parent.spacing) / 2
+                    width: parent.width
                     spacing: 4
                     Text {
-                        text: qsTr("Thickness")
+                        text: qsTr("Underline colour")
                         color: Theme.mutedForeground
                         font.pixelSize: Theme.fontSizeXs
                         font.family: Theme.fontFamily
                     }
-                    ThemedNumberField {
-                        id: underlineWidthField
-                        to: 100
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 0.5
-                        from: 0
-                        onEdited: v => root.setTextStyleKey("underlineWidth", v)
-                    }
-                }
-
-                Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: 4
-                    Text {
-                        text: qsTr("Offset")
-                        HoverHandler { id: tipHoverUnderlineOffset }
-                        ThemedToolTip { text: qsTr("Gap between the baseline and the rule"); visible: tipHoverUnderlineOffset.hovered }
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    ThemedNumberField {
-                        id: underlineOffsetField
-                        to: 200
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 1
-                        from: -200
-                        onEdited: v => root.setTextStyleKey("underlineOffset", v)
+                    ColorSwatchField {
+                        hex: root.textStyle.underlineColor
+                        tooltip: qsTr("Choose underline colour")
+                        onEdited: value => root.setTextStyleKey("underlineColor", value)
                     }
                 }
             }
+        }
 
-            Column {
-                width: parent.width
-                spacing: 4
-                visible: root.textStyle.underlineEnabled
-                Text {
-                    text: qsTr("Underline colour")
-                    color: Theme.mutedForeground
-                    font.pixelSize: Theme.fontSizeXs
-                    font.family: Theme.fontFamily
-                }
-                ColorSwatchField {
-                    hex: root.textStyle.underlineColor
-                    tooltip: qsTr("Choose underline colour")
-                    onEdited: value => root.setTextStyleKey("underlineColor", value)
-                }
-            }
-
-            Text {
-                text: qsTr("Word accent")
-                HoverHandler { id: tipHoverAccent }
-                ThemedToolTip {
-                    text: qsTr("Style some words differently from the rest, chosen by rule")
-                    visible: tipHoverAccent.hovered
-                }
-                color: Theme.mutedForeground
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontSizeXs
-            }
+        CollapsibleSection {
+            width: parent.width
+            title: qsTr("Word accent")
+            tooltip: qsTr("Style some words differently from the rest, chosen by rule")
+            expanded: false
+            visible: root.hasTextStyle
 
             Row {
                 width: parent.width
@@ -1177,25 +1021,21 @@ Item {
 
             Column {
                 width: parent.width
-                spacing: 8
+                spacing: Theme.spacingMd
                 visible: root.textStyle.accent.rule !== "none"
 
-                Row {
+                CollapsibleSection {
                     width: parent.width
-                    spacing: 8
-
-                    ThemedToggleButton {
-                        width: 112
-                        text: qsTr("Accent colour")
-                        checked: root.textStyle.accent.colorEnabled
-                        tooltip: qsTr("Recolour the words the rule picks out")
-                        onClicked: root.setTextGroupKey("accent", "colorEnabled",
-                                                        !root.textStyle.accent.colorEnabled)
-                    }
+                    title: qsTr("Accent colour")
+                    tooltip: qsTr("Recolour the words the rule picks out")
+                    collapsible: false
+                    showSeparator: false
+                    showSwitch: true
+                    switchChecked: root.textStyle.accent.colorEnabled
+                    switchTooltip: qsTr("Recolour the words the rule picks out")
+                    onSwitchToggled: on => root.setTextGroupKey("accent", "colorEnabled", on)
 
                     ColorSwatchField {
-                        visible: root.textStyle.accent.colorEnabled
-                        anchors.verticalCenter: parent.verticalCenter
                         hex: root.textStyle.accent.color
                         tooltip: qsTr("Choose accent colour")
                         onEdited: value => root.setTextGroupKey("accent", "color", value)
@@ -1228,79 +1068,70 @@ Item {
                     }
                 }
 
-                Row {
+                CollapsibleSection {
                     width: parent.width
-                    spacing: 8
-
-                    ThemedToggleButton {
-                        width: 112
-                        text: qsTr("Accent outline")
-                        checked: root.textStyle.accent.outlineEnabled
-                        tooltip: qsTr("Give the accented words their own outline")
-                        onClicked: root.setTextGroupKey("accent", "outlineEnabled",
-                                                        !root.textStyle.accent.outlineEnabled)
-                    }
+                    title: qsTr("Accent outline")
+                    tooltip: qsTr("Give the accented words their own outline")
+                    collapsible: false
+                    showSeparator: false
+                    showSwitch: true
+                    switchChecked: root.textStyle.accent.outlineEnabled
+                    switchTooltip: qsTr("Give the accented words their own outline")
+                    onSwitchToggled: on => root.setTextGroupKey("accent", "outlineEnabled", on)
 
                     ColorSwatchField {
-                        visible: root.textStyle.accent.outlineEnabled
-                        anchors.verticalCenter: parent.verticalCenter
                         hex: root.textStyle.accent.outlineColor
                         tooltip: qsTr("Choose accent outline colour")
                         onEdited: value => root.setTextGroupKey("accent", "outlineColor", value)
                     }
+
+                    Column {
+                        width: (parent.width - 8) / 2
+                        spacing: 4
+                        Text {
+                            text: qsTr("Width")
+                            color: Theme.mutedForeground
+                            font.pixelSize: Theme.fontSizeXs
+                            font.family: Theme.fontFamily
+                        }
+                        ThemedNumberField {
+                            id: accentOutlineWidthField
+                            to: 100
+                            unit: "px"
+                            width: parent.width
+                            decimals: 1
+                            step: 0.5
+                            from: 0
+                            onEdited: v => root.setTextGroupKey("accent", "outlineWidth", v)
+                        }
+                    }
                 }
 
-                Column {
-                    width: (parent.width - 8) / 2
-                    spacing: 4
-                    visible: root.textStyle.accent.outlineEnabled
-                    Text {
-                        text: qsTr("Accent outline width")
-                        color: Theme.mutedForeground
-                        font.pixelSize: Theme.fontSizeXs
-                        font.family: Theme.fontFamily
-                    }
-                    ThemedNumberField {
-                        id: accentOutlineWidthField
-                        to: 100
-                        unit: "px"
-                        width: parent.width
-                        decimals: 1
-                        step: 0.5
-                        from: 0
-                        onEdited: v => root.setTextGroupKey("accent", "outlineWidth", v)
-                    }
-                }
-
-                Row {
+                CollapsibleSection {
                     width: parent.width
-                    spacing: 8
-
-                    ThemedToggleButton {
-                        width: 112
-                        text: qsTr("Accent pill")
-                        checked: root.textStyle.accent.highlight.enabled
-                        tooltip: qsTr("Highlight only the accented words, instead of every word")
-                        onClicked: root.setTextAccentHighlightKey(
-                                       "enabled", !root.textStyle.accent.highlight.enabled)
-                    }
+                    title: qsTr("Accent pill")
+                    tooltip: qsTr("Highlight only the accented words, instead of every word")
+                    collapsible: false
+                    showSeparator: false
+                    showSwitch: true
+                    switchChecked: root.textStyle.accent.highlight.enabled
+                    switchTooltip: qsTr("Highlight only the accented words, instead of every word")
+                    onSwitchToggled: on => root.setTextAccentHighlightKey("enabled", on)
 
                     ColorSwatchField {
-                        visible: root.textStyle.accent.highlight.enabled
-                        anchors.verticalCenter: parent.verticalCenter
                         hex: root.textStyle.accent.highlight.color
                         tooltip: qsTr("Choose accent highlight colour")
                         onEdited: value => root.setTextAccentHighlightKey("color", value)
                     }
                 }
             }
+        }
 
-            Text {
-                text: qsTr("Animation")
-                color: Theme.mutedForeground
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontSizeXs
-            }
+        CollapsibleSection {
+            width: parent.width
+            title: qsTr("Animation")
+            expanded: false
+            visible: root.hasTextStyle
 
             Row {
                 width: parent.width
@@ -1378,8 +1209,6 @@ Item {
                 }
             }
 
-            // Reveal granularity: stagger the entrance/exit across characters,
-            // words or lines instead of moving the whole block at once.
             Row {
                 width: parent.width
                 spacing: 6
@@ -1421,6 +1250,7 @@ Item {
             }
         }
     }
+
 
     ColorDialog {
         id: styleColorDialog

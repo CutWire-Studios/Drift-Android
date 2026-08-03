@@ -46,7 +46,17 @@ class AppController : public QObject
     Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged)
     Q_PROPERTY(bool snapEnabled READ snapEnabled WRITE setSnapEnabled NOTIFY snapEnabledChanged)
     Q_PROPERTY(bool rippleEnabled READ rippleEnabled WRITE setRippleEnabled NOTIFY rippleEnabledChanged)
+    Q_PROPERTY(bool allowClipOverlap READ allowClipOverlap WRITE setAllowClipOverlap NOTIFY allowClipOverlapChanged)
+  // Per-project UI prefs (serialized with the .drift file, not global QSettings).
+    Q_PROPERTY(bool mediaGridMode READ mediaGridMode WRITE setMediaGridMode NOTIFY mediaGridModeChanged)
+    // App-wide theme preference, backed by QSettings("ui/darkMode"). Until the user
+    // toggles once, darkModeOverridden is false and the UI follows the OS colour
+    // scheme live; after that the stored choice wins on every launch.
+    Q_PROPERTY(bool darkModeOverridden READ darkModeOverridden NOTIFY darkModePreferenceChanged)
+    Q_PROPERTY(bool darkModePreferred READ darkModePreferred NOTIFY darkModePreferenceChanged)
     Q_PROPERTY(bool autoKeyEnabled READ autoKeyEnabled WRITE setAutoKeyEnabled NOTIFY autoKeyEnabledChanged)
+    // Opt-in: on launch, restore the last open project (saved .drift or unsaved recovery snapshot).
+    Q_PROPERTY(bool reopenLastProject READ reopenLastProject WRITE setReopenLastProject NOTIFY reopenLastProjectChanged)
     // The keyframe strip draws every animated property of the selected clip. This is the subset
     // the user has folded away: a view filter only — hiding a curve never changes what renders.
     Q_PROPERTY(QStringList keyframeGraphHiddenProperties READ keyframeGraphHiddenProperties
@@ -70,11 +80,18 @@ class AppController : public QObject
     Q_PROPERTY(bool exportInProgress READ exportInProgress NOTIFY exportInProgressChanged)
     Q_PROPERTY(double exportProgress READ exportProgress NOTIFY exportProgressChanged)
     Q_PROPERTY(bool subtitleGenerating READ subtitleGenerating NOTIFY subtitleGeneratingChanged)
+    // Id of the asset whose replacement is being probed, empty when idle. Only that one bin row
+    // goes busy: the rest of the panel stays usable, and the wait belongs to the row the user
+    // right-clicked.
+    Q_PROPERTY(QString replacingAssetId READ replacingAssetId NOTIFY replacingAssetIdChanged)
     Q_PROPERTY(double subtitleGenProgress READ subtitleGenProgress NOTIFY subtitleGenProgressChanged)
     Q_PROPERTY(QString subtitleGenStatus READ subtitleGenStatus NOTIFY subtitleGenStatusChanged)
     Q_PROPERTY(bool segmenting READ segmenting NOTIFY segmentingChanged)
     Q_PROPERTY(double segmentProgress READ segmentProgress NOTIFY segmentProgressChanged)
     Q_PROPERTY(QString segmentStatus READ segmentStatus NOTIFY segmentStatusChanged)
+    Q_PROPERTY(bool reverseRendering READ reverseRendering NOTIFY reverseRenderingChanged)
+    Q_PROPERTY(double reverseRenderProgress READ reverseRenderProgress NOTIFY reverseRenderProgressChanged)
+    Q_PROPERTY(QString reverseRenderStatus READ reverseRenderStatus NOTIFY reverseRenderStatusChanged)
     Q_PROPERTY(bool denoising READ denoising NOTIFY denoisingChanged)
     Q_PROPERTY(double denoiseProgress READ denoiseProgress NOTIFY denoiseProgressChanged)
     Q_PROPERTY(QString denoiseStatus READ denoiseStatus NOTIFY denoiseStatusChanged)
@@ -88,6 +105,10 @@ class AppController : public QObject
     Q_PROPERTY(QVariantList speedCurvePoints READ speedCurvePoints NOTIFY speedCurveChanged)
     Q_PROPERTY(int speedCurveRevision READ speedCurveRevision NOTIFY speedCurveFrameChanged)
     Q_PROPERTY(QSize speedCurveFrameSize READ speedCurveFrameSize NOTIFY speedCurveFrameChanged)
+    Q_PROPERTY(double speedCurveSourceStart READ speedCurveSourceStart NOTIFY speedCurveSessionChanged)
+    // Whole media length, not the clip's trimmed span — the filmstrip's frames are sampled across
+    // the source file, so placing them needs both.
+    Q_PROPERTY(double speedCurveMediaDuration READ speedCurveMediaDuration NOTIFY speedCurveSessionChanged)
     Q_PROPERTY(double speedCurveSourceDuration READ speedCurveSourceDuration NOTIFY speedCurveSessionChanged)
     Q_PROPERTY(double speedCurveRetimedDuration READ speedCurveRetimedDuration NOTIFY speedCurveChanged)
     Q_PROPERTY(double speedCurvePosition READ speedCurvePosition NOTIFY speedCurvePositionChanged)
@@ -97,6 +118,11 @@ class AppController : public QObject
     Q_PROPERTY(QString speedCurveClipName READ speedCurveClipName NOTIFY speedCurveSessionChanged)
     Q_PROPERTY(QString speedCurveClipPath READ speedCurveClipPath NOTIFY speedCurveSessionChanged)
     Q_PROPERTY(QString speedCurveFilmstripPath READ speedCurveFilmstripPath NOTIFY speedCurveSessionChanged)
+    // Custom fade-shape session for FadeCurveWindow. Candidate is auditioned on the live clip
+    // until applyFadeCurve commits it (or endFadeCurveSession restores the prior shape).
+    Q_PROPERTY(bool fadeCurveSessionActive READ fadeCurveSessionActive NOTIFY fadeCurveSessionChanged)
+    Q_PROPERTY(QVariantList fadeCurvePoints READ fadeCurvePoints NOTIFY fadeCurveChanged)
+    Q_PROPERTY(QString fadeCurveClipName READ fadeCurveClipName NOTIFY fadeCurveSessionChanged)
     Q_PROPERTY(bool faceDetecting READ faceDetecting NOTIFY faceDetectingChanged)
     Q_PROPERTY(double faceDetectProgress READ faceDetectProgress NOTIFY faceDetectProgressChanged)
     Q_PROPERTY(QString faceDetectStatus READ faceDetectStatus NOTIFY faceDetectStatusChanged)
@@ -121,6 +147,11 @@ class AppController : public QObject
     Q_PROPERTY(bool packaging READ packaging NOTIFY packagingChanged)
     Q_PROPERTY(double packageProgress READ packageProgress NOTIFY packageProgressChanged)
     Q_PROPERTY(QString lastMessage READ lastMessage NOTIFY lastMessageChanged)
+    // Severity of lastMessage: "info" | "success" | "warning" | "error". Exists so
+    // the QML toast host does not have to guess from the message wording — it used
+    // to regex the prose, and none of the real failure strings matched, so a
+    // corrupt-project open rendered as a neutral info toast.
+    Q_PROPERTY(QString lastMessageSeverity READ lastMessageSeverity NOTIFY lastMessageChanged)
     Q_PROPERTY(int draggingAssetIndex READ draggingAssetIndex WRITE setDraggingAssetIndex NOTIFY draggingAssetIndexChanged)
     Q_PROPERTY(bool hasUnsavedChanges READ hasUnsavedChanges NOTIFY dirtyChanged)
     Q_PROPERTY(QString currentProjectPath READ currentProjectPath NOTIFY currentProjectPathChanged)
@@ -150,7 +181,12 @@ public:
     bool playing() const { return m_playing; }
     bool snapEnabled() const { return m_snapEnabled; }
     bool rippleEnabled() const { return m_rippleEnabled; }
+    bool allowClipOverlap() const { return m_allowClipOverlap; }
+    bool darkModeOverridden() const { return m_darkModeOverridden; }
+    bool darkModePreferred() const { return m_darkModePreferred; }
+    bool mediaGridMode() const { return m_mediaGridMode; }
     bool autoKeyEnabled() const { return m_autoKeyEnabled; }
+    bool reopenLastProject() const { return m_reopenLastProject; }
     QStringList keyframeGraphHiddenProperties() const { return m_keyframeGraphHiddenProperties; }
     bool subtitleEditing() const { return m_subtitleEditing; }
     int selectedSubtitleCue() const { return m_selectedSubtitleCue; }
@@ -159,11 +195,15 @@ public:
     bool exportInProgress() const { return m_exportInProgress; }
     double exportProgress() const;
     bool subtitleGenerating() const { return m_subtitleGenerating; }
+    QString replacingAssetId() const { return m_replacingAssetId; }
     double subtitleGenProgress() const { return m_subtitleGenProgress; }
     QString subtitleGenStatus() const { return m_subtitleGenStatus; }
     bool segmenting() const { return m_segmenting; }
     double segmentProgress() const { return m_segmentProgress; }
     QString segmentStatus() const { return m_segmentStatus; }
+    bool reverseRendering() const { return m_reverseRendering; }
+    double reverseRenderProgress() const { return m_reverseProgress; }
+    QString reverseRenderStatus() const { return m_reverseStatus; }
     bool denoising() const { return m_denoising; }
     double denoiseProgress() const { return m_denoiseProgress; }
     QString denoiseStatus() const { return m_denoiseStatus; }
@@ -192,6 +232,7 @@ public:
     QVariantList bookmarks() const;
     QString projectName() const;
     QString lastMessage() const { return m_lastMessage; }
+    QString lastMessageSeverity() const { return m_lastMessageSeverity; }
     int draggingAssetIndex() const { return m_draggingAssetIndex; }
     void setDraggingAssetIndex(int index);
     bool hasUnsavedChanges() const { return m_dirty; }
@@ -204,7 +245,11 @@ public:
     void setPlaying(bool playing);
     void setSnapEnabled(bool enabled);
     void setRippleEnabled(bool enabled);
+    void setAllowClipOverlap(bool enabled);
+    Q_INVOKABLE void setDarkModePreference(bool enabled);
+    void setMediaGridMode(bool enabled);
     void setAutoKeyEnabled(bool enabled);
+    void setReopenLastProject(bool enabled);
     // Strip chip click — folds `prop`'s curve away, or brings it back. Purely a view filter: the
     // chip stays put either way, and the animation keeps playing while it is hidden.
     Q_INVOKABLE void toggleKeyframeGraphPropertyVisible(const QString &prop);
@@ -220,9 +265,25 @@ public:
     Q_INVOKABLE void addClipFromAsset(int assetIndex);
     Q_INVOKABLE void addClipFromAssetAt(int assetIndex, int trackIndex, double atSeconds);
     Q_INVOKABLE void addClipFromAssetOnNewTrack(int assetIndex, double atSeconds);
+    // Same, but the new track goes at insertIndex rather than always on top, so
+    // a timeline drop can create a lane below the tracks as well as above them.
+    Q_INVOKABLE void addClipFromAssetOnNewTrackAt(int assetIndex, int insertIndex, double atSeconds);
+    Q_INVOKABLE int clipCountForAsset(int assetIndex) const;
+    Q_INVOKABLE bool removeAsset(int assetIndex);
+    // Bin label only — does not rename the file on disk or rewrite clip names.
+    Q_INVOKABLE bool renameAsset(int assetIndex, const QString &name);
+    // Points an existing bin row at a different file, keeping every clip that uses it where it
+    // is — its position, trim, effects and transitions all survive. Asynchronous: true only means
+    // the probe started, and the outcome arrives as assetReplaceFinished.
+    Q_INVOKABLE bool replaceAssetSource(int assetIndex, const QUrl &url);
+    // Writes an image asset (a freeze frame, typically) out to `url`. The format follows the
+    // destination's extension, so the picker's name filter never has to be reported back.
+    Q_INVOKABLE bool exportAssetImage(int assetIndex, const QUrl &url);
     Q_INVOKABLE bool trackAcceptsAsset(int trackIndex, int assetIndex) const;
     Q_INVOKABLE QString trackTypeForAsset(int assetIndex) const;
-    Q_INVOKABLE void addTextClip(const QString &text, double atSeconds);
+    // presetId applies a built-in style pack on create; empty keeps the default text style.
+    Q_INVOKABLE void addTextClip(const QString &text, double atSeconds,
+                                 const QString &presetId = QString());
     Q_INVOKABLE void addSubtitleClip(double atSeconds);
     // Import a SubRip (.srt) file as a new subtitle clip at the playhead (or atSeconds).
     Q_INVOKABLE bool importSubtitleFile(const QUrl &url, double atSeconds = -1.0);
@@ -259,6 +320,8 @@ public:
     Q_INVOKABLE void setSpeedCurvePoints(const QVariantList &points);
     int speedCurveRevision() const { return m_speedCurveRevision; }
     QSize speedCurveFrameSize() const { return m_speedCurvePlayer.frameSize(); }
+    double speedCurveSourceStart() const;
+    double speedCurveMediaDuration() const;
     double speedCurveSourceDuration() const;
     double speedCurveRetimedDuration() const;
     double speedCurvePosition() const;
@@ -275,6 +338,15 @@ public:
     Q_INVOKABLE void seekSpeedCurvePreviewAtSource(double position);
     Q_INVOKABLE void applySpeedCurve();
     Q_INVOKABLE void clearClipSpeedCurve(int trackIndex, int clipIndex);
+
+    Q_INVOKABLE void beginFadeCurveSession(int trackIndex, int clipIndex);
+    Q_INVOKABLE void endFadeCurveSession();
+    bool fadeCurveSessionActive() const { return m_fadeCurveActive; }
+    QVariantList fadeCurvePoints() const;
+    Q_INVOKABLE void setFadeCurvePoints(const QVariantList &points);
+    QString fadeCurveClipName() const { return m_fadeCurveClipName; }
+    Q_INVOKABLE void applyFadeCurve();
+    Q_INVOKABLE void resetFadeCurvePreset(const QString &preset);
     Q_INVOKABLE void setSegmentationFrame(double seconds);
     Q_INVOKABLE void addSegmentationPoint(double x, double y, bool include);
     Q_INVOKABLE void removeSegmentationPoint(int index);
@@ -373,6 +445,8 @@ public:
     Q_INVOKABLE void setClipStart(int trackIndex, int clipIndex, double start);
     Q_INVOKABLE void setClipDuration(int trackIndex, int clipIndex, double duration);
     Q_INVOKABLE void setClipTextContent(int trackIndex, int clipIndex, const QString &text);
+    // Display label on the timeline / inspector. Does not rename the source file.
+    Q_INVOKABLE void setClipName(int trackIndex, int clipIndex, const QString &name);
     // Live text edits (preview drag) keep the canvas and properties panel in sync
     // while typing; commitTextEdit trims and pushes undo.
     Q_INVOKABLE void previewSetClipTextContent(int trackIndex, int clipIndex, const QString &text);
@@ -395,6 +469,16 @@ public:
     Q_INVOKABLE void setClipBlendMode(int trackIndex, int clipIndex, const QString &mode);
     Q_INVOKABLE void setClipSpeed(int trackIndex, int clipIndex, double speed);
     Q_INVOKABLE void setClipReverse(int trackIndex, int clipIndex, bool reverse);
+    // Turns reverse on for a video clip and renders the proxy that makes it play back smoothly.
+    // Reverse itself applies immediately; cancelling the render leaves the clip reversed on the
+    // slow live-decode path, which is what clipHasReverseProxy reports.
+    // Entry point for the Reverse control. Clips a proxy would do nothing for (audio, or one
+    // already covered by a render) reverse straight away; anything else emits
+    // reverseConfirmRequested so the dialog can ask before starting a render.
+    Q_INVOKABLE void requestClipReverse(int trackIndex, int clipIndex);
+    Q_INVOKABLE void applyClipReverse(int trackIndex, int clipIndex);
+    Q_INVOKABLE void cancelReverseRender();
+    Q_INVOKABLE bool clipHasReverseProxy(int trackIndex, int clipIndex) const;
     Q_INVOKABLE void setClipFlip(int trackIndex, int clipIndex, bool flipH, bool flipV);
     Q_INVOKABLE void setClipRotationSnap(int trackIndex, int clipIndex, double degrees);
     Q_INVOKABLE bool canMergeSelection() const;
@@ -408,6 +492,9 @@ public:
     Q_INVOKABLE void setShapeStyle(int trackIndex, int clipIndex, const QVariantMap &style);
     Q_INVOKABLE void setClipFade(int trackIndex, int clipIndex, double fadeInSeconds, double fadeOutSeconds);
     Q_INVOKABLE void setClipFadeCurve(int trackIndex, int clipIndex, const QString &curve);
+    // which: "animIn" | "animOut". Partial patch: kind / duration / curve (or legacy ease).
+    Q_INVOKABLE void setClipAnimation(int trackIndex, int clipIndex, const QString &which,
+                                      const QVariantMap &patch);
     Q_INVOKABLE void addTransition(int trackIndex, int clipIndex, const QString &kind, double durationSeconds);
     Q_INVOKABLE void removeTransition(int trackIndex, const QString &transitionId);
     Q_INVOKABLE void setTransitionDuration(int trackIndex, const QString &transitionId, double durationSeconds);
@@ -463,12 +550,18 @@ public:
     Q_INVOKABLE void addEffect(int trackIndex, int clipIndex, const QString &effectId);
     Q_INVOKABLE void applyEffectTemplate(int trackIndex, int clipIndex, const QString &templateId);
     Q_INVOKABLE void removeEffect(int trackIndex, int clipIndex, int effectIndex);
+    Q_INVOKABLE void setEffectEnabled(int trackIndex, int clipIndex, int effectIndex, bool enabled);
+    Q_INVOKABLE void moveEffect(int trackIndex, int clipIndex, int fromIndex, int toIndex);
     Q_INVOKABLE void setEffectParam(int trackIndex, int clipIndex, int effectIndex, const QString &key,
                                     double value);
+    Q_INVOKABLE void setEffectColorParam(int trackIndex, int clipIndex, int effectIndex,
+                                         const QString &key, const QString &value);
     Q_INVOKABLE QVariantList audioEffectCatalog() const;
     Q_INVOKABLE QVariantList audioEffectCategories() const;
     Q_INVOKABLE void addAudioEffect(int trackIndex, int clipIndex, const QString &effectId);
     Q_INVOKABLE void removeAudioEffect(int trackIndex, int clipIndex, int effectIndex);
+    Q_INVOKABLE void setAudioEffectEnabled(int trackIndex, int clipIndex, int effectIndex, bool enabled);
+    Q_INVOKABLE void moveAudioEffect(int trackIndex, int clipIndex, int fromIndex, int toIndex);
     Q_INVOKABLE void setAudioEffectParam(int trackIndex, int clipIndex, int effectIndex,
                                          const QString &key, double value);
     Q_INVOKABLE void previewSetAudioEffectParam(int trackIndex, int clipIndex, int effectIndex,
@@ -491,7 +584,15 @@ public:
     Q_INVOKABLE void removeTrack(int trackIndex);
     Q_INVOKABLE void addBookmark(double seconds, const QString &label);
     Q_INVOKABLE void removeBookmark(int index);
+    Q_INVOKABLE void updateBookmark(int index, double seconds, const QString &label);
     Q_INVOKABLE void goToBookmark(int index);
+    // Seek to the next/previous bookmark by time (wraps). No-op when empty.
+    Q_INVOKABLE void goToNextBookmark();
+    Q_INVOKABLE void goToPreviousBookmark();
+    // Add at the playhead, or remove the nearest bookmark when one already sits
+    // within the snap threshold — same key for mark and unmark.
+    Q_INVOKABLE void toggleBookmarkAtPlayhead();
+    Q_INVOKABLE void removeBookmarkNearPlayhead();
     Q_INVOKABLE void freezeFrameAtPlayhead();
     Q_INVOKABLE void copySelection();
     Q_INVOKABLE void cutSelection();
@@ -502,13 +603,36 @@ public:
     // heightPx scales the cursor to the hovered clip/track height.
     Q_INVOKABLE void setTimelineTrimCursor(int side, int heightPx = 0);
     Q_INVOKABLE QString shortcutFor(const QString &actionId) const;
-    Q_INVOKABLE void setShortcut(const QString &actionId, const QString &keys);
+    // Returns an empty string on success, or the label of the action already bound to
+    // `keys` when the binding is refused. Qt resolves an ambiguous application
+    // shortcut by firing *neither* action, so a silent double-binding would break
+    // both with no indication anywhere.
+    Q_INVOKABLE QString setShortcut(const QString &actionId, const QString &keys);
+    // Restores every default binding. Backspace clears a binding and persists the
+    // empty string, so without this there was no route back from having cleared one.
+    Q_INVOKABLE void resetShortcuts();
     Q_INVOKABLE void triggerAction(const QString &actionId);
+    // Per-tab favorites in the assets panel (effects, sounds, shapes, stickers, transitions, templates).
+    Q_INVOKABLE bool isAssetFavorite(const QString &tabId, const QString &itemId) const;
+    Q_INVOKABLE void toggleAssetFavorite(const QString &tabId, const QString &itemId);
     Q_INVOKABLE void togglePlayback();
+    // Frame-accurate transport. Stepping quantizes to the project's frame grid first: the playhead
+    // can sit between frames after a scrub, and adding a frame duration to that would carry the
+    // off-grid offset forever.
+    Q_INVOKABLE void stepFrames(int frames);
+    Q_INVOKABLE void jumpSeconds(double seconds);
+    // The transport's jump buttons pick their amount from the modifiers held at click time, and
+    // AbstractButton::clicked carries none.
+    Q_INVOKABLE int keyboardModifiers() const;
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
     Q_INVOKABLE double snapTime(double seconds) const;
     Q_INVOKABLE QVariantList waveformPeaks(const QString &path) const;
+    // Whole-file peaks sliced to a source window, for a dialog whose x axis is a clip's trimmed
+    // range rather than the whole file. Shares the dense cache and the waveformReady signal with
+    // waveformPeaks() — unlike waveformPeaksRange(), which is block-backed for the timeline.
+    Q_INVOKABLE QVariantList waveformPeaksForSourceRange(const QString &path, double startSeconds,
+                                                         double durSeconds) const;
     // Peaks for just the source window [startSeconds, startSeconds + durSeconds), reduced to
     // `buckets` values, so a clip only ever asks for as many peaks as it has visible pixels.
     Q_INVOKABLE QVariantList waveformPeaksRange(const QString &path, double startSeconds,
@@ -542,20 +666,32 @@ public:
     Q_INVOKABLE void newProject();
     Q_INVOKABLE void openRecentProject(const QString &path);
     Q_INVOKABLE void clearRecentProjects();
+    // Removes one path from the recents list without deleting the file on disk.
+    Q_INVOKABLE void removeRecentProject(const QString &path);
     Q_INVOKABLE void restoreAutosave();
     Q_INVOKABLE void discardAutosave();
     // Clears dirty + recovery without mutating the timeline. Used when the user
     // chooses Don't Save before quitting so the next launch does not offer restore.
     Q_INVOKABLE void discardUnsavedChanges();
+    // When reopenLastProject is on: restore recovery silently, else load lastSessionPath.
+    // Returns true if a restore/load was started (caller should skip RecoveryDialog).
+    Q_INVOKABLE bool restoreLastSessionIfEnabled();
     Q_INVOKABLE QVariantList exportPresets() const; // legacy scale ids/labels
     Q_INVOKABLE QVariantList exportScaleOptions() const;
+    // Frame rate choices; the "project" entry is labelled with the current project fps.
+    Q_INVOKABLE QVariantList exportFrameRateOptions() const;
     Q_INVOKABLE QVariantList exportVideoCodecs() const;
     Q_INVOKABLE QVariantList exportAudioCodecs() const;
     Q_INVOKABLE QVariantMap exportDefaultSettings() const;
+    // Last dialog choices (scale + encode). Empty until the user has exported once.
+    Q_INVOKABLE QVariantMap lastExportSettings() const;
+    // Directory of the last successful save-picker choice; empty if never set or gone.
+    Q_INVOKABLE QString lastExportFolder() const;
     Q_INVOKABLE QString exportPreferredContainer(const QString &videoCodecId,
                                                 const QString &audioCodecId) const;
-    Q_INVOKABLE QStringList exportSaveFilters(const QString &container) const;
-    Q_INVOKABLE QString exportDefaultSuffix(const QString &container) const;
+    Q_INVOKABLE QString exportPreferredAudioOnlyContainer(const QString &audioCodecId) const;
+    Q_INVOKABLE QStringList exportSaveFilters(const QString &container, bool audioOnly = false) const;
+    Q_INVOKABLE QString exportDefaultSuffix(const QString &container, bool audioOnly = false) const;
     Q_INVOKABLE void exportProject(const QUrl &outputUrl);
     Q_INVOKABLE void exportWithPreset(const QUrl &outputUrl, const QString &presetId);
     Q_INVOKABLE void exportWithSettings(const QUrl &outputUrl, const QVariantMap &settings);
@@ -578,7 +714,11 @@ signals:
     void playingChanged();
     void snapEnabledChanged();
     void rippleEnabledChanged();
+    void allowClipOverlapChanged();
+    void darkModePreferenceChanged();
+    void mediaGridModeChanged();
     void autoKeyEnabledChanged();
+    void reopenLastProjectChanged();
     void keyframeGraphVisibilityChanged();
     void subtitleEditingChanged();
     void selectedSubtitleCueChanged();
@@ -592,6 +732,11 @@ signals:
     void segmentingChanged();
     void segmentProgressChanged();
     void segmentStatusChanged();
+    void reverseRenderingChanged();
+    void reverseRenderProgressChanged();
+    void reverseRenderStatusChanged();
+    void reverseRenderFinished(bool ok, const QString &message);
+    void reverseConfirmRequested(int trackIndex, int clipIndex, double seconds);
     void segmentationFinished(bool ok, const QString &message);
     void denoisingChanged();
     void denoiseProgressChanged();
@@ -607,6 +752,9 @@ signals:
     void speedCurvePositionChanged();
     void speedCurvePlayingChanged();
     void speedCurveApplied();
+    void fadeCurveSessionChanged();
+    void fadeCurveChanged();
+    void fadeCurveApplied();
     void faceDetectingChanged();
     void faceDetectProgressChanged();
     void faceDetectStatusChanged();
@@ -637,6 +785,7 @@ signals:
     void beatAnalysisChanged();
     void guidesChanged();
     void shortcutsChanged();
+    void assetFavoritesChanged();
     void canvasCropModeChanged();
     void backgroundChanged();
     void dirtyChanged();
@@ -645,6 +794,11 @@ signals:
     void recentProjectsChanged();
     void projectLayoutChosenChanged();
     void transformBlocked(const QString &reason);
+    // Outcome of replaceAssetSource. `message` is a ready-to-show reason on failure and the new
+    // media's name on success. `adjustedClips` counts clips whose source range no longer fitted
+    // the replacement and was pulled back to it.
+    void assetReplaceFinished(bool ok, const QString &message, int adjustedClips);
+    void replacingAssetIdChanged();
     // File actions from the shortcut layer — QML owns dialogs and unsaved prompts.
     void newProjectRequested();
     void openRequested();
@@ -653,11 +807,20 @@ signals:
 protected:
     void pushProjectEdit(const drift::Project &before, const QString &text);
     void finishEdit(const QString &message);
+    // Applies a finished replace probe as one undoable transaction, or reports why it cannot be.
+    void finalizeAssetReplace(const QString &assetId, const drift::MediaAsset &filled, bool ok);
+    // Moves every clip bound to `assetId` onto the replacement media. Returns how many had a
+    // source range that no longer fitted and had to be pulled back to it.
+    int rebindClipsToAsset(const QString &assetId, const drift::MediaAsset &asset);
     // Keeps the keyframe strip's index-addressed hidden series in sync after an effect is removed.
     void dropKeyframeGraphPropertiesForEffect(int removedIndex);
+    // Same idea after a reorder: fx.N.* indices move with the effect.
+    void remapKeyframeGraphPropertiesForEffectMove(int fromIndex, int toIndex);
     // Publishes a finished beat analysis into m_beatAnalysis / m_beatSnapTargets.
     void applyBeatAnalysis(const AudioBeatAnalysis &analysis, double startSeconds, double durSeconds,
                            const QByteArray &fingerprint);
+    void loadAssetFavorites();
+    void saveAssetFavorites(const QString &tabId);
     void applyEffectTemplateInternal(int trackIndex, int clipIndex, const EffectTemplateEntry &entry,
                                    const QString &mattePath = {},
                                    drift::TimeUs matteSrcOffsetUs = 0);
@@ -672,6 +835,8 @@ protected:
                               double outDy, bool corner);
     // Recollects m_beatSnapTargets from whichever layers are currently visible.
     void rebuildBeatSnapTargets();
+    // Beat onsets plus project bookmarks — anything clips should magnet to when snap is on.
+    QList<drift::TimeUs> extraSnapTargets() const;
     void refreshSegmentationPreview();
     void runSegmentationSeed(int generation);
     void finalizeFaceDetection(const QString &clipId, const QString &trackPath,
@@ -687,7 +852,10 @@ protected:
     bool renderDenoisedAudio(const QString &path, drift::TimeUs srcIn, drift::TimeUs span,
                              const QString &outPath, const QString &originalPath,
                              double progressFrom, double progressTo, QString *errorOut);
-    void setLastMessage(const QString &message);
+    // Defaulted severity so the existing call sites, which report ordinary status,
+    // stay unchanged; pass "error"/"warning" explicitly where a failure is reported.
+    void setLastMessage(const QString &message,
+                        const QString &severity = QStringLiteral("info"));
     drift::TimeUs playheadUs() const { return m_playheadUs; }
     void setPlayheadUs(drift::TimeUs us);
 
@@ -699,6 +867,8 @@ protected:
     int assetIndexForClip(const drift::Clip &clip) const;
     drift::TimeUs clipDurationForAssetIndex(int assetIndex) const;
     drift::TimeUs sourceDurationForClip(const drift::Clip &clip) const;
+    void startReverseRender(const QString &sourcePath, drift::TimeUs coverInUs,
+                            drift::TimeUs coverOutUs);
     // Cached dense peaks for `path`, or nullptr while the off-thread decode is still running
     // (waveformReady is emitted when it lands).
     const MediaWaveform::Dense *densePeaksFor(const QString &path) const;
@@ -717,6 +887,8 @@ protected:
     // only — packageProject builds the request here and hands the finished copy to its worker.
     drift::bundle::WriteRequest buildWriteRequest(bool embedSource) const;
     void rememberEmbeddedSources(const QList<drift::bundle::MediaEntry> &media);
+    // Persist the save-picker folder and encode/scale choices for the next Export dialog.
+    void rememberExportChoice(const QString &outputPath, const QVariantMap &settings);
     // Repoint every path field the extraction moved. Clips duplicate their asset's path, so this
     // matches on the value rather than walking by id.
     void remapProjectPaths(const QHash<QString, QString> &remap);
@@ -748,7 +920,12 @@ protected:
     bool m_playing = false;
     bool m_snapEnabled = true;
     bool m_rippleEnabled = false;
+    bool m_allowClipOverlap = false;
+    bool m_darkModeOverridden = false;
+    bool m_darkModePreferred = true;
+    bool m_mediaGridMode = true;
     bool m_autoKeyEnabled = false;
+    bool m_reopenLastProject = false;
     QStringList m_keyframeGraphHiddenProperties;
     bool m_subtitleEditing = false;
     int m_selectedSubtitleCue = -1;
@@ -756,6 +933,7 @@ protected:
     double m_exportProgress = 0.0;
     QAtomicInt m_exportCancel = 0;
     bool m_subtitleGenerating = false;
+    QString m_replacingAssetId;
     double m_subtitleGenProgress = 0.0;
     QString m_subtitleGenStatus;
     QAtomicInt m_subtitleGenCancel = 0;
@@ -771,6 +949,21 @@ protected:
     int m_speedCurveClipIndex = -1;
     int m_speedCurveRevision = 0;
     bool m_speedCurveActive = false;
+
+    bool m_fadeCurveActive = false;
+    int m_fadeCurveTrack = -1;
+    int m_fadeCurveClipIndex = -1;
+    QString m_fadeCurveClipId;
+    QString m_fadeCurveClipName;
+    drift::FadeShape m_fadeShape;
+    drift::FadeCurve m_fadeCurveBefore = drift::FadeCurve::Smooth;
+    drift::FadeShape m_fadeShapeBefore;
+    bool m_fadeCurveApplied = false;
+
+    bool m_reverseRendering = false;
+    double m_reverseProgress = 0.0;
+    QString m_reverseStatus;
+    QAtomicInt m_reverseCancel = 0;
 
     bool m_denoising = false;
     double m_denoiseProgress = 0.0;
@@ -818,8 +1011,10 @@ protected:
     bool m_canvasCropMode = false;
     QString m_guideType = QStringLiteral("thirds");
     QHash<QString, QString> m_shortcuts;
+    QHash<QString, QSet<QString>> m_assetFavorites;
     int m_draggingAssetIndex = -1;
     QString m_lastMessage;
+    QString m_lastMessageSeverity = QStringLiteral("info");
     bool m_inlineTextEditing = false;
     bool m_previewDragActive = false;
     drift::Project m_previewDragBefore;

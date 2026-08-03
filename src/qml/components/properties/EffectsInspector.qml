@@ -59,6 +59,25 @@ Item {
                 const data = EditorState.selectedClipData
                 return data && data.hasFaceTrack === true
             }
+            // A track baked before contours existed still drives the warps, so it is not stale in
+            // general — only the Beauty effects have nothing to work with, and they pass through.
+            property bool trackHasContours: {
+                const data = EditorState.selectedClipData
+                return data && data.faceTrackHasContours === true
+            }
+            property bool usesBeautyEffect: {
+                root.clipDataRevision
+                const effects = EditorState.selectedClipEffects || []
+                for (let i = 0; i < effects.length; i++) {
+                    if ((effects[i].catalogId || "").indexOf("face_") === 0
+                            && beautyIds.indexOf(effects[i].catalogId) >= 0)
+                        return true
+                }
+                return false
+            }
+            readonly property var beautyIds: ["face_lipstick", "face_blush", "face_teeth_whiten",
+                                              "face_eyeliner", "face_eyeshadow", "face_brow_tint",
+                                              "face_eye_color", "face_beautify"]
 
             Connections {
                 target: Addons
@@ -86,6 +105,21 @@ Item {
                          && !EditorState.faceDetecting
                 text: qsTr("Scan this clip once, then the Funny Face effects will follow the face through it.")
                 color: Theme.mutedForeground
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSizeXs
+            }
+
+            // The Beauty effects need the lip and eyelid contours, which tracks baked by older
+            // builds do not carry. They pass the frame through untouched in that case, so without
+            // this the effect reads as broken rather than as needing one more scan.
+            Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                visible: faceSection.faceReady && faceSection.hasTrack
+                         && !faceSection.trackHasContours && faceSection.usesBeautyEffect
+                         && !EditorState.faceDetecting
+                text: qsTr("This clip was scanned before makeup was supported. Re-detect faces to enable the Beauty effects.")
+                color: Theme.warning
                 font.family: Theme.fontFamily
                 font.pixelSize: Theme.fontSizeXs
             }
@@ -178,12 +212,16 @@ Item {
             onActionTriggered: root.browseEffectsRequested()
         }
 
+        // Integer models keep delegates alive across preview ticks that rebuild
+        // selectedClipEffects as a fresh QVariantList (same as AudioEffectsInspector).
         Repeater {
-            model: root.selectedEffects
+            model: root.selectedEffects.length
             delegate: Column {
                 id: effectCard
-                required property var modelData
                 required property int index
+                readonly property var effectData: root.selectedEffects[index] || ({})
+                readonly property var effectParams: effectData.params || []
+                readonly property bool effectEnabled: effectData.enabled !== false
                 width: root.width
                 spacing: 6
 
@@ -200,21 +238,59 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.leftMargin: 8
                         anchors.rightMargin: 4
+                        spacing: Theme.touchUi ? 6 : 2
+
                         Text {
-                            text: effectCard.modelData.label
-                            color: Theme.panelForeground
+                            text: effectCard.effectData.label
+                            color: effectCard.effectEnabled
+                                   ? Theme.panelForeground : Theme.mutedForeground
                             font.family: Theme.fontFamily
                             font.pixelSize: Theme.fontSizeSm
                             font.weight: Font.Medium
-                            width: parent.width - 28
+                            width: parent.width
+                                   - (Theme.touchUi ? Theme.androidIconButtonSize : 22) * 4
+                                   - (Theme.touchUi ? 6 * 4 : 0) - 8
                             elide: Text.ElideRight
                             anchors.verticalCenter: parent.verticalCenter
                         }
                         IconButton {
+                            glyph: Theme.icons.chevronUp
+                            variant: "ghost"
+                            buttonSize: Theme.touchUi ? Theme.androidIconButtonSize : 22
+                            iconSize: Theme.touchUi ? Theme.iconSizeMd : 12
+                            enabled: effectCard.index > 0
+                            tooltip: qsTr("Move effect up")
+                            onClicked: EditorState.moveEffect(
+                                           EditorState.selectedTrack, EditorState.selectedClip,
+                                           effectCard.index, effectCard.index - 1)
+                        }
+                        IconButton {
+                            glyph: Theme.icons.chevronDown
+                            variant: "ghost"
+                            buttonSize: Theme.touchUi ? Theme.androidIconButtonSize : 22
+                            iconSize: Theme.touchUi ? Theme.iconSizeMd : 12
+                            enabled: effectCard.index < root.selectedEffects.length - 1
+                            tooltip: qsTr("Move effect down")
+                            onClicked: EditorState.moveEffect(
+                                           EditorState.selectedTrack, EditorState.selectedClip,
+                                           effectCard.index, effectCard.index + 1)
+                        }
+                        IconButton {
+                            glyph: effectCard.effectEnabled ? Theme.icons.eye : Theme.icons.eyeOff
+                            variant: "ghost"
+                            buttonSize: Theme.touchUi ? Theme.androidIconButtonSize : 22
+                            iconSize: Theme.touchUi ? Theme.iconSizeMd : 12
+                            tooltip: effectCard.effectEnabled
+                                     ? qsTr("Disable effect") : qsTr("Enable effect")
+                            onClicked: EditorState.setEffectEnabled(
+                                           EditorState.selectedTrack, EditorState.selectedClip,
+                                           effectCard.index, !effectCard.effectEnabled)
+                        }
+                        IconButton {
                             glyph: Theme.icons.x
                             variant: "ghost"
-                            buttonSize: 22
-                            iconSize: 12
+                            buttonSize: Theme.touchUi ? Theme.androidIconButtonSize : 22
+                            iconSize: Theme.touchUi ? Theme.iconSizeMd : 12
                             tooltip: qsTr("Remove effect")
                             onClicked: EditorState.removeEffect(
                                            EditorState.selectedTrack, EditorState.selectedClip,
@@ -223,65 +299,97 @@ Item {
                     }
                 }
 
-                Repeater {
-                    model: effectCard.modelData.params || []
-                    delegate: Column {
-                        id: paramRow
-                        required property var modelData
-                        width: root.width
-                        spacing: 4
+                Column {
+                    width: parent.width
+                    spacing: 6
+                    opacity: effectCard.effectEnabled ? 1 : 0.45
 
-                        // Booleans have nothing to interpolate, so they keep the
-                        // plain switch and stay off the keyframe strip.
-                        Row {
-                            visible: !!paramRow.modelData.isBoolean
-                            width: parent.width
-                            spacing: 8
-                            Text {
-                                width: parent.width - 48
-                                elide: Text.ElideRight
-                                text: paramRow.modelData.label
-                                color: Theme.mutedForeground
-                                font.family: Theme.fontFamily
-                                font.pixelSize: Theme.fontSizeXs
-                                anchors.verticalCenter: parent.verticalCenter
+                    Repeater {
+                        model: effectCard.effectParams.length
+                        delegate: Column {
+                            id: paramRow
+                            required property int index
+                            readonly property var paramData: effectCard.effectParams[index] || ({})
+                            width: root.width
+                            spacing: 4
+
+                            // Booleans have nothing to interpolate, so they keep the
+                            // plain switch and stay off the keyframe strip.
+                            Row {
+                                visible: paramRow.paramData.type === "bool"
+                                width: parent.width
+                                spacing: 8
+                                Text {
+                                    width: parent.width - 48
+                                    elide: Text.ElideRight
+                                    text: paramRow.paramData.label
+                                    color: Theme.mutedForeground
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontSizeXs
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                Text {
+                                    width: 40
+                                    horizontalAlignment: Text.AlignRight
+                                    text: paramRow.paramData.value ? qsTr("On") : qsTr("Off")
+                                    color: Theme.panelForeground
+                                    font.family: Theme.monoFontFamily
+                                    font.pixelSize: Theme.fontSizeXs
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
                             }
-                            Text {
-                                width: 40
-                                horizontalAlignment: Text.AlignRight
-                                text: paramRow.modelData.value ? qsTr("On") : qsTr("Off")
-                                color: Theme.panelForeground
-                                font.family: Theme.monoFontFamily
-                                font.pixelSize: Theme.fontSizeXs
-                                anchors.verticalCenter: parent.verticalCenter
+
+                            ThemedSwitch {
+                                visible: paramRow.paramData.type === "bool"
+                                checked: !!paramRow.paramData.value
+                                onToggled: EditorState.setEffectParam(
+                                               EditorState.selectedTrack, EditorState.selectedClip,
+                                               effectCard.index, paramRow.paramData.key, checked ? 1 : 0)
                             }
-                        }
 
-                        ThemedSwitch {
-                            visible: !!paramRow.modelData.isBoolean
-                            checked: !!paramRow.modelData.value
-                            onToggled: EditorState.setEffectParam(
-                                           EditorState.selectedTrack, EditorState.selectedClip,
-                                           effectCard.index, paramRow.modelData.key, checked ? 1 : 0)
-                        }
+                            // A shade is picked, not dialled, so colours get the swatch and stay
+                            // off the keyframe strip — the track type is double all the way down.
+                            Row {
+                                visible: paramRow.paramData.type === "color"
+                                width: parent.width
+                                spacing: 8
+                                Text {
+                                    width: parent.width - 148
+                                    elide: Text.ElideRight
+                                    text: paramRow.paramData.label
+                                    color: Theme.mutedForeground
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontSizeXs
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                ColorSwatchField {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    hex: paramRow.paramData.value || "#ffffff"
+                                    tooltip: qsTr("Choose %1").arg(paramRow.paramData.label)
+                                    onEdited: value => EditorState.setEffectColorParam(
+                                                  EditorState.selectedTrack, EditorState.selectedClip,
+                                                  effectCard.index, paramRow.paramData.key, value)
+                                }
+                            }
 
-                        PropertyKeyframeRow {
-                            visible: !paramRow.modelData.isBoolean
-                            width: parent.width
-                            // `def` is the param's static value, which the row falls
-                            // back to whenever the track holds no keys.
-                            propDef: ({
-                                key: paramRow.modelData.prop,
-                                label: paramRow.modelData.label,
-                                def: paramRow.modelData.value,
-                                decimals: Math.abs(paramRow.modelData.max
-                                                   - paramRow.modelData.min) >= 10 ? 1 : 2
-                            })
-                            keyframeList: (paramRow.modelData.keyframes
-                                           && paramRow.modelData.keyframes.points) || []
-                            useSlider: true
-                            sliderFrom: paramRow.modelData.min
-                            sliderTo: paramRow.modelData.max
+                            PropertyKeyframeRow {
+                                visible: paramRow.paramData.type === "float"
+                                width: parent.width
+                                // `def` is the param's static value, which the row falls
+                                // back to whenever the track holds no keys.
+                                propDef: ({
+                                    key: paramRow.paramData.prop,
+                                    label: paramRow.paramData.label,
+                                    def: paramRow.paramData.value,
+                                    decimals: Math.abs(paramRow.paramData.max
+                                                       - paramRow.paramData.min) >= 10 ? 1 : 2
+                                })
+                                keyframeList: (paramRow.paramData.keyframes
+                                               && paramRow.paramData.keyframes.points) || []
+                                useSlider: true
+                                sliderFrom: paramRow.paramData.min
+                                sliderTo: paramRow.paramData.max
+                            }
                         }
                     }
                 }

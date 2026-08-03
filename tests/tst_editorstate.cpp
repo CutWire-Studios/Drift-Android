@@ -2,8 +2,10 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QImage>
 #include <QProcess>
 #include <QSet>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -27,30 +29,47 @@ private slots:
     void addTextClip();
     void addTextClipEmptyUsesPlaceholder();
     void addTextClipWithTextDoesNotRequestEdit();
+    void addTextClipWithPresetAppliesStyle();
     void undoRedoClipAdd();
     void undoTrackMute();
     void packagedProjectCarriesDerivedArtifacts();
     void undoBookmarkAdd();
+    void bookmarkNavigationAndToggle();
+    void bookmarkSnapTarget();
+    void renameClipAndAsset();
     void moveTrackReordersAndRemapsSelection();
     void addTrackInsertsEmptyTrackByType();
     void projectPersistenceRoundTrip();
+    void darkModePreferencePersistsAcrossSessions();
+    void exportFrameRatePersistsAcrossSessions();
+    void lastExportSettingsNormalisesStringTypedValues();
     void textStyleBlendModeKeyframesAndEffects();
     void previewSetTextRectScalesPixelSize();
     void fontCatalogIsExposedToQml();
     void effectBrowserCategoriesAndApply();
     void multiSelectClipboardGuidesAndShortcuts();
     void addTransitionBetweenAdjacentClips();
+    void addTransitionBetweenAdjacentTextClips();
+    void clipAnimationUndoRestoresKind();
     void setTransitionKindAndDurationPersist();
     void replaceTransitionOnDrop();
     void overlapAutoAppliesCrossfade();
     void separateAudioFromCombinedClip();
     void linkedAudioUnlinkAndMove();
+    void linkedFadeCurveSyncsPartner();
+    void customFadeCurveSessionApplyAndCancel();
     void keyframeGraphPropertySelection();
     void keyframesCanBeDisabledPerProperty();
     void effectParamKeyframes();
     void effectRemovalRemapsGraphSelection();
     void denoiseAddsCleanedClipOnTrackAbove();
+    void speedCurveOnAudioClipRetimesAndReplaces();
+    void waveformPeaksForSourceRangeSlicesToTheTrimmedWindow();
+    void speedCurveSessionExposesTrimmedSourceWindow();
     void shapeStylePartialUpdateAndUndo();
+    void replaceAssetSourceRebindsClipsAndClampsTrim();
+    void replaceAssetSourceRefusesADifferentKind();
+    void exportAssetImageWritesPngAndJpeg();
 };
 
 void EditorStateTest::snapTimeEnabled()
@@ -113,6 +132,21 @@ void EditorStateTest::addTextClipWithTextDoesNotRequestEdit()
              QStringLiteral("Hello"));
 }
 
+void EditorStateTest::addTextClipWithPresetAppliesStyle()
+{
+    AssetLibrary library;
+    AppController state(&library);
+    QSignalSpy spy(&state, &AppController::inlineTextEditRequested);
+
+    state.addTextClip(QString(), 0.0, QStringLiteral("neon"));
+
+    QCOMPARE(spy.count(), 1);
+    const QVariantMap clip = state.clipAt(state.selectedTrack(), state.selectedClip());
+    const QVariantMap style = clip.value(QStringLiteral("textStyle")).toMap();
+    QCOMPARE(style.value(QStringLiteral("packId")).toString(), QStringLiteral("neon"));
+    QCOMPARE(style.value(QStringLiteral("fontFamily")).toString(), QStringLiteral("Bebas Neue"));
+}
+
 void EditorStateTest::undoRedoClipAdd()
 {
     AssetLibrary library;
@@ -148,6 +182,88 @@ void EditorStateTest::undoBookmarkAdd()
     QVERIFY(state.undoAvailable());
     state.undo();
     QCOMPARE(state.bookmarks().size(), 0);
+}
+
+void EditorStateTest::bookmarkNavigationAndToggle()
+{
+    AssetLibrary library;
+    AppController state(&library);
+    // Project duration follows the longest clip; without one the playhead clamps to 0.
+    state.addTextClip(QStringLiteral("Pad"), 0.0);
+    state.setClipDuration(0, 0, 10.0);
+
+    state.addBookmark(1.0, QStringLiteral("A"));
+    state.addBookmark(3.0, QStringLiteral("B"));
+    state.addBookmark(5.0, QStringLiteral("C"));
+    QCOMPARE(state.bookmarks().size(), 3);
+
+    state.setPlayheadSeconds(2.0);
+    state.goToNextBookmark();
+    QCOMPARE(state.playheadSeconds(), 3.0);
+
+    state.goToNextBookmark();
+    QCOMPARE(state.playheadSeconds(), 5.0);
+
+    // Wrap to the earliest mark.
+    state.goToNextBookmark();
+    QCOMPARE(state.playheadSeconds(), 1.0);
+
+    state.goToPreviousBookmark();
+    QCOMPARE(state.playheadSeconds(), 5.0);
+
+    state.updateBookmark(1, 3.0, QStringLiteral("Bridge"));
+    QCOMPARE(state.bookmarks().at(1).toMap().value(QStringLiteral("label")).toString(),
+             QStringLiteral("Bridge"));
+
+    // Toggle at an existing mark removes it; toggle elsewhere adds one.
+    state.setPlayheadSeconds(3.0);
+    state.toggleBookmarkAtPlayhead();
+    QCOMPARE(state.bookmarks().size(), 2);
+
+    state.setPlayheadSeconds(4.0);
+    state.toggleBookmarkAtPlayhead();
+    QCOMPARE(state.bookmarks().size(), 3);
+}
+
+void EditorStateTest::bookmarkSnapTarget()
+{
+    AssetLibrary library;
+    AppController state(&library);
+    state.setSnapEnabled(true);
+    state.addBookmark(2.0, QStringLiteral("Snap me"));
+    // Within the 150ms snap window of the bookmark.
+    QCOMPARE(state.snapTime(2.05), 2.0);
+}
+
+void EditorStateTest::renameClipAndAsset()
+{
+    AssetLibrary library;
+    AppController state(&library);
+    state.addTextClip(QStringLiteral("Hello"), 0.0);
+    QCOMPARE(state.clipAt(0, 0).value(QStringLiteral("name")).toString(), QStringLiteral("Hello"));
+
+    state.setClipName(0, 0, QStringLiteral("Intro title"));
+    QCOMPARE(state.clipAt(0, 0).value(QStringLiteral("name")).toString(), QStringLiteral("Intro title"));
+    QVERIFY(state.undoAvailable());
+    state.undo();
+    QCOMPARE(state.clipAt(0, 0).value(QStringLiteral("name")).toString(), QStringLiteral("Hello"));
+
+    // Asset rename is independent of clip names that were copied at add time.
+    // Seed a bin row through the project table the library is bound to.
+    drift::MediaAsset asset;
+    asset.id = QStringLiteral("asset-1");
+    asset.name = QStringLiteral("clip.mp4");
+    asset.path = QStringLiteral("/tmp/clip.mp4");
+    asset.kind = drift::MediaKind::Video;
+    state.project()->assets().insert(asset.id, asset);
+    state.project()->assetOrder().append(asset.id);
+    library.syncToProject();
+    QCOMPARE(library.count(), 1);
+
+    QVERIFY(state.renameAsset(0, QStringLiteral("A-roll")));
+    QCOMPARE(library.assetAt(0).value(QStringLiteral("name")).toString(), QStringLiteral("A-roll"));
+    // Existing timeline text clip is untouched.
+    QCOMPARE(state.clipAt(0, 0).value(QStringLiteral("name")).toString(), QStringLiteral("Hello"));
 }
 
 void EditorStateTest::moveTrackReordersAndRemapsSelection()
@@ -270,6 +386,7 @@ void EditorStateTest::projectPersistenceRoundTrip()
     state.addTextClip(QStringLiteral("Persist"), 0.0);
     state.setTrackMuted(0, true);
     state.addBookmark(2.0, QStringLiteral("Mark"));
+    state.setMediaGridMode(false);
     QCOMPARE(state.tracks().size(), 2); // text + default video
 
     QTemporaryFile tempFile;
@@ -285,6 +402,139 @@ void EditorStateTest::projectPersistenceRoundTrip()
              QStringLiteral("text"));
     QVERIFY(state.trackMuted(0));
     QCOMPARE(state.bookmarks().size(), 1);
+    QCOMPARE(state.mediaGridMode(), false);
+}
+
+void EditorStateTest::darkModePreferencePersistsAcrossSessions()
+{
+    QStandardPaths::setTestModeEnabled(true);
+    const QString org = QCoreApplication::organizationName();
+    const QString app = QCoreApplication::applicationName();
+    QCoreApplication::setOrganizationName(QStringLiteral("DriftTest"));
+    QCoreApplication::setApplicationName(QStringLiteral("DriftTest"));
+    const auto restore = qScopeGuard([&] {
+        QSettings().remove(QStringLiteral("ui/darkMode"));
+        QCoreApplication::setOrganizationName(org);
+        QCoreApplication::setApplicationName(app);
+        QStandardPaths::setTestModeEnabled(false);
+    });
+    QSettings().remove(QStringLiteral("ui/darkMode"));
+
+    AssetLibrary library;
+    {
+        AppController state(&library);
+        // Never toggled: no override, so the UI is free to follow the OS scheme.
+        QVERIFY(!state.darkModeOverridden());
+
+        QSignalSpy spy(&state, &AppController::darkModePreferenceChanged);
+        state.setDarkModePreference(false);
+        QCOMPARE(spy.count(), 1);
+        QVERIFY(state.darkModeOverridden());
+        QCOMPARE(state.darkModePreferred(), false);
+    }
+
+    AppController relaunched(&library);
+    QVERIFY(relaunched.darkModeOverridden());
+    QCOMPARE(relaunched.darkModePreferred(), false);
+}
+
+void EditorStateTest::exportFrameRatePersistsAcrossSessions()
+{
+    QStandardPaths::setTestModeEnabled(true);
+    const QString org = QCoreApplication::organizationName();
+    const QString app = QCoreApplication::applicationName();
+    QCoreApplication::setOrganizationName(QStringLiteral("DriftTest"));
+    QCoreApplication::setApplicationName(QStringLiteral("DriftTest"));
+    const auto restore = qScopeGuard([&] {
+        QSettings().remove(QStringLiteral("export"));
+        QCoreApplication::setOrganizationName(org);
+        QCoreApplication::setApplicationName(app);
+        QStandardPaths::setTestModeEnabled(false);
+    });
+    QSettings().remove(QStringLiteral("export"));
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString outPath = dir.filePath(QStringLiteral("out.mp4"));
+
+    AssetLibrary library;
+    {
+        AppController state(&library);
+        QVERIFY(state.lastExportSettings().isEmpty());
+
+        // The default entry follows the project rather than pinning a rate.
+        const QVariantList options = state.exportFrameRateOptions();
+        QVERIFY(!options.isEmpty());
+        QCOMPARE(options.first().toMap().value(QStringLiteral("id")).toString(),
+                 QStringLiteral("project"));
+        QCOMPARE(options.first().toMap().value(QStringLiteral("fpsNum")).toInt(), 0);
+
+        QVariantMap settings;
+        settings.insert(QStringLiteral("scaleId"), QStringLiteral("source"));
+        settings.insert(QStringLiteral("videoCodecId"), QStringLiteral("h264"));
+        settings.insert(QStringLiteral("audioCodecId"), QStringLiteral("aac"));
+        settings.insert(QStringLiteral("fpsNum"), 30000);
+        settings.insert(QStringLiteral("fpsDen"), 1001);
+
+        // The choice is remembered before any encoding starts, so an empty timeline
+        // still exercises the write path without needing an encoder.
+        QSignalSpy finished(&state, &AppController::exportFinished);
+        state.exportWithSettings(QUrl::fromLocalFile(outPath), settings);
+        // Must not outlive the worker: it captures `state`.
+        QVERIFY(finished.wait(15000));
+    }
+
+    AppController relaunched(&library);
+    const QVariantMap remembered = relaunched.lastExportSettings();
+    QCOMPARE(remembered.value(QStringLiteral("fpsNum")).toInt(), 30000);
+    QCOMPARE(remembered.value(QStringLiteral("fpsDen")).toInt(), 1001);
+    QCOMPARE(relaunched.lastExportFolder(), dir.path());
+}
+
+// A real relaunch re-parses the INI and every value comes back a QString. QML reads
+// this map directly, and JavaScript treats the string "false" as truthy — so an
+// untyped audioOnly opened the export dialog in audio mode on every launch after
+// the first. Writing strings here reproduces that round-trip without a second
+// process (same-process QSettings would otherwise serve typed values from cache).
+void EditorStateTest::lastExportSettingsNormalisesStringTypedValues()
+{
+    QStandardPaths::setTestModeEnabled(true);
+    const QString org = QCoreApplication::organizationName();
+    const QString app = QCoreApplication::applicationName();
+    QCoreApplication::setOrganizationName(QStringLiteral("DriftTest"));
+    QCoreApplication::setApplicationName(QStringLiteral("DriftTest"));
+    const auto restore = qScopeGuard([&] {
+        QSettings().remove(QStringLiteral("export"));
+        QCoreApplication::setOrganizationName(org);
+        QCoreApplication::setApplicationName(app);
+        QStandardPaths::setTestModeEnabled(false);
+    });
+
+    {
+        QSettings store;
+        store.remove(QStringLiteral("export"));
+        store.beginGroup(QStringLiteral("export"));
+        store.setValue(QStringLiteral("scaleId"), QStringLiteral("source"));
+        store.setValue(QStringLiteral("videoCodecId"), QStringLiteral("h264"));
+        store.setValue(QStringLiteral("audioOnly"), QStringLiteral("false"));
+        store.setValue(QStringLiteral("fpsNum"), QStringLiteral("30000"));
+        store.setValue(QStringLiteral("fpsDen"), QStringLiteral("1001"));
+        store.setValue(QStringLiteral("crf"), QStringLiteral("23"));
+        store.endGroup();
+    }
+
+    AssetLibrary library;
+    AppController state(&library);
+    const QVariantMap remembered = state.lastExportSettings();
+
+    // Types, not just values: QML branches on these directly.
+    QCOMPARE(remembered.value(QStringLiteral("audioOnly")).typeId(), QMetaType::Bool);
+    QCOMPARE(remembered.value(QStringLiteral("audioOnly")).toBool(), false);
+    QCOMPARE(remembered.value(QStringLiteral("fpsNum")).typeId(), QMetaType::Int);
+    QCOMPARE(remembered.value(QStringLiteral("fpsNum")).toInt(), 30000);
+    QCOMPARE(remembered.value(QStringLiteral("fpsDen")).typeId(), QMetaType::Int);
+    QCOMPARE(remembered.value(QStringLiteral("crf")).typeId(), QMetaType::Int);
+    QCOMPARE(remembered.value(QStringLiteral("crf")).toInt(), 23);
 }
 
 void EditorStateTest::textStyleBlendModeKeyframesAndEffects()
@@ -530,7 +780,7 @@ void EditorStateTest::fontCatalogIsExposedToQml()
 
     const QVariantList catalog = state.fontCatalog();
     if (catalog.isEmpty())
-        QSKIP("font bundle not present — run scripts/fetch-fonts.py");
+        QSKIP("font bundle not present — see recipes/fetch-fonts.py in drift-addons");
 
     // Every key the FontPicker delegate and the weight combo read must actually arrive.
     for (const QVariant &entry : catalog) {
@@ -565,13 +815,13 @@ void EditorStateTest::effectBrowserCategoriesAndApply()
     AssetLibrary library;
     AppController state(&library);
 
-    // Four built in, plus one per category contributed by the bundled effect packages. Counting
-    // exactly would just be a tally of how many packages ship today.
+    // Built-in categories (color first), plus extras contributed by bundled effect packages.
+    // Counting exactly would just be a tally of how many packages ship today.
     const QVariantList categories = state.effectCategories();
     QVERIFY(categories.size() >= 5);
-    QCOMPARE(categories.first().toMap().value(QStringLiteral("id")).toString(), QStringLiteral("glitch"));
+    QCOMPARE(categories.first().toMap().value(QStringLiteral("id")).toString(), QStringLiteral("color"));
     QCOMPARE(categories.first().toMap().value(QStringLiteral("label")).toString(),
-             QStringLiteral("Glitch & Distortion"));
+             QStringLiteral("Color"));
 
     const QVariantList catalog = state.effectCatalog();
     QVERIFY(catalog.size() >= 16);
@@ -794,6 +1044,66 @@ void EditorStateTest::separateAudioFromCombinedClip()
     QVERIFY(!state.canSeparateAudioSelection());
 }
 
+void EditorStateTest::linkedFadeCurveSyncsPartner()
+{
+    AssetLibrary library;
+    AppController state(&library);
+    appendLinkedVideoAudioPair(*state.project());
+
+    state.setClipFade(0, 0, 0.8, 0.4);
+    QCOMPARE(state.project()->tracks().at(0).clips.at(0).fadeInUs, drift::secondsToUs(0.8));
+    QCOMPARE(state.project()->tracks().at(1).clips.at(0).fadeInUs, drift::secondsToUs(0.8));
+    QCOMPARE(state.project()->tracks().at(1).clips.at(0).fadeOutUs, drift::secondsToUs(0.4));
+
+    state.setClipFadeCurve(0, 0, QStringLiteral("equalPower"));
+    QCOMPARE(state.project()->tracks().at(0).clips.at(0).fadeCurve, drift::FadeCurve::EqualPower);
+    QCOMPARE(state.project()->tracks().at(1).clips.at(0).fadeCurve, drift::FadeCurve::EqualPower);
+
+    state.beginPreviewDrag(QStringLiteral("Adjust fade"));
+    state.previewSetClipFade(0, 0, 1.0, 0.5);
+    QCOMPARE(state.project()->tracks().at(1).clips.at(0).fadeInUs, drift::secondsToUs(1.0));
+    QCOMPARE(state.project()->tracks().at(1).clips.at(0).fadeOutUs, drift::secondsToUs(0.5));
+    state.commitPreviewDrag();
+}
+
+void EditorStateTest::customFadeCurveSessionApplyAndCancel()
+{
+    AssetLibrary library;
+    AppController state(&library);
+    appendLinkedVideoAudioPair(*state.project());
+    state.setClipFade(0, 0, 1.0, 0.0);
+    state.setClipFadeCurve(0, 0, QStringLiteral("linear"));
+
+    state.beginFadeCurveSession(0, 0);
+    QVERIFY(state.fadeCurveSessionActive());
+    QCOMPARE(state.project()->tracks().at(0).clips.at(0).fadeCurve, drift::FadeCurve::Custom);
+
+    state.setFadeCurvePoints(QVariantList{
+        QVariantMap{{QStringLiteral("t"), 0.0}, {QStringLiteral("g"), 0.0}},
+        QVariantMap{{QStringLiteral("t"), 0.5}, {QStringLiteral("g"), 0.2}},
+        QVariantMap{{QStringLiteral("t"), 1.0}, {QStringLiteral("g"), 1.0}},
+    });
+    QCOMPARE(state.project()->tracks().at(1).clips.at(0).fadeCurve, drift::FadeCurve::Custom);
+    QVERIFY(qAbs(state.project()->tracks().at(0).clips.at(0).fadeShape.gainAt(0.5) - 0.2) < 1e-6);
+
+    state.endFadeCurveSession();
+    QVERIFY(!state.fadeCurveSessionActive());
+    QCOMPARE(state.project()->tracks().at(0).clips.at(0).fadeCurve, drift::FadeCurve::Linear);
+
+    state.beginFadeCurveSession(0, 0);
+    state.setFadeCurvePoints(QVariantList{
+        QVariantMap{{QStringLiteral("t"), 0.0}, {QStringLiteral("g"), 0.0}},
+        QVariantMap{{QStringLiteral("t"), 0.5}, {QStringLiteral("g"), 0.75}},
+        QVariantMap{{QStringLiteral("t"), 1.0}, {QStringLiteral("g"), 1.0}},
+    });
+    state.applyFadeCurve();
+    QVERIFY(!state.fadeCurveSessionActive());
+    QCOMPARE(state.project()->tracks().at(0).clips.at(0).fadeCurve, drift::FadeCurve::Custom);
+    QVERIFY(qAbs(state.project()->tracks().at(0).clips.at(0).fadeShape.gainAt(0.5) - 0.75) < 1e-6);
+    QCOMPARE(state.project()->tracks().at(1).clips.at(0).fadeCurve, drift::FadeCurve::Custom);
+    QVERIFY(qAbs(state.project()->tracks().at(1).clips.at(0).fadeShape.gainAt(0.5) - 0.75) < 1e-6);
+}
+
 void EditorStateTest::linkedAudioUnlinkAndMove()
 {
     AssetLibrary library;
@@ -838,6 +1148,60 @@ void EditorStateTest::addTransitionBetweenAdjacentClips()
     QCOMPARE(transition.value(QStringLiteral("duration")).toDouble(), 0.75);
 }
 
+void EditorStateTest::addTransitionBetweenAdjacentTextClips()
+{
+    AssetLibrary library;
+    AppController state(&library);
+    state.addTextClip(QStringLiteral("One"), 0.0);
+    state.setClipDuration(0, 0, 2.0);
+    state.addTextClip(QStringLiteral("Two"), 2.0);
+    state.setClipDuration(0, 1, 2.0);
+
+    QCOMPARE(state.project()->tracks().at(0).type, drift::TrackType::Text);
+    QCOMPARE(state.project()->tracks().at(0).clips.size(), 2);
+
+    state.addTransition(0, 0, QStringLiteral("crossfade"), 0.5);
+    const QVariantMap transition = state.transitionBetweenClips(0, 0);
+    QVERIFY(!transition.isEmpty());
+    QCOMPARE(transition.value(QStringLiteral("kind")).toString(), QStringLiteral("crossfade"));
+    QCOMPARE(transition.value(QStringLiteral("duration")).toDouble(), 0.5);
+}
+
+void EditorStateTest::clipAnimationUndoRestoresKind()
+{
+    AssetLibrary library;
+    AppController state(&library);
+    state.addTextClip(QStringLiteral("Title"), 0.0);
+
+    const int track = state.selectedTrack();
+    const int clip = state.selectedClip();
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).animIn.kind, drift::ClipAnimKind::None);
+
+    state.setClipAnimation(track, clip, QStringLiteral("animIn"),
+                           QVariantMap{{QStringLiteral("kind"), QStringLiteral("pop")},
+                                       {QStringLiteral("duration"), 0.4},
+                                       {QStringLiteral("curve"), QStringLiteral("smooth")}});
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).animIn.kind, drift::ClipAnimKind::Pop);
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).animIn.durationUs,
+             drift::secondsToUs(0.4));
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).animIn.curve, drift::FadeCurve::Smooth);
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).fadeInUs, drift::TimeUs{0});
+
+    state.setClipAnimation(track, clip, QStringLiteral("animIn"),
+                           QVariantMap{{QStringLiteral("kind"), QStringLiteral("fade")},
+                                       {QStringLiteral("duration"), 0.6},
+                                       {QStringLiteral("curve"), QStringLiteral("equalPower")}});
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).animIn.kind, drift::ClipAnimKind::Fade);
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).fadeInUs, drift::secondsToUs(0.6));
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).fadeCurve, drift::FadeCurve::EqualPower);
+
+    QVERIFY(state.undoAvailable());
+    state.undo();
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).animIn.kind, drift::ClipAnimKind::Pop);
+    state.undo();
+    QCOMPARE(state.project()->tracks().at(track).clips.at(clip).animIn.kind, drift::ClipAnimKind::None);
+}
+
 void EditorStateTest::setTransitionKindAndDurationPersist()
 {
     AssetLibrary library;
@@ -879,6 +1243,9 @@ void EditorStateTest::overlapAutoAppliesCrossfade()
     AppController state(&library);
     appendAdjacentShapeClips(*state.project(), -drift::secondsToUs(0.5)); // 0.5s physical overlap
 
+    // Overlap is off by default; keep it on so the no-op move below does not push the
+    // already-overlapping clips apart before sync can create the crossfade.
+    state.setAllowClipOverlap(true);
     // Overlap sync runs on finishEdit; nudge via a no-op-ish move to trigger it.
     state.moveClip(0, 1, drift::usToSeconds(state.project()->tracks().at(0).clips.at(1).timelineStart));
 
@@ -1108,6 +1475,390 @@ void EditorStateTest::shapeStylePartialUpdateAndUndo()
     state.undo();
     style = state.selectedClipData().value(QStringLiteral("shapeStyle")).toMap();
     QCOMPARE(style.value(QStringLiteral("fillKind")).toString(), QStringLiteral("solid"));
+}
+
+// A ramp on an audio clip goes through exactly the same session, apply and replace flow a video
+// clip does — the only difference is that the editor has a waveform to draw instead of a filmstrip.
+void EditorStateTest::speedCurveOnAudioClipRetimesAndReplaces()
+{
+    AssetLibrary library;
+    AppController state(&library);
+
+    drift::Project &project = *state.project();
+    drift::Clip clip;
+    clip.id = QStringLiteral("clip-audio");
+    clip.type = drift::ClipType::Audio;
+    clip.name = QStringLiteral("Tone");
+    clip.path = QStringLiteral("/tmp/tone.wav");
+    clip.timelineStart = drift::secondsToUs(1.0);
+    clip.timelineDuration = drift::secondsToUs(4.0);
+    clip.srcIn = 0;
+    clip.srcOut = drift::secondsToUs(4.0);
+    clip.volume.setKeyframe(0, 1.0);
+    clip.volume.setKeyframe(drift::secondsToUs(4.0), 0.0);
+
+    drift::Track track{.type = drift::TrackType::Audio};
+    track.clips.append(clip);
+    // A video track above the audio one, so "directly above the clip's own track" is
+    // distinguishable from "at the very top".
+    project.tracks().clear();
+    project.tracks().append(drift::Track{.type = drift::TrackType::Video});
+    project.tracks().append(track);
+    const int sourceTrack = 1;
+
+    state.beginSpeedCurveSession(sourceTrack, 0);
+    QVERIFY2(state.speedCurveSessionActive(), qPrintable(state.lastMessage()));
+    QCOMPARE(state.speedCurveClipPath(), clip.path);
+    // No filmstrip on an audio clip, which is what makes the editor fall back to the waveform.
+    QVERIFY(state.speedCurveFilmstripPath().isEmpty());
+
+    // Ramp from half speed up to double, so the retimed duration is neither the source length nor
+    // a simple scale of it.
+    state.setSpeedCurvePoints(QVariantList{
+        QVariantMap{{QStringLiteral("pos"), 0.0}, {QStringLiteral("speed"), 0.5}},
+        QVariantMap{{QStringLiteral("pos"), 1.0}, {QStringLiteral("speed"), 2.0}},
+    });
+    // Timeline length is the integral of 1/speed over the source, (2/3)·ln4 ≈ 0.924 of it here —
+    // not the endpoint speed and not the average of the two.
+    const double retimedSeconds = state.speedCurveRetimedDuration();
+    QVERIFY2(std::fabs(retimedSeconds - 3.697) < 0.12, qPrintable(QString::number(retimedSeconds)));
+
+    state.applySpeedCurve();
+
+    // The retimed copy lands on a new audio track directly above the source track.
+    QCOMPARE(project.tracks().size(), 3);
+    QCOMPARE(project.tracks().at(1).type, drift::TrackType::Audio);
+    QCOMPARE(project.tracks().at(1).clips.size(), 1);
+
+    const drift::Clip &retimed = project.tracks().at(1).clips.at(0);
+    QVERIFY(retimed.hasSpeedCurve());
+    QCOMPARE(retimed.type, drift::ClipType::Audio);
+    QCOMPARE(retimed.timelineStart, clip.timelineStart);
+    QCOMPARE(retimed.srcIn, clip.srcIn);
+    QCOMPARE(retimed.srcOut, clip.srcOut);
+    QCOMPARE(retimed.timelineDuration,
+             retimed.speedCurve.retimedDurationUs(retimed.srcOut - retimed.srcIn));
+    // Volume automation has to follow the retime, or the fade would land at the wrong moment. The
+    // key that sat at the clip's old end belongs at its new one, not at the same wall-clock offset.
+    QCOMPARE(retimed.volume.keyframes().size(), clip.volume.keyframes().size());
+    QCOMPARE(retimed.volume.keyframes().firstKey(), drift::TimeUs{0});
+    QVERIFY2(std::llabs(retimed.volume.keyframes().lastKey() - retimed.timelineDuration) < 100'000,
+             qPrintable(QString::number(retimed.volume.keyframes().lastKey())));
+
+    // The clip it was made from is gone rather than left playing underneath at the original rate.
+    QCOMPARE(project.tracks().at(2).clips.size(), 0);
+
+    state.undo();
+    QCOMPARE(project.tracks().size(), 2);
+    QCOMPARE(project.tracks().at(1).clips.size(), 1);
+    QVERIFY(!project.tracks().at(1).clips.at(0).hasSpeedCurve());
+}
+
+// The speed-curve editor plots its ramp over the clip's trimmed source window, so the waveform
+// behind it has to cover that window and nothing else. Drawing the whole file put the audio under
+// the wrong part of the curve on any clip that had been trimmed.
+void EditorStateTest::waveformPeaksForSourceRangeSlicesToTheTrimmedWindow()
+{
+    const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString source = dir.filePath(QStringLiteral("half-tone.wav"));
+    // Four seconds: a tone for the first two, silence for the last two. Concatenated from two
+    // sources rather than gated with volume=enable, which leaves the tail audible.
+    QProcess proc;
+    proc.start(ffmpeg, {QStringLiteral("-y"),
+                        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+                        QStringLiteral("sine=frequency=440:sample_rate=48000:duration=2"),
+                        QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+                        QStringLiteral("anullsrc=r=48000:cl=mono:d=2"),
+                        QStringLiteral("-filter_complex"),
+                        QStringLiteral("[0:a][1:a]concat=n=2:v=0:a=1[out]"),
+                        QStringLiteral("-map"), QStringLiteral("[out]"),
+                        QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"), source});
+    QVERIFY(proc.waitForFinished(60000) && proc.exitCode() == 0);
+
+    AssetLibrary library;
+    AppController state(&library);
+
+    // The first call kicks off the decode and comes back empty; the peaks land on waveformReady.
+    QSignalSpy ready(&state, &AppController::waveformReady);
+    QVERIFY(state.waveformPeaksForSourceRange(source, 0.0, 2.0).isEmpty());
+    QVERIFY2(ready.wait(60000), "waveform decode did not finish");
+
+    const QVariantList loud = state.waveformPeaksForSourceRange(source, 0.0, 2.0);
+    const QVariantList quiet = state.waveformPeaksForSourceRange(source, 2.0, 2.0);
+    QVERIFY(loud.size() > 10);
+    QCOMPARE(quiet.size(), loud.size());
+
+    // reduceDensePeaks floors silence at 0.05 so it still draws as a hairline.
+    for (const QVariant &v : loud)
+        QVERIFY2(v.toDouble() > 0.2, qPrintable(QString::number(v.toDouble())));
+    for (const QVariant &v : quiet)
+        QVERIFY2(v.toDouble() <= 0.06, qPrintable(QString::number(v.toDouble())));
+
+    // The whole-file call is what the editor used to draw: it spans both halves, so it cannot be
+    // standing in for either window.
+    const QVariantList whole = state.waveformPeaks(source);
+    QVERIFY(whole.size() > 10);
+    double wholeMin = 1.0;
+    double wholeMax = 0.0;
+    for (const QVariant &v : whole) {
+        wholeMin = qMin(wholeMin, v.toDouble());
+        wholeMax = qMax(wholeMax, v.toDouble());
+    }
+    QVERIFY(wholeMax > 0.2);
+    QVERIFY(wholeMin <= 0.06);
+}
+
+// The curve editor's filmstrip and waveform both span the clip's trimmed window while the strip's
+// frames are sampled across the whole media file, so the session has to publish all three numbers.
+// A zero media duration would silently drop the strip back to spreading the whole file across the
+// clip, which is the bug this guards.
+void EditorStateTest::speedCurveSessionExposesTrimmedSourceWindow()
+{
+    AssetLibrary library;
+    AppController state(&library);
+
+    drift::Project &project = *state.project();
+
+    drift::MediaAsset asset;
+    asset.id = QStringLiteral("asset-video");
+    asset.path = QStringLiteral("/tmp/video.mp4");
+    asset.name = QStringLiteral("Video");
+    asset.kind = drift::MediaKind::Video;
+    asset.durationUs = drift::secondsToUs(20.0);
+    project.assets().insert(asset.id, asset);
+    project.assetOrder().append(asset.id);
+
+    drift::Clip clip;
+    clip.id = QStringLiteral("clip-video");
+    clip.assetId = asset.id;
+    clip.type = drift::ClipType::Video;
+    clip.name = asset.name;
+    clip.path = asset.path;
+    clip.filmstripPath = QStringLiteral("/tmp/video.strip.jpg");
+    clip.timelineStart = 0;
+    clip.timelineDuration = drift::secondsToUs(7.0);
+    clip.srcIn = drift::secondsToUs(5.0);
+    clip.srcOut = drift::secondsToUs(12.0);
+
+    drift::Track track{.type = drift::TrackType::Video};
+    track.clips.append(clip);
+    project.tracks().clear();
+    project.tracks().append(track);
+
+    state.beginSpeedCurveSession(0, 0);
+    QVERIFY2(state.speedCurveSessionActive(), qPrintable(state.lastMessage()));
+
+    QVERIFY(std::fabs(state.speedCurveSourceStart() - 5.0) < 1e-6);
+    QVERIFY(std::fabs(state.speedCurveSourceDuration() - 7.0) < 1e-6);
+    QVERIFY(std::fabs(state.speedCurveMediaDuration() - 20.0) < 1e-6);
+
+    // What ClipFilmstrip.sourceMapped needs: a real source length and a non-empty window inside it.
+    QVERIFY(state.speedCurveMediaDuration() > 0.0);
+    QVERIFY(state.speedCurveSourceDuration() > 0.0);
+    QVERIFY(state.speedCurveSourceStart() + state.speedCurveSourceDuration()
+            <= state.speedCurveMediaDuration());
+
+    // With no asset entry the length still has to come out positive, or the strip silently falls
+    // back to spreading the whole file across the clip.
+    project.assets().clear();
+    project.assetOrder().clear();
+    state.endSpeedCurveSession();
+    state.beginSpeedCurveSession(0, 0);
+    QVERIFY(state.speedCurveSessionActive());
+    QVERIFY(state.speedCurveMediaDuration() >= state.speedCurveSourceStart()
+                                                  + state.speedCurveSourceDuration());
+}
+
+namespace {
+
+// Generates a silent test pattern of `seconds` at `path`. Returns false when ffmpeg failed.
+bool renderTestVideo(const QString &ffmpeg, const QString &path, int seconds)
+{
+    QProcess proc;
+    proc.start(ffmpeg,
+               {QStringLiteral("-y"), QStringLiteral("-f"), QStringLiteral("lavfi"),
+                QStringLiteral("-i"),
+                QStringLiteral("testsrc=d=%1:s=320x240:r=25").arg(seconds),
+                QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"), path});
+    return proc.waitForFinished(60000) && proc.exitCode() == 0;
+}
+
+// Imports one file into the bin and blocks until its probe has landed.
+bool importAndAwait(AssetLibrary &library, const QString &path)
+{
+    QSignalSpy probed(&library, &AssetLibrary::assetMetadataChanged);
+    const int before = library.count();
+    library.importUrls({QUrl::fromLocalFile(path)});
+    if (library.count() != before + 1)
+        return false;
+    return probed.wait(60000);
+}
+
+} // namespace
+
+// The whole point of the feature: a project set up once — music, outro, CTA — is re-pointed at
+// the next video by swapping the file under its bin row, and every clip using it stays put.
+void EditorStateTest::replaceAssetSourceRebindsClipsAndClampsTrim()
+{
+    const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString original = dir.filePath(QStringLiteral("week1.mp4"));
+    const QString replacement = dir.filePath(QStringLiteral("week2.mp4"));
+    QVERIFY(renderTestVideo(ffmpeg, original, 10));
+    QVERIFY(renderTestVideo(ffmpeg, replacement, 4));
+
+    AssetLibrary library;
+    AppController state(&library);
+    QVERIFY(importAndAwait(library, original));
+
+    state.addClipFromAsset(0);
+    const int trackIndex = state.selectedTrack();
+    const int clipIndex = state.selectedClip();
+    QVERIFY(trackIndex >= 0 && clipIndex >= 0);
+
+    drift::Project &project = *state.project();
+    // Trim to a window that only the 10s original can satisfy, and drop an effect on it so the
+    // work that must survive the swap is represented.
+    {
+        drift::Clip &clip = project.tracks()[trackIndex].clips[clipIndex];
+        clip.timelineStart = drift::secondsToUs(2.0);
+        clip.srcIn = drift::secondsToUs(1.0);
+        clip.srcOut = drift::secondsToUs(9.0);
+        clip.timelineDuration = drift::secondsToUs(8.0);
+        clip.effects.append(drift::Effect{.name = QStringLiteral("gblur")});
+        clip.faceTrackPath = QStringLiteral("/tmp/stale.landmarks");
+        clip.faceTrackSrcOffsetUs = drift::secondsToUs(1.0);
+    }
+    const QString assetId = library.assetIdAt(0);
+    const drift::Clip beforeSwap = project.tracks().at(trackIndex).clips.at(clipIndex);
+
+    QSignalSpy finished(&state, &AppController::assetReplaceFinished);
+    QVERIFY(state.replaceAssetSource(0, QUrl::fromLocalFile(replacement)));
+    QVERIFY2(finished.wait(60000), "replace did not finish");
+    QCOMPARE(finished.count(), 1);
+    QVERIFY2(finished.at(0).at(0).toBool(), qPrintable(finished.at(0).at(1).toString()));
+    // The 9s out-point cannot survive a 4s file, so exactly this one clip is reported adjusted.
+    QCOMPARE(finished.at(0).at(2).toInt(), 1);
+
+    // The bin row is the same row, still the same id, now pointing somewhere else.
+    QCOMPARE(library.count(), 1);
+    QCOMPARE(library.assetIdAt(0), assetId);
+    QCOMPARE(project.asset(assetId)->path, QFileInfo(replacement).absoluteFilePath());
+
+    const drift::Clip &after = project.tracks().at(trackIndex).clips.at(clipIndex);
+    QCOMPARE(after.id, beforeSwap.id);
+    QCOMPARE(after.assetId, assetId);
+    QCOMPARE(after.path, QFileInfo(replacement).absoluteFilePath());
+    // Position on the timeline and the editing work on the clip both carry over untouched.
+    QCOMPARE(after.timelineStart, beforeSwap.timelineStart);
+    QCOMPARE(after.effects.size(), 1);
+    // Landmarks were baked against the old pixels; keeping them would warp to a face the new
+    // footage never had.
+    QVERIFY(after.faceTrackPath.isEmpty());
+    QCOMPARE(after.faceTrackSrcOffsetUs, drift::TimeUs(0));
+    // The source window is pulled inside the shorter file, and the timeline duration follows so
+    // the clip never addresses frames past the end of its media.
+    const drift::TimeUs mediaDuration = project.asset(assetId)->durationUs;
+    QVERIFY(mediaDuration > 0);
+    QVERIFY(after.srcOut <= mediaDuration);
+    QCOMPARE(after.srcIn, beforeSwap.srcIn);
+    QVERIFY(after.timelineDuration < beforeSwap.timelineDuration);
+
+    // One undo puts the asset and every clip bound to it back on the old file together.
+    state.undo();
+    QCOMPARE(project.asset(assetId)->path, QFileInfo(original).absoluteFilePath());
+    const drift::Clip &undone = project.tracks().at(trackIndex).clips.at(clipIndex);
+    QCOMPARE(undone.path, beforeSwap.path);
+    QCOMPARE(undone.srcOut, beforeSwap.srcOut);
+    QCOMPARE(undone.timelineDuration, beforeSwap.timelineDuration);
+    QCOMPARE(undone.faceTrackPath, beforeSwap.faceTrackPath);
+}
+
+// A clip's type is fixed at creation and decides which track it may sit on, so audio cannot slot
+// into a video row. The refusal has to leave the project exactly as it was.
+void EditorStateTest::replaceAssetSourceRefusesADifferentKind()
+{
+    const QString ffmpeg = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty())
+        QSKIP("ffmpeg not available to generate a test clip");
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString video = dir.filePath(QStringLiteral("clip.mp4"));
+    QVERIFY(renderTestVideo(ffmpeg, video, 4));
+
+    const QString audio = dir.filePath(QStringLiteral("tone.wav"));
+    QProcess proc;
+    proc.start(ffmpeg, {QStringLiteral("-y"), QStringLiteral("-f"), QStringLiteral("lavfi"),
+                        QStringLiteral("-i"), QStringLiteral("sine=f=440:d=4:r=48000"),
+                        QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"), audio});
+    QVERIFY(proc.waitForFinished(60000) && proc.exitCode() == 0);
+
+    AssetLibrary library;
+    AppController state(&library);
+    QVERIFY(importAndAwait(library, video));
+
+    state.addClipFromAsset(0);
+    drift::Project &project = *state.project();
+    const QString assetId = library.assetIdAt(0);
+    const QString originalPath = project.asset(assetId)->path;
+
+    QSignalSpy undoStack(&state, &AppController::undoStackChanged);
+    QSignalSpy finished(&state, &AppController::assetReplaceFinished);
+    QVERIFY(state.replaceAssetSource(0, QUrl::fromLocalFile(audio)));
+    QVERIFY2(finished.wait(60000), "replace did not finish");
+    QVERIFY(!finished.at(0).at(0).toBool());
+    QVERIFY(!finished.at(0).at(1).toString().isEmpty());
+
+    QCOMPARE(project.asset(assetId)->path, originalPath);
+    QCOMPARE(project.tracks().at(state.selectedTrack()).clips.at(0).path, originalPath);
+    // A refused swap must not leave an empty step on the stack for the user to undo.
+    QCOMPARE(undoStack.count(), 0);
+}
+
+// The way a freeze frame leaves the project: a PNG destination copies the bytes through
+// untouched, while a .jpg destination re-encodes at the same size.
+void EditorStateTest::exportAssetImageWritesPngAndJpeg()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    QImage source(64, 48, QImage::Format_ARGB32);
+    source.fill(Qt::red);
+    const QString sourcePath = dir.filePath(QStringLiteral("freeze.png"));
+    QVERIFY(source.save(sourcePath, "PNG"));
+
+    AssetLibrary library;
+    AppController state(&library);
+
+    drift::MediaAsset asset;
+    asset.name = QStringLiteral("Freeze frame");
+    asset.path = sourcePath;
+    asset.kind = drift::MediaKind::Image;
+    asset.width = source.width();
+    asset.height = source.height();
+    QVERIFY(!library.addGeneratedAsset(asset).isEmpty());
+
+    const QString pngOut = dir.filePath(QStringLiteral("out.png"));
+    QVERIFY(state.exportAssetImage(0, QUrl::fromLocalFile(pngOut)));
+    QCOMPARE(QFileInfo(pngOut).size(), QFileInfo(sourcePath).size());
+
+    const QString jpegOut = dir.filePath(QStringLiteral("out.jpg"));
+    QVERIFY(state.exportAssetImage(0, QUrl::fromLocalFile(jpegOut)));
+    const QImage written(jpegOut);
+    QVERIFY(!written.isNull());
+    QCOMPARE(written.size(), source.size());
+
+    QVERIFY(!state.exportAssetImage(1, QUrl::fromLocalFile(dir.filePath(QStringLiteral("no.png")))));
 }
 
 QTEST_MAIN(EditorStateTest)

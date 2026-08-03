@@ -26,6 +26,13 @@ AbstractButton {
     implicitWidth: Math.max(toggleHeight, implicitContentWidth + leftPadding + rightPadding)
     implicitHeight: toggleHeight
 
+    // Press feedback — see the note in ThemedButton.qml.
+    scale: root.down ? Theme.pressScale : 1.0
+
+    Behavior on scale {
+        NumberAnimation { duration: Theme.durationPress; easing.type: Theme.easing }
+    }
+
     Accessible.role: Accessible.CheckBox
     Accessible.name: text.length > 0 ? text : tooltip
     Accessible.checked: root.checked

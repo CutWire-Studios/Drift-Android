@@ -1,5 +1,6 @@
 #include "FileDialogs.h"
 
+#include <QDir>
 #include <QFileDialog>
 
 FileDialogs::FileDialogs(QObject *parent) : QObject(parent) {}
@@ -53,7 +54,8 @@ QList<QUrl> FileDialogs::openFiles(const QString &title, const QStringList &name
 }
 
 QUrl FileDialogs::saveFile(const QString &title, const QStringList &nameFilters,
-                           const QString &suggestedName, const QString &suffix) const
+                           const QString &suggestedName, const QString &suffix,
+                           const QString &initialDirectory) const
 {
     QFileDialog dialog;
     dialog.setWindowTitle(title);
@@ -61,6 +63,10 @@ QUrl FileDialogs::saveFile(const QString &title, const QStringList &nameFilters,
     dialog.setFileMode(QFileDialog::AnyFile);
     if (!nameFilters.isEmpty())
         dialog.setNameFilters(nameFilters);
+
+    if (!initialDirectory.isEmpty() && QDir(initialDirectory).exists())
+        dialog.setDirectory(initialDirectory);
+
 
     // The extension is put in the suggested name instead of QFileDialog::setDefaultSuffix: a file
     // exported through the documents portal must not be renamed afterwards, and appending the

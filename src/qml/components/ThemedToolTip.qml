@@ -32,23 +32,43 @@ ToolTip {
         radius: Theme.radiusSm
     }
 
+    // A hair of scale for presence, but durationFast both ways and a shallower
+    // 0.97: tooltips are high-frequency, and anything slower reads as lag.
     enter: Transition {
-        NumberAnimation {
-            property: "opacity"
-            from: 0.0
-            to: 1.0
-            duration: Theme.durationFast
-            easing.type: Theme.easing
+        ParallelAnimation {
+            NumberAnimation {
+                property: "opacity"
+                from: 0.0
+                to: 1.0
+                duration: Theme.durationFast
+                easing.type: Theme.easing
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 0.97
+                to: 1.0
+                duration: Theme.durationFast
+                easing.type: Theme.easing
+            }
         }
     }
 
     exit: Transition {
-        NumberAnimation {
-            property: "opacity"
-            from: 1.0
-            to: 0.0
-            duration: Theme.durationFast
-            easing.type: Theme.easing
+        ParallelAnimation {
+            NumberAnimation {
+                property: "opacity"
+                from: 1.0
+                to: 0.0
+                duration: Theme.durationFast
+                easing.type: Theme.easing
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 1.0
+                to: 0.97
+                duration: Theme.durationFast
+                easing.type: Theme.easing
+            }
         }
     }
 }

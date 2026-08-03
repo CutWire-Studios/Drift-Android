@@ -5,8 +5,8 @@ import Drift
 // Themed right-click menu.
 //
 // The app previously had no context menus at all: right-clicking a clip, track,
-// ruler or bookmark did nothing, so several actions were reachable only by
-// unlabelled keyboard shortcut or not at all.
+// or ruler did nothing, so several actions were reachable only by unlabelled
+// keyboard shortcut or not at all. Bookmarks now have a context menu too.
 //
 // Use with ThemedMenuItem for entries.
 Menu {
@@ -24,23 +24,45 @@ Menu {
         border.color: Theme.panelBorder
     }
 
+    // Opacity alone made the menu appear out of nothing; pairing it with a scale
+    // gives it presence, matching ThemedDialog. Enter is deliberate, exit snaps.
+    // A QML Popup has no transformOrigin, so this scales from the menu's own
+    // centre rather than from the click point — close enough at this size.
     enter: Transition {
-        NumberAnimation {
-            property: "opacity"
-            from: 0.0
-            to: 1.0
-            duration: Theme.durationFast
-            easing.type: Theme.easing
+        ParallelAnimation {
+            NumberAnimation {
+                property: "opacity"
+                from: 0.0
+                to: 1.0
+                duration: Theme.durationBase
+                easing.type: Theme.easing
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 0.96
+                to: 1.0
+                duration: Theme.durationBase
+                easing.type: Theme.easing
+            }
         }
     }
 
     exit: Transition {
-        NumberAnimation {
-            property: "opacity"
-            from: 1.0
-            to: 0.0
-            duration: Theme.durationFast
-            easing.type: Theme.easing
+        ParallelAnimation {
+            NumberAnimation {
+                property: "opacity"
+                from: 1.0
+                to: 0.0
+                duration: Theme.durationFast
+                easing.type: Theme.easing
+            }
+            NumberAnimation {
+                property: "scale"
+                from: 1.0
+                to: 0.96
+                duration: Theme.durationFast
+                easing.type: Theme.easing
+            }
         }
     }
 

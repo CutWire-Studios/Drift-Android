@@ -23,17 +23,121 @@ Item {
         openPropertiesRequested()
     }
 
+    property int renameClipTrack: -1
+    property int renameClipIndex: -1
+
+    // TimelineClipItem's context menu calls this on its `panel`, so the touch timeline
+    // has to answer it exactly as TimelinePanel does or "Rename…" is a TypeError.
+    function requestRenameClip(trackIndex, clipIndex) {
+        if (trackIndex < 0 || clipIndex < 0 || trackIndex >= root.tracks.length)
+            return
+        const clips = root.tracks[trackIndex].clips || []
+        if (clipIndex >= clips.length)
+            return
+        root.renameClipTrack = trackIndex
+        root.renameClipIndex = clipIndex
+        clipRenameField.text = clips[clipIndex].name || ""
+        clipRenameDialog.open()
+    }
+
+    ThemedDialog {
+        id: clipRenameDialog
+        title: qsTr("Rename clip")
+        acceptText: qsTr("Rename")
+        preferredWidth: Theme.dialogWidthSm
+
+        contentItem: Column {
+            width: parent ? parent.width : Theme.dialogWidthSm
+            spacing: Theme.spacingMd
+
+            ThemedLabel {
+                width: parent.width
+                text: qsTr("Name")
+                size: "sm"
+            }
+            ThemedTextField {
+                id: clipRenameField
+                width: parent.width
+                placeholderText: qsTr("Clip name")
+            }
+        }
+
+        onOpened: {
+            clipRenameField.forceActiveFocus()
+            clipRenameField.selectAll()
+        }
+        onAccepted: {
+            if (root.renameClipTrack < 0 || root.renameClipIndex < 0)
+                return
+            const label = clipRenameField.text.trim()
+            if (label.length > 0)
+                EditorState.setClipName(root.renameClipTrack, root.renameClipIndex, label)
+            root.renameClipTrack = -1
+            root.renameClipIndex = -1
+        }
+        onRejected: {
+            root.renameClipTrack = -1
+            root.renameClipIndex = -1
+        }
+    }
+
     onTimelineToolChanged: if (timelineTool === "") {
         cutHoverSeconds = -1
         cutHoverTrack = -1
         cutHoverClip = -1
     }
 
-    readonly property real minZoom: 0.05
+    // Matches TimelinePanel's floor. 0.05 was 2.5 px/second: a ten-minute project was
+    // 1500px against a ~330px viewport with no way to see it end to end.
+    readonly property real minZoom: 0.0001
     readonly property real maxZoom: 40.0
     readonly property real pxPerSecond: Theme.pixelsPerSecondBase * zoom
+    // Trailing runway after the last clip: a constant strip of viewport, not a fixed
+    // number of seconds, so it does not become 10000px of dead scroll when zoomed in.
+    readonly property real timelineEndPadPx: Math.max(
+        Theme.timelineEndPadMinPx, flick.width * Theme.timelineEndPadFraction)
+
+    // Keep `anchorSeconds` glued to the same viewport X across the scale change.
+    // Zoom buttons used to assign root.zoom directly, so the view expanded from the
+    // content origin and whatever was on screen slid away to the right.
+    function setZoomAround(newZoom, anchorSeconds, viewportX) {
+        const z = Math.max(minZoom, Math.min(maxZoom, newZoom))
+        if (z === zoom)
+            return
+        contentXAnimation.stop()
+        zoom = z
+        const newMaxX = Math.max(0, flick.contentWidth - flick.width)
+        flick.contentX = Math.max(0, Math.min(newMaxX,
+                                              anchorSeconds * pxPerSecond - viewportX))
+        filmstripRefreshEpoch++
+    }
+
+    // Zoom buttons: hold the playhead steady.
+    function setZoom(newZoom) {
+        const anchorSeconds = Math.max(0, EditorState.playheadSeconds)
+        const viewportX = anchorSeconds * pxPerSecond - flick.contentX
+        setZoomAround(newZoom, anchorSeconds, viewportX)
+    }
+
+    function fitZoom() {
+        contentXAnimation.stop()
+        if (!(EditorState.durationSeconds > 0)) {
+            zoom = 1.0
+            flick.contentX = 0
+            filmstripRefreshEpoch++
+            return
+        }
+        const usable = Math.max(Math.max(flick.width, 1) - timelineEndPadPx, 1)
+        const fit = usable / (EditorState.durationSeconds * Theme.pixelsPerSecondBase)
+        zoom = Math.max(minZoom, Math.min(maxZoom, fit))
+        flick.contentX = 0
+        filmstripRefreshEpoch++
+    }
     readonly property real labelsWidth: Theme.androidTrackLabelsWidth
-    readonly property real seekHeaderHeight: Theme.timelineRulerHeight
+    // Ruler plus the bookmark lane. Also the playhead's scrub target and, in its left
+    // corner, the add-track button — so it is deliberately taller than the desktop ruler.
+    readonly property real seekHeaderHeight:
+        Theme.timelineRulerHeight + Theme.timelineBookmarkRowHeight
     // Exposed for clip filmstrip viewport culling (Flickable id is local).
     readonly property real timelineViewX: flick.contentX
     readonly property real timelineViewW: flick.width
@@ -44,7 +148,8 @@ Item {
         const minLabelPx = 66
         const needed = minLabelPx / pxPerSecond
         const steps = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30,
-                       60, 120, 300, 600, 900, 1800, 3600]
+                       60, 120, 300, 600, 900, 1800, 3600,
+                       7200, 10800, 14400, 21600, 43200]
         for (var i = 0; i < steps.length; i++)
             if (steps[i] >= needed)
                 return steps[i]
@@ -100,6 +205,35 @@ Item {
         moveLeaderTrack = -1
         moveLeaderClip = -1
         moveFollowDeltaX = 0
+    }
+
+    readonly property real timelineViewY: flick.contentY
+    readonly property real timelineViewH: flick.height
+
+    // Set while a clip drag owns the gesture, so the Flickable cannot steal it. Autoscroll
+    // still moves the view — it writes contentX/contentY directly, which an inactive
+    // Flickable honours.
+    property bool scrollLocked: false
+    function setScrollLocked(locked) { scrollLocked = locked }
+
+    // Edge autoscroll for an in-progress clip drag. The timeline pane is barely two
+    // track rows tall and a few seconds wide on a phone, so without this a clip could
+    // only ever be moved to a track and a time already on screen — the drag simply
+    // stopped at the viewport edge. Returns the delta actually applied so the caller
+    // can advance the dragged clip by the same amount; scrolling alone would only
+    // slide it out of view, because MouseArea rewrites the drag target's position on
+    // move events and none arrive while the finger is parked at the edge.
+    function dragEdgeScroll(dx, dy) {
+        // ensurePlayheadVisible's animation would otherwise fight these ticks.
+        contentXAnimation.stop()
+        const maxX = Math.max(0, flick.contentWidth - flick.width)
+        const maxY = Math.max(0, flick.contentHeight - flick.height)
+        const nx = Math.max(0, Math.min(maxX, flick.contentX + dx))
+        const ny = Math.max(0, Math.min(maxY, flick.contentY + dy))
+        const applied = { "x": nx - flick.contentX, "y": ny - flick.contentY }
+        flick.contentX = nx
+        flick.contentY = ny
+        return applied
     }
 
     function showLandingPreview(trackIndex, desiredStart, duration) {
@@ -194,13 +328,6 @@ Item {
         return -1
     }
 
-    function zoomAt(contentX, viewportX, factor) {
-        const t = contentX / pxPerSecond
-        zoom = Math.max(minZoom, Math.min(maxZoom, zoom * factor))
-        const newMaxX = Math.max(0, flick.contentWidth - flick.width)
-        flick.contentX = Math.max(0, Math.min(newMaxX, t * pxPerSecond - viewportX))
-    }
-
     function ensurePlayheadVisible() {
         const playheadX = EditorState.playheadSeconds * pxPerSecond
         const margin = 64
@@ -267,6 +394,26 @@ Item {
                         height: 1
                         color: Theme.panelBorder
                     }
+
+                    // Desktop puts the add-track button in this exact corner; on the
+                    // phone it was an empty box, leaving no way to start a text, audio
+                    // or shape track that a dropped asset does not create for you.
+                    IconButton {
+                        id: addTrackButton
+                        anchors.centerIn: parent
+                        buttonSize: Math.min(parent.height, Theme.androidIconButtonSize)
+                        iconSize: Theme.iconSizeMd
+                        glyph: Theme.icons.plus
+                        variant: "text"
+                        tooltip: qsTr("Add new track")
+                        onClicked: addTrackMenu.open()
+
+                        NewTrackMenu {
+                            id: addTrackMenu
+                            x: Math.max(0, (addTrackButton.width - width) / 2)
+                            y: addTrackButton.height + 4
+                        }
+                    }
                 }
 
                 TrackHeaderColumn {
@@ -276,6 +423,7 @@ Item {
                     contentY: flick.contentY
                     labelsWidth: root.labelsWidth
                     compact: true
+                    touchMode: true
                 }
             }
 
@@ -283,10 +431,12 @@ Item {
                 id: flick
                 width: parent.width - root.labelsWidth
                 height: parent.height
-                contentWidth: Math.max(width, (EditorState.durationSeconds + 5) * root.pxPerSecond)
+                contentWidth: Math.max(width, EditorState.durationSeconds * root.pxPerSecond
+                                              + root.timelineEndPadPx)
                 contentHeight: Math.max(height,
                                         root.seekHeaderHeight + root.totalTracksHeight() + Theme.trackGap)
                 clip: true
+                interactive: !root.scrollLocked
                 boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.horizontal: AppScrollBar { policy: ScrollBar.AsNeeded }
                 ScrollBar.vertical: AppScrollBar { policy: ScrollBar.AsNeeded }
@@ -302,7 +452,15 @@ Item {
                         if (active) {
                             startZoom = root.zoom
                             startContentX = flick.contentX
-                            centroidViewportX = centroid.position.x
+                            // centroid.position is in the handler's parent coordinates,
+                            // which for a handler declared inside a Flickable is the
+                            // *content* item — already shifted by contentX. Mapping the
+                            // scene position into the Flickable itself is independent of
+                            // that reparenting and gives a true viewport offset; using
+                            // centroid.position directly added contentX a second time and
+                            // made the content jump sideways on every pinch.
+                            centroidViewportX =
+                                flick.mapFromItem(null, centroid.scenePosition).x
                         } else {
                             // Pinch stops dirtying the scene graph; force filmstrip Images
                             // to rebind so Android/ANGLE does not leave blank tiles.
@@ -312,7 +470,10 @@ Item {
                     onScaleChanged: {
                         if (!active)
                             return
-                        const factor = scale
+                        // activeScale, not scale: `scale` is persistentScale, which keeps
+                        // accumulating across gestures, so the second pinch started from
+                        // the first one's total and multiplied the zoom twice over.
+                        const factor = activeScale
                         const next = Math.max(root.minZoom,
                                               Math.min(root.maxZoom, startZoom * factor))
                         if (next === root.zoom)
@@ -411,21 +572,58 @@ Item {
                                 }
                             }
                         }
-                    }
 
-                    EmptyState {
-                        x: flick.contentX + (flick.width - width) / 2
-                        y: flick.contentY + root.seekHeaderHeight
-                           + Math.max(0, (flick.height - root.seekHeaderHeight - height) / 2)
-                        width: Math.min(flick.width - Theme.spacing3xl, 320)
-                        // AndroidEditor draws a fixed empty-state overlay above the timeline.
-                        visible: false
-                        glyph: Theme.icons.layers
-                        title: qsTr("Your timeline is empty")
-                        hint: qsTr("Import media to start editing.")
-                        actionText: qsTr("Open Media")
-                        actionVariant: "primary"
-                        onActionTriggered: root.openMediaRequested()
+                        // Bookmark lane. Read-only compared to desktop — tap to jump, and
+                        // that is all: adding, moving and renaming live in the edit strip
+                        // and would need a drag gesture this strip has already promised to
+                        // the scrubber. Sits above rulerScrub with preventStealing so a tap
+                        // on a flag is not read as a seek.
+                        Item {
+                            id: bookmarkRow
+                            y: Theme.timelineRulerHeight
+                            width: parent.width
+                            height: Theme.timelineBookmarkRowHeight
+                            z: 2
+
+                            Repeater {
+                                model: EditorState.bookmarks
+                                delegate: Item {
+                                    required property int index
+                                    required property var modelData
+
+                                    x: modelData.seconds * root.pxPerSecond - width / 2
+                                    width: 10
+                                    height: parent.height
+
+                                    Rectangle {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        y: -6
+                                        width: 1
+                                        height: parent.height + 6
+                                        color: Theme.primary
+                                        opacity: 0.7
+                                    }
+
+                                    Rectangle {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: 8
+                                        height: 8
+                                        rotation: 45
+                                        radius: 1
+                                        color: Theme.primary
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        // The flag is 10px; the target is a fingertip.
+                                        anchors.margins: -14
+                                        preventStealing: true
+                                        onClicked: EditorState.goToBookmark(parent.index)
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     Column {
@@ -484,6 +682,25 @@ Item {
                         Behavior on opacity {
                             NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
                         }
+
+                        Rectangle {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.top: parent.top
+                            anchors.topMargin: Theme.spacingSm
+                            width: snapLabel.implicitWidth + Theme.spacingMd * 2
+                            height: snapLabel.implicitHeight + Theme.spacingSm
+                            radius: Theme.radiusSm
+                            color: Theme.snapGuide
+
+                            Text {
+                                id: snapLabel
+                                anchors.centerIn: parent
+                                text: root.formatTime(root.snapGuideSeconds)
+                                color: Theme.primaryForeground
+                                font.family: Theme.monoFontFamily
+                                font.pixelSize: Theme.fontSizeTick
+                            }
+                        }
                     }
 
                     Item {
@@ -512,18 +729,22 @@ Item {
 
                         Rectangle {
                             anchors.left: parent.left
-                            y: Theme.timelineRulerHeight * 0.55
+                            y: flick.contentY + Theme.timelineRulerHeight * 0.55
                             width: Theme.playheadLineWidth
                             height: parent.height - y
                             color: Theme.primary
                         }
 
+                        // The seek strip is pinned to the viewport (y: flick.contentY),
+                        // so the head and its grab area have to travel with it. Left in
+                        // content coordinates they scrolled off the top the moment the
+                        // tracks were panned vertically, taking the scrub target with them.
                         Item {
                             id: playheadHandle
                             width: Theme.playheadHandleSize
                             height: Theme.playheadHandleSize + 2
                             x: -width / 2 + Theme.playheadLineWidth / 2
-                            y: 3
+                            y: flick.contentY + 3
 
                             Rectangle {
                                 anchors.top: parent.top
@@ -562,7 +783,7 @@ Item {
                             width: Math.max(Theme.playheadSeekGrabWidth, Theme.androidIconButtonSize)
                             height: root.seekHeaderHeight
                             x: -(width - Theme.playheadLineWidth) / 2
-                            y: 0
+                            y: flick.contentY
                             preventStealing: true
                             drag.target: playhead
                             drag.axis: Drag.XAxis
@@ -572,12 +793,15 @@ Item {
                             onReleased: playhead.finishSeek()
                         }
 
+                        // A short stem under the ruler, not the full column height: at
+                        // 12px wide over every track any touch within ±6px of the playhead
+                        // grabbed the scrubber instead of the clip underneath it.
                         MouseArea {
                             id: playheadLineDrag
                             width: 12
-                            height: parent.height - playheadDragArea.height
+                            height: 24
                             x: -(width - Theme.playheadLineWidth) / 2
-                            y: playheadDragArea.height
+                            y: flick.contentY + playheadDragArea.height
                             preventStealing: true
                             drag.target: playhead
                             drag.axis: Drag.XAxis
@@ -602,6 +826,12 @@ Item {
                             return EditorState.snapTime(Math.max(0, mx) / root.pxPerSecond)
                         }
 
+                        function clearHover() {
+                            root.cutHoverSeconds = -1
+                            root.cutHoverTrack = -1
+                            root.cutHoverClip = -1
+                        }
+
                         function updateHover(mx, my) {
                             root.cutHoverSeconds = seconds(mx)
                             const trackIdx = root.trackIndexAtY(my)
@@ -612,17 +842,42 @@ Item {
                         }
 
                         MouseArea {
+                            id: cutArea
                             anchors.fill: parent
-                            preventStealing: true
                             acceptedButtons: Qt.LeftButton
-                            onPressed: (mouse) => cutOverlay.updateHover(mouse.x, mouse.y)
-                            onPositionChanged: (mouse) => cutOverlay.updateHover(mouse.x, mouse.y)
-                            onReleased: {
-                                root.cutHoverSeconds = -1
-                                root.cutHoverTrack = -1
-                                root.cutHoverClip = -1
+                            // No preventStealing: this covers the whole track area while a
+                            // cut tool is active, and holding the grab froze pan and pinch
+                            // outright — the timeline could not be moved to reach the cut.
+                            // Instead the cut is abandoned as soon as the gesture reads as
+                            // a pan, and the Flickable takes over.
+                            property real pressX: 0
+                            property real pressY: 0
+                            property bool panning: false
+
+                            onPressed: (mouse) => {
+                                pressX = mouse.x
+                                pressY = mouse.y
+                                panning = false
+                                cutOverlay.updateHover(mouse.x, mouse.y)
+                            }
+                            onPositionChanged: (mouse) => {
+                                if (!panning
+                                        && (Math.abs(mouse.x - pressX) > Qt.styleHints.startDragDistance
+                                            || Math.abs(mouse.y - pressY) > Qt.styleHints.startDragDistance)) {
+                                    panning = true
+                                    cutOverlay.clearHover()
+                                }
+                                if (!panning)
+                                    cutOverlay.updateHover(mouse.x, mouse.y)
+                            }
+                            onReleased: cutOverlay.clearHover()
+                            onCanceled: {
+                                panning = true
+                                cutOverlay.clearHover()
                             }
                             onClicked: (mouse) => {
+                                if (panning)
+                                    return
                                 const atSeconds = cutOverlay.seconds(mouse.x)
                                 const trackIdx = root.trackIndexAtY(mouse.y)
                                 if (trackIdx < 0)
@@ -630,12 +885,19 @@ Item {
                                 const clipIdx = root.clipIndexAtPosition(trackIdx, Math.max(0, mouse.x))
                                 if (clipIdx < 0)
                                     return
-                                EditorState.splitClipAt(trackIdx, clipIdx, atSeconds)
+                                // timelineTool is a mode, not a boolean: the trim tools drop
+                                // everything to one side of the cut instead of splitting.
+                                if (root.timelineTool === "trimStart")
+                                    EditorState.splitClipLeftAt(trackIdx, clipIdx, atSeconds)
+                                else if (root.timelineTool === "trimEnd")
+                                    EditorState.splitClipRightAt(trackIdx, clipIdx, atSeconds)
+                                else
+                                    EditorState.splitClipAt(trackIdx, clipIdx, atSeconds)
                             }
                         }
 
                         Column {
-                            visible: root.cutHoverSeconds >= 0
+                            visible: root.cutHoverSeconds >= 0 && !cutArea.panning
                             x: root.cutHoverSeconds * root.pxPerSecond
                             spacing: 3
                             Repeater {

@@ -13,10 +13,17 @@ Slider {
     property bool showValueTooltip: true
     property var valueFormatter: function (v) { return Number(v).toFixed(2) }
 
+    // What this slider controls, for assistive tech. The role was already declared
+    // but no name ever was, so every instance announced as an unlabelled "slider".
+    // Callers should set it; the formatter is a fallback, not a substitute.
+    property string label: ""
+
     from: 0
     to: 1
     live: true
-    implicitHeight: 22
+    // Every effect and transform parameter is edited through this. 22px is a mouse
+    // target; on touch the handle needs a row it can actually be caught in.
+    implicitHeight: Theme.touchUi ? 40 : 22
     padding: 0
     topPadding: 0
     bottomPadding: 0
@@ -25,6 +32,8 @@ Slider {
     opacity: enabled ? 1 : 0.5
 
     Accessible.role: Accessible.Slider
+    Accessible.name: label
+    Accessible.description: valueFormatter ? String(valueFormatter(value)) : String(value)
 
     // Guard against callers that bind inverted ranges (Qt debug asserts in qBound).
     onFromChanged: if (from > to) to = from
@@ -73,7 +82,7 @@ Slider {
         width: root.availableWidth
         height: Theme.spacingSm
         radius: height / 2
-        color: Theme.panelMuted
+        color: Theme.sliderTrack
 
         Rectangle {
             width: root.visualPosition * parent.width
@@ -83,9 +92,10 @@ Slider {
 
             // Eases programmatic value changes (a preset chip, a reset button)
             // without fighting the drag, which sets position continuously.
+            // Must share the handle's curve below, or fill and handle desync.
             Behavior on width {
                 enabled: !root.pressed
-                NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easingInOut }
             }
         }
     }
@@ -94,11 +104,11 @@ Slider {
         id: handleRect
         x: root.leftPadding + root.visualPosition * (root.availableWidth - width)
         y: root.topPadding + root.availableHeight / 2 - height / 2
-        width: Theme.iconSizeMd
-        height: Theme.iconSizeMd
+        width: Theme.touchUi ? Theme.iconSizeXl : Theme.iconSizeMd
+        height: width
         radius: width / 2
         color: root.pressed ? Theme.panelSecondaryForeground
-                            : (root.hovered ? Qt.lighter(Theme.primary, 1.15) : Theme.primary)
+                            : (root.hovered ? Qt.lighter(Theme.primary, 1.25) : Qt.lighter(Theme.primary, 1.15))
         border.width: Theme.borderWidthFocus
         border.color: root.visualFocus ? Theme.focusRing : Theme.primaryForeground
         // Grows slightly on hover so the grab target is legible.
@@ -106,7 +116,7 @@ Slider {
 
         Behavior on x {
             enabled: !root.pressed
-            NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+            NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easingInOut }
         }
         Behavior on color {
             ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
