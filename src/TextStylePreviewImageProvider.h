@@ -3,7 +3,8 @@
 #include <QQuickImageProvider>
 
 // Renders a style pack's preview card through the real text rasterizer, so the picker shows exactly
-// what the compositor will draw — accents included. Requested as image://textstyle/<presetId>.
+// what the compositor will draw — accents included. Uses each pack's sampleText. Requested as
+// image://textstyle/<presetId>.
 class TextStylePreviewImageProvider : public QQuickImageProvider
 {
 public:

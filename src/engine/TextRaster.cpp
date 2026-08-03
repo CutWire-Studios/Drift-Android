@@ -39,7 +39,8 @@ quint64 styleHash(const drift::TextStyle &s)
     const drift::WordAccent &a = s.accent;
     return qHashMulti(0, s.fontFamily, s.pixelSize, s.fontWeight, s.italic, s.color.rgba(),
                       static_cast<int>(s.align), static_cast<int>(s.valign), s.wordWrap, s.lineHeight,
-                      s.letterSpacing, s.outlineWidth, s.outlineColor.rgba(), s.shadowEnabled,
+                      s.letterSpacing, s.outlineEnabled, s.outlineWidth, s.outlineColor.rgba(),
+                      s.shadowEnabled,
                       s.shadowOffsetX, s.shadowOffsetY, s.shadowBlur, s.shadowOpacity,
                       s.shadowColor.rgba(), s.glowEnabled, s.glowColor.rgba(), s.glowRadius,
                       s.glowOpacity, s.boxEnabled, s.boxColor.rgba(), s.boxPadding, s.boxRadius,
@@ -455,7 +456,7 @@ double bleedFor(const drift::TextStyle &style)
     const drift::WordAccent &accent = style.accent;
     const bool accented = accent.rule != drift::WordAccentRule::None;
 
-    double bleed = qMax(style.outlineWidth,
+    double bleed = qMax(style.outlineEnabled ? style.outlineWidth : 0.0,
                         accented && accent.outlineEnabled ? accent.outlineWidth : 0.0);
     if (style.shadowEnabled)
         bleed += style.shadowBlur * 2.0 + qMax(std::abs(style.shadowOffsetX), std::abs(style.shadowOffsetY));
@@ -495,7 +496,11 @@ QPainterPath outlineShape(const QPainterPath &path, double outlineWidth, double 
 // The style a word is drawn with: the block's, with the pack's accent overrides folded in.
 double outlineWidthFor(const drift::TextStyle &style, bool accent)
 {
-    return accent && style.accent.outlineEnabled ? style.accent.outlineWidth : style.outlineWidth;
+    if (accent && style.accent.outlineEnabled)
+        return style.accent.outlineWidth;
+    if (!style.outlineEnabled)
+        return 0.0;
+    return style.outlineWidth;
 }
 
 QColor outlineColorFor(const drift::TextStyle &style, bool accent)

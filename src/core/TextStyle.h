@@ -111,7 +111,8 @@ struct TextStyle
     double lineHeight = 1.2; // multiple of the font's natural line spacing
     double letterSpacing = 0.0; // px at pixelSize
 
-    double outlineWidth = 0.0; // px; 0 = no outline. Grows outward from the glyph edge.
+    bool outlineEnabled = false;
+    double outlineWidth = 2.0; // px; kept while disabled so toggling back restores it
     QColor outlineColor = Qt::black;
 
     bool shadowEnabled = false;
@@ -151,9 +152,13 @@ struct TextPreset
     QString id;
     QString label;
     TextStyle style;
+    // Short phrase shown on picker thumbnails — chosen to demo the pack's look
+    // (accents, wrap, weight) rather than a meaningless filler line.
+    QString sampleText;
 };
 
 const QList<TextPreset> &textPresets();
+const TextPreset *textPresetForId(const QString &id);
 const TextStyle *textStyleForPresetId(const QString &id);
 
 } // namespace drift

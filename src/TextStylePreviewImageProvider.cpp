@@ -8,9 +8,8 @@
 
 namespace {
 
-// Wide enough to wrap onto two lines at the sizes the packs use, so a card shows both the block
-// rhythm and the per-word accent.
-const QString kSampleText = QStringLiteral("Number of thumbnails that");
+// Fallback when a pack has no sampleText (should not happen for built-in packs).
+const QString kFallbackSample = QStringLiteral("Your text here");
 
 // Preview cards are sized in project pixels against a 1080-wide canvas, which is what maps a pack's
 // pixelSize onto the card at the same relative scale the compositor uses.
@@ -28,8 +27,8 @@ TextStylePreviewImageProvider::TextStylePreviewImageProvider()
 QImage TextStylePreviewImageProvider::requestImage(const QString &id, QSize *size,
                                                    const QSize &requestedSize)
 {
-    const drift::TextStyle *style = drift::textStyleForPresetId(id);
-    if (!style) {
+    const drift::TextPreset *preset = drift::textPresetForId(id);
+    if (!preset) {
         if (size)
             *size = QSize();
         return {};
@@ -40,13 +39,15 @@ QImage TextStylePreviewImageProvider::requestImage(const QString &id, QSize *siz
 
     drift::Clip clip;
     clip.type = drift::ClipType::Text;
-    clip.textStyle = *style;
+    clip.textStyle = preset->style;
+
+    const QString sample = preset->sampleText.isEmpty() ? kFallbackSample : preset->sampleText;
 
     const QRectF layoutRect(0, 0, width, height);
     // A karaoke pack accents nothing at all without a playhead, so the card borrows the second word.
-    const int activeWord = style->accent.rule == drift::WordAccentRule::Karaoke ? 1 : -1;
+    const int activeWord = preset->style.accent.rule == drift::WordAccentRule::Karaoke ? 1 : -1;
     const TextRasterResult raster =
-        rasterizeText(clip, kSampleText, layoutRect, width / kReferenceWidth, activeWord);
+        rasterizeText(clip, sample, layoutRect, width / kReferenceWidth, activeWord);
 
     QImage card(width, height, QImage::Format_ARGB32_Premultiplied);
     card.fill(Qt::transparent);
