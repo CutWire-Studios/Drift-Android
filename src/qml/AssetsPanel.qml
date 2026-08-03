@@ -32,26 +32,182 @@ PanelFrame {
     function importUrlsReporting(urls) {
         if (!urls || urls.length === 0)
             return
-        root.importing = true
+        // Async, because on Android reading a picked file means copying it out of the
+        // SAF stream first. Run inline, that copy blocked the GUI thread for the whole
+        // transfer — which also meant the "Importing…" overlay below was set and cleared
+        // inside one JS turn and never painted at all.
         const before = AssetLibrary.count
-        AssetLibrary.importUrls(urls)
-        const added = AssetLibrary.count - before
-        root.importing = false
+        if (!AssetLibrary.importUrlsAsync(urls)) {
+            Toasts.warning(qsTr("An import is already running."))
+            return
+        }
+        root._importRequested = urls.length
+        root._countBefore = before
+    }
 
-        const skipped = urls.length - added
-        if (added > 0 && skipped > 0)
-            Toasts.warning(qsTr("Imported %1 of %2 files. %3 could not be read.")
-                           .arg(added).arg(urls.length).arg(skipped))
-        else if (added > 0)
-            Toasts.success(qsTr("Imported %n file(s).", "", added))
-        else if (urls.length === 1)
-            Toasts.error(qsTr("Could not import that file — the format may be unsupported."))
-        else
-            Toasts.error(qsTr("Could not import any of the %n selected file(s).", "", urls.length))
+    property int _importRequested: 0
+    property int _countBefore: 0
+
+    Connections {
+        target: AssetLibrary
+        function onImportFinished(materialized, failed) {
+            const requested = root._importRequested
+            if (requested <= 0)
+                return
+            root._importRequested = 0
+            const added = AssetLibrary.count - root._countBefore
+            const skipped = requested - added
+            if (added > 0 && skipped > 0)
+                Toasts.warning(qsTr("Imported %1 of %2 files. %3 could not be read.")
+                               .arg(added).arg(requested).arg(skipped))
+            else if (added > 0)
+                Toasts.success(qsTr("Imported %n file(s).", "", added))
+            else if (requested === 1)
+                Toasts.error(qsTr("Could not import that file — the format may be unsupported."))
+            else
+                Toasts.error(qsTr("Could not import any of the %n selected file(s).", "", requested))
+        }
     }
 
     // True while an import is running, so the panel can show progress.
-    property bool importing: false
+    readonly property bool importing: AssetLibrary.importing
+
+    // Asset awaiting confirmation in confirmAssetRemoval. The name is held
+    // separately because the row is gone by the time the toast reports it.
+    property int pendingRemovalIndex: -1
+    property string pendingRemovalName: ""
+
+    // Removing an asset a clip still points at would leave that clip playing
+    // but unable to trim past its cut or merge, so refuse rather than confirm.
+    function requestRemoveAsset(assetIndex) {
+        const inUse = EditorState.clipCountForAsset(assetIndex)
+        const name = AssetLibrary.assetAt(assetIndex).name
+        if (inUse > 0) {
+            Toasts.warning(qsTr("“%1” is still used by %n clip(s) on the timeline.", "", inUse).arg(name))
+            return
+        }
+        root.pendingRemovalIndex = assetIndex
+        root.pendingRemovalName = name
+        confirmAssetRemoval.open()
+    }
+
+    ThemedDialog {
+        id: confirmAssetRemoval
+        title: qsTr("Remove this media?")
+        acceptText: qsTr("Remove")
+        acceptVariant: "destructive"
+        preferredWidth: Theme.dialogWidthSm
+        // Enter must not commit a destructive action.
+        acceptOnReturn: false
+
+        contentItem: ThemedLabel {
+            width: parent ? parent.width : Theme.dialogWidthSm
+            wrapMode: Text.WordWrap
+            size: "sm"
+            text: qsTr("“%1” will be removed from this project. The file on disk is not deleted.")
+                  .arg(root.pendingRemovalName)
+        }
+
+        onAccepted: {
+            if (EditorState.removeAsset(root.pendingRemovalIndex))
+                Toasts.success(qsTr("Removed “%1”.").arg(root.pendingRemovalName))
+            root.pendingRemovalIndex = -1
+        }
+        onRejected: root.pendingRemovalIndex = -1
+    }
+
+    property int pendingRenameIndex: -1
+
+    function requestRenameAsset(assetIndex) {
+        const asset = AssetLibrary.assetAt(assetIndex)
+        if (!asset || Object.keys(asset).length === 0)
+            return
+        root.pendingRenameIndex = assetIndex
+        assetRenameField.text = asset.name || ""
+        assetRenameDialog.open()
+    }
+
+    ThemedDialog {
+        id: assetRenameDialog
+        title: qsTr("Rename media")
+        acceptText: qsTr("Rename")
+        preferredWidth: Theme.dialogWidthSm
+
+        contentItem: Column {
+            width: parent ? parent.width : Theme.dialogWidthSm
+            spacing: Theme.spacingMd
+
+            ThemedLabel {
+                width: parent.width
+                text: qsTr("Name")
+                size: "sm"
+            }
+            ThemedTextField {
+                id: assetRenameField
+                width: parent.width
+                placeholderText: qsTr("Media name")
+            }
+        }
+
+        onOpened: {
+            assetRenameField.forceActiveFocus()
+            assetRenameField.selectAll()
+        }
+        onAccepted: {
+            if (root.pendingRenameIndex < 0)
+                return
+            const label = assetRenameField.text.trim()
+            if (label.length > 0)
+                EditorState.renameAsset(root.pendingRenameIndex, label)
+            root.pendingRenameIndex = -1
+        }
+        onRejected: root.pendingRenameIndex = -1
+    }
+
+    // Points a bin row at a different file while every clip using it stays put, so a project set
+    // up once — music, outro, CTA — can be re-pointed at the next video instead of rebuilt.
+    function requestReplaceAsset(assetIndex) {
+        var url = FileDialogs.openFile(qsTr("Replace Media"), [
+            qsTr("Media files (*.mp4 *.mov *.mkv *.avi *.webm *.m4v *.mp3 *.wav *.aac *.flac *.ogg *.m4a *.png *.jpg *.jpeg *.gif *.webp *.bmp)")
+        ])
+        if (!url || url.toString() === "")
+            return
+        EditorState.replaceAssetSource(assetIndex, url)
+    }
+
+    // Writes an image row back out to disk — the way a freeze frame captured in the preview
+    // leaves the project. The format follows the name the user picks, not the filter.
+    function requestExportAsset(assetIndex) {
+        const asset = AssetLibrary.assetAt(assetIndex)
+        if (!asset || asset.kind !== "image")
+            return
+        var url = FileDialogs.saveFile(qsTr("Export Image"), [
+            qsTr("PNG image (*.png)"),
+            qsTr("JPEG image (*.jpg *.jpeg)")
+        ], asset.name, "png")
+        if (!url || url.toString() === "")
+            return
+        if (EditorState.exportAssetImage(assetIndex, url))
+            Toasts.success(qsTr("Exported “%1”.").arg(asset.name))
+        else
+            Toasts.error(qsTr("Couldn’t export that image."))
+    }
+
+    Connections {
+        target: EditorState
+
+        // The probe runs off-thread, so the outcome comes back here rather than from the call.
+        function onAssetReplaceFinished(ok, message, adjustedClips) {
+            if (!ok) {
+                Toasts.warning(message)
+            } else if (adjustedClips > 0) {
+                Toasts.warning(qsTr("Replaced with “%1”. %n clip(s) were shortened to fit the new file.",
+                                    "", adjustedClips).arg(message))
+            } else {
+                Toasts.success(qsTr("Replaced with “%1”.").arg(message))
+            }
+        }
+    }
 
     function importMedia() {
         var urls = FileDialogs.openFiles(qsTr("Import Media"), [
@@ -61,7 +217,7 @@ PanelFrame {
     }
 
     // Selects a tab by id. Used by cross-panel jumps such as the properties
-    // panel's "Browse effects" / "Browse sounds" empty-state actions.
+    // panel's "Browse effects" / "Browse audio effects" empty-state actions.
     function showTab(tabId) {
         for (var i = 0; i < tabsModel.count; ++i) {
             if (tabsModel.get(i).tabId === tabId) {
@@ -86,41 +242,69 @@ PanelFrame {
 
     function assetVisible(kind) {
         const tabId = tabsModel.get(activeTab).tabId
-        if (tabId === "text" || tabId === "stickers" || tabId === "shapes" || tabId === "effects"
-                || tabId === "templates" || tabId === "adjustment" || tabId === "settings" || tabId === "sounds"
-                || tabId === "transitions" || tabId === "shortcuts")
+        if (tabId === "text" || tabId === "subtitles" || tabId === "stickers" || tabId === "shapes"
+                || tabId === "effects" || tabId === "templates" || tabId === "adjustment"
+                || tabId === "settings" || tabId === "sounds" || tabId === "transitions"
+                || tabId === "shortcuts")
             return false
         const kinds = kindsForTab(tabId)
         return kinds.length === 0 || kinds.indexOf(kind) >= 0
     }
 
+    // Rail order: project media → on-canvas graphics → processing → prefs.
+    // `separatorAfter` draws a hairline under the tab so groups read as sections.
+    // tabId "sounds" is kept for favorites persistence (settings key).
     ListModel {
         id: tabsModel
-        ListElement { tabId: "media"; icon: 0; label: "Media" }
-        ListElement { tabId: "sounds"; icon: 1; label: "Sounds" }
-        ListElement { tabId: "text"; icon: 2; label: "Text" }
-        ListElement { tabId: "stickers"; icon: 3; label: "Stickers" }
-        ListElement { tabId: "shapes"; icon: 4; label: "Shapes" }
-        ListElement { tabId: "effects"; icon: 5; label: "Effects" }
-        ListElement { tabId: "templates"; icon: 9; label: "Templates" }
-        ListElement { tabId: "transitions"; icon: 6; label: "Transitions" }
-        ListElement { tabId: "settings"; icon: 7; label: "Settings" }
-        ListElement { tabId: "shortcuts"; icon: 8; label: "Shortcuts" }
+        ListElement { tabId: "media"; icon: 0; label: "Media"; separatorAfter: true }
+        ListElement { tabId: "text"; icon: 1; label: "Text"; separatorAfter: false }
+        ListElement { tabId: "subtitles"; icon: 2; label: "Subtitles"; separatorAfter: false }
+        ListElement { tabId: "stickers"; icon: 3; label: "Stickers"; separatorAfter: false }
+        ListElement { tabId: "shapes"; icon: 4; label: "Shapes"; separatorAfter: true }
+        ListElement { tabId: "effects"; icon: 5; label: "Effects"; separatorAfter: false }
+        ListElement { tabId: "templates"; icon: 6; label: "Templates"; separatorAfter: false }
+        ListElement { tabId: "transitions"; icon: 7; label: "Transitions"; separatorAfter: false }
+        ListElement { tabId: "sounds"; icon: 8; label: "Audio FX"; separatorAfter: true }
+        ListElement { tabId: "settings"; icon: 9; label: "Settings"; separatorAfter: false }
+        ListElement { tabId: "shortcuts"; icon: 10; label: "Shortcuts"; separatorAfter: false }
     }
     property var tabIcons: [
         Theme.icons.film,
-        Theme.icons.headphones,
         Theme.icons.type,
+        Theme.icons.captions,
         Theme.icons.smile,
         Theme.icons.shapes,
         Theme.icons.wand,
-        Theme.icons.blend,
+        Theme.icons.layers,
+        Theme.icons.chevronsRight,
+        Theme.icons.audioLines,
         Theme.icons.settings,
-        Theme.icons.keyboard,
-        Theme.icons.layers
+        Theme.icons.keyboard
     ]
     property int activeTab: 0
     property bool sortByKind: false
+
+    // Fades the tab body in on a tab change instead of hard-cutting to it. Driven
+    // as one property the bodies share, rather than fading the whole content
+    // Column, so the panel header does not flash along with it. Fade-in only, not
+    // a crossfade: the bodies are Column siblings, and overlapping two would
+    // double-count height and jump the layout mid-transition.
+    property real tabOpacity: 1.0
+
+    onActiveTabChanged: {
+        root.tabOpacity = 0
+        tabFadeIn.restart()
+    }
+
+    NumberAnimation {
+        id: tabFadeIn
+        target: root
+        property: "tabOpacity"
+        from: 0.0
+        to: 1.0
+        duration: Theme.durationBase
+        easing.type: Theme.easing
+    }
 
     DropArea {
         id: assetDropArea
@@ -172,6 +356,7 @@ PanelFrame {
         EmptyState {
             anchors.centerIn: parent
             glyph: Theme.icons.spinner
+            glyphSpinning: root.importing
             title: qsTr("Importing…")
             hint: qsTr("Reading media and generating thumbnails.")
         }
@@ -182,15 +367,22 @@ PanelFrame {
         spacing: 0
 
         // Vertical tab rail. Up/Down move between tabs once it has focus.
+        // Flickable so short panel heights can still reach lower icons.
         // Hidden in sheetMode — AndroidBottomRail drives showTab() instead.
-        Column {
+        Flickable {
             id: tabRail
             width: root.sheetMode ? 0 : Theme.tabRailWidth
             height: parent.height
             visible: !root.sheetMode
-            topPadding: Theme.spacingSm
-            spacing: Theme.spacingXs
+            contentWidth: width
+            contentHeight: tabRailColumn.height
             clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+            ScrollBar.vertical: AppScrollBar {
+                policy: tabRail.contentHeight > tabRail.height
+                        ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
+            }
 
             Accessible.role: Accessible.PageTabList
 
@@ -203,22 +395,52 @@ PanelFrame {
                 event.accepted = true
             }
 
-            Repeater {
-                model: tabsModel
-                delegate: IconButton {
-                    required property int index
-                    required property var model
+            Column {
+                id: tabRailColumn
+                width: parent.width
+                topPadding: Theme.spacingSm
+                spacing: Theme.spacingXs
 
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    glyph: root.tabIcons[model.icon]
-                    variant: "ghost"
-                    tooltip: model.label
-                    active: root.activeTab === index
-                    onClicked: root.activeTab = index
+                Repeater {
+                    model: tabsModel
+                    delegate: Column {
+                        required property int index
+                        required property var model
 
-                    Accessible.role: Accessible.PageTab
-                    Accessible.name: model.label
-                    Accessible.checked: root.activeTab === index
+                        width: parent.width
+                        spacing: 0
+
+                        IconButton {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            glyph: root.tabIcons[model.icon]
+                            variant: "ghost"
+                            tooltip: model.label
+                            active: root.activeTab === index
+                            onClicked: root.activeTab = index
+
+                            Accessible.role: Accessible.PageTab
+                            Accessible.name: model.label
+                            Accessible.checked: root.activeTab === index
+                        }
+
+                        // Group divider — sits in the rail gap so related tabs
+                        // cluster and prefs stay visually apart from content.
+                        Item {
+                            visible: model.separatorAfter
+                            width: parent.width
+                            height: visible ? Theme.spacingLg + Theme.borderWidth : 0
+
+                            Rectangle {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: Theme.iconSizeSm
+                                height: Theme.borderWidth
+                                radius: height / 2
+                                color: Theme.panelBorder
+                                opacity: 0.85
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -234,7 +456,7 @@ PanelFrame {
             id: assetsContent
             width: parent.width - (root.sheetMode ? 0 : (Theme.tabRailWidth + Theme.borderWidth))
             height: parent.height
-            property bool gridMode: true
+            property bool gridMode: EditorState.mediaGridMode
 
             Rectangle {
                 width: parent.width
@@ -290,14 +512,14 @@ PanelFrame {
                         variant: "ghost"
                         tooltip: qsTr("Grid view")
                         active: assetsContent.gridMode
-                        onClicked: assetsContent.gridMode = true
+                        onClicked: EditorState.mediaGridMode = true
                     }
                     IconButton {
                         glyph: Theme.icons.list
                         variant: "ghost"
                         tooltip: qsTr("List view")
                         active: !assetsContent.gridMode
-                        onClicked: assetsContent.gridMode = false
+                        onClicked: EditorState.mediaGridMode = false
                     }
                     IconButton {
                         glyph: root.sortByKind ? Theme.icons.sortByKind : Theme.icons.sortByName
@@ -336,36 +558,49 @@ PanelFrame {
             TextAssetsTab {
                 visible: tabsModel.get(activeTab).tabId === "text"
                 width: parent.width
+                opacity: root.tabOpacity
+                height: parent.height - Theme.panelHeaderHeight
+            }
+
+            SubtitlesTab {
+                visible: tabsModel.get(activeTab).tabId === "subtitles"
+                width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
             }
 
             SoundsTab {
                 visible: tabsModel.get(activeTab).tabId === "sounds"
                 width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
             }
 
             StickersTab {
                 visible: tabsModel.get(activeTab).tabId === "stickers"
                 width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
             }
 
             ShapesTab {
                 visible: tabsModel.get(activeTab).tabId === "shapes"
                 width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
             }
 
             SettingsTab {
                 visible: tabsModel.get(activeTab).tabId === "settings"
                 width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
             }
 
             ShortcutsTab {
                 visible: tabsModel.get(activeTab).tabId === "shortcuts"
                 width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
             }
 
@@ -373,12 +608,14 @@ PanelFrame {
             EffectBrowser {
                 visible: tabsModel.get(activeTab).tabId === "effects"
                 width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
             }
 
             EffectTemplateBrowser {
                 visible: tabsModel.get(activeTab).tabId === "templates"
                 width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
             }
 
@@ -387,15 +624,47 @@ PanelFrame {
                 id: transitionsBrowser
                 visible: tabsModel.get(activeTab).tabId === "transitions"
                 width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
 
                 readonly property var categories: EditorState.transitionCategories()
+                readonly property var catalog: EditorState.transitionKinds()
+                readonly property string favoritesId: "__favorites__"
                 property string activeCategory: categories.length > 0 ? categories[0].id : ""
+                readonly property string query: transitionSearch.text.trim().toLowerCase()
+                property int favoritesTick: 0
+
+                Connections {
+                    target: EditorState
+                    function onAssetFavoritesChanged() {
+                        transitionsBrowser.favoritesTick++
+                    }
+                }
+
+                // Search spans every category — once you have a name, the sectors are in the way.
+                readonly property var visibleTransitions: {
+                    void transitionsBrowser.favoritesTick
+                    const q = transitionsBrowser.query
+                    if (q.length > 0) {
+                        return transitionsBrowser.catalog.filter(function(item) {
+                            const label = (item.label || "").toLowerCase()
+                            const kind = (item.kind || "").toLowerCase()
+                            return label.indexOf(q) >= 0 || kind.indexOf(q) >= 0
+                        })
+                    }
+                    if (transitionsBrowser.activeCategory === transitionsBrowser.favoritesId) {
+                        return transitionsBrowser.catalog.filter(function(item) {
+                            return EditorState.isAssetFavorite("transitions", item.kind)
+                        })
+                    }
+                    return transitionsBrowser.catalog.filter(function(item) {
+                        return item.category === transitionsBrowser.activeCategory
+                    })
+                }
 
                 Column {
                     anchors.fill: parent
                     spacing: 0
-
                     Text {
                         id: transitionTip
                         width: parent.width
@@ -405,8 +674,6 @@ PanelFrame {
                         bottomPadding: Theme.spacingSm
                         wrapMode: Text.WordWrap
                         horizontalAlignment: Text.AlignHCenter
-                        // Capped so a wrapping tip cannot grow until it swallows
-                        // the grid below it at narrow panel widths.
                         maximumLineCount: 3
                         elide: Text.ElideRight
                         text: qsTr("Drag onto where two clips overlap. They fade into each other by default.")
@@ -415,188 +682,238 @@ PanelFrame {
                         font.pixelSize: Theme.fontSizeXs
                     }
 
-                    Flickable {
-                        id: transitionCategoryFlick
+                    ThemedTextField {
+                        id: transitionSearch
+                        width: parent.width - Theme.pagePadding * 2
+                        x: Theme.pagePadding
+                        placeholderText: qsTr("Search transitions")
+                        font.family: Theme.fontFamily
+                    }
+
+                    Item { width: 1; height: Theme.spacingMd }
+
+                    AssetCategoryChips {
+                        id: transitionCategoryChips
                         width: parent.width
-                        height: 34
-                        contentWidth: transitionCategoryRow.width + Theme.spacing3xl
-                        clip: true
-
-                        Row {
-                            id: transitionCategoryRow
-                            x: Theme.pagePadding
-                            height: parent.height
-                            spacing: Theme.spacingMd
-
-                            Repeater {
-                                model: transitionsBrowser.categories
-                                delegate: ThemedChip {
-                                    required property var modelData
-                                    text: modelData.label
-                                    variant: "secondary"
-                                    selected: modelData.id === transitionsBrowser.activeCategory
-                                    onClicked: transitionsBrowser.activeCategory = modelData.id
-                                }
-                            }
-                        }
+                        categories: transitionsBrowser.categories
+                        activeCategory: transitionsBrowser.activeCategory
+                        searching: transitionsBrowser.query.length > 0
+                        onCategoryActivated: (categoryId) => transitionsBrowser.activeCategory = categoryId
                     }
 
                     Item {
                         width: parent.width
-                        height: Math.max(0, parent.height - transitionTip.height - transitionCategoryFlick.height)
+                        height: Math.max(0, parent.height - transitionTip.height - transitionSearch.height
+                                         - Theme.spacingMd - transitionCategoryChips.height)
 
-                        // A category whose filter matches nothing used to leave a
-                        // blank scroll area with no explanation.
-                        EmptyState {
-                            anchors.centerIn: parent
-                            width: Math.min(parent.width - Theme.spacing3xl, 260)
-                            visible: transitionsBrowser.categories.length === 0
-                            glyph: Theme.icons.blend
-                            title: qsTr("No transitions available")
-                            hint: qsTr("Install a transitions pack to add more.")
-                            actionText: qsTr("Get extras")
-                            onActionTriggered: root.Window.window.openAddonManager()
-                        }
+                    // A category whose filter matches nothing used to leave a
+                    // blank scroll area with no explanation.
+                    EmptyState {
+                        anchors.centerIn: parent
+                        width: Math.min(parent.width - Theme.spacing3xl, 260)
+                        visible: transitionsBrowser.categories.length === 0
+                        glyph: Theme.icons.chevronsRight
+                        title: qsTr("No transitions available")
+                        hint: qsTr("Install a transitions pack to add more.")
+                        actionText: qsTr("Get extras")
+                        onActionTriggered: root.Window.window.openAddonManager()
+                    }
+
+                    EmptyState {
+                        anchors.centerIn: parent
+                        width: Math.min(parent.width - Theme.spacing3xl, 260)
+                        visible: transitionsBrowser.categories.length > 0
+                                 && transitionsBrowser.visibleTransitions.length === 0
+                        compact: true
+                        glyph: Theme.icons.search
+                        title: transitionsBrowser.query.length > 0
+                               ? qsTr("No transitions match “%1”").arg(transitionSearch.text.trim())
+                               : (transitionsBrowser.activeCategory === transitionsBrowser.favoritesId
+                                  ? qsTr("No favorites yet")
+                                  : qsTr("Nothing in this category"))
+                        hint: transitionsBrowser.query.length > 0
+                              ? qsTr("Try a different name.")
+                              : (transitionsBrowser.activeCategory === transitionsBrowser.favoritesId
+                                 ? qsTr("Star transitions to save them here.")
+                                 : qsTr("Pick another category."))
+                    }
 
                     Flickable {
-                        anchors.fill: parent
-                        visible: transitionsBrowser.categories.length > 0
-                        contentHeight: transitionGrid.height + Theme.spacing3xl
-                        clip: true
-                        ScrollBar.vertical: AppScrollBar { }
+                    anchors.fill: parent
+                    visible: transitionsBrowser.categories.length > 0
+                             && transitionsBrowser.visibleTransitions.length > 0
+                    contentHeight: transitionGrid.height + Theme.spacing3xl
+                    clip: true
+                    ScrollBar.vertical: AppScrollBar { }
 
-                        Grid {
-                            id: transitionGrid
-                            x: Theme.pagePadding
-                            y: Theme.pagePadding
-                            width: parent.width - Theme.pagePadding * 2
-                            columns: Math.max(1, Math.floor((width + Theme.assetCardGap) / (Theme.assetCardWidth + Theme.assetCardGap)))
-                            columnSpacing: Theme.assetCardGap
-                            rowSpacing: Theme.assetCardGap
+                    Grid {
+                        id: transitionGrid
+                        x: Theme.pagePadding
+                        y: Theme.pagePadding
+                        width: parent.width - Theme.pagePadding * 2
+                        columns: Math.max(1, Math.floor((width + Theme.assetCardGap) / (Theme.assetCardWidth + Theme.assetCardGap)))
+                        columnSpacing: Theme.assetCardGap
+                        rowSpacing: Theme.assetCardGap
 
-                            Repeater {
-                                model: EditorState.transitionKinds()
-                                delegate: Column {
-                                    id: transitionCard
-                                    required property var modelData
-                                    visible: transitionCard.modelData.category === transitionsBrowser.activeCategory
-                                    width: visible ? Theme.assetCardWidth : 0
-                                    spacing: 4
-                                    opacity: transitionDrag.active ? 0.85 : 1
+                        Repeater {
+                            model: transitionsBrowser.visibleTransitions
+                            delegate: Column {
+                                id: transitionCard
+                                required property var modelData
+                                width: Theme.assetCardWidth
+                                spacing: 4
+                                // Lift on grab — matches the media and effect cards.
+                                opacity: transitionDrag.active ? 0.85 : 1
+                                scale: transitionDrag.active ? 1.04 : 1.0
 
-                                    readonly property string strip: transitionCard.modelData.previewStripPath || ""
-                                    readonly property int frameCount: Math.max(1, transitionCard.modelData.previewFrames || 1)
+                                Behavior on opacity {
+                                    NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                                }
+                                Behavior on scale {
+                                    NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                                }
 
-                                    // Cards rest on a frame partway through the transition; hovering
-                                    // scrubs the whole strip, which is the only way to tell many of
-                                    // these apart (a crossfade and a dip look the same at p = 0.5).
-                                    property real scrub: 0.45
-                                    readonly property int frameIndex:
-                                        Math.max(0, Math.min(frameCount - 1, Math.round(scrub * (frameCount - 1))))
+                                readonly property string strip: transitionCard.modelData.previewStripPath || ""
+                                readonly property int frameCount: Math.max(1, transitionCard.modelData.previewFrames || 1)
 
-                                    NumberAnimation on scrub {
-                                        running: transitionHover.hovered && transitionCard.frameCount > 1
-                                        from: 0
-                                        to: 1
-                                        duration: 1400
-                                        loops: Animation.Infinite
+                                // Cards rest on a frame partway through the transition; hovering
+                                // scrubs the whole strip, which is the only way to tell many of
+                                // these apart (a crossfade and a dip look the same at p = 0.5).
+                                property real scrub: 0.45
+                                readonly property int frameIndex:
+                                    Math.max(0, Math.min(frameCount - 1, Math.round(scrub * (frameCount - 1))))
+
+                                // Without hover there is no way to tell a crossfade from a dip
+                                // to black — both rest on the same middle frame — so on touch
+                                // every card scrubs continuously instead.
+                                NumberAnimation on scrub {
+                                    running: transitionCard.frameCount > 1
+                                             && (Theme.touchUi || transitionHover.hovered)
+                                    from: 0
+                                    to: 1
+                                    duration: 1400
+                                    loops: Animation.Infinite
+                                }
+
+                                Connections {
+                                    target: transitionHover
+                                    function onHoveredChanged() {
+                                        if (!transitionHover.hovered)
+                                            transitionCard.scrub = 0.45
+                                    }
+                                }
+
+                                Drag.active: transitionDrag.active
+                                Drag.dragType: Drag.Automatic
+                                Drag.supportedActions: Qt.CopyAction
+                                Drag.keys: ["application/x-drift-transition"]
+                                Drag.mimeData: ({ "application/x-drift-transition": transitionCard.modelData.kind })
+                                Drag.hotSpot.x: width / 2
+                                Drag.hotSpot.y: Theme.assetCardWidth / 2
+
+                                Rectangle {
+                                    width: Theme.assetCardWidth
+                                    height: Theme.assetCardWidth
+                                    radius: Theme.radiusSm
+                                    color: transitionHover.hovered ? Theme.panelSecondaryBg : Theme.panelAccent
+                                    border.width: transitionDrag.active ? Theme.borderWidth : 0
+                                    border.color: Theme.transitionOverlap
+                                    clip: true
+
+                                    // The card already had a considered hover
+                                    // scrub animation but no transition on its
+                                    // own colours.
+                                    Behavior on color {
+                                        ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                                    }
+                                    Behavior on border.width {
+                                        NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
                                     }
 
-                                    Connections {
-                                        target: transitionHover
-                                        function onHoveredChanged() {
-                                            if (!transitionHover.hovered)
-                                                transitionCard.scrub = 0.45
+                                    HoverHandler {
+                                        id: transitionHover
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+
+                                    ThemedToolTip {
+                                        text: qsTr("%1 — drag onto an overlap between two clips").arg(transitionCard.modelData.label)
+                                        visible: transitionHover.hovered
+                                    }
+
+                                    DragHandler {
+                                        id: transitionDrag
+                                        target: null
+                                        acceptedButtons: Qt.LeftButton
+                                    }
+
+                                    // Touch has no way to run the drag above: the browser is a
+                                    // modal sheet over the timeline, so there is nothing to drop
+                                    // onto. Tap applies to the selected clip's own boundary
+                                    // instead — addTransition finds the partner clip itself.
+                                    TapHandler {
+                                        enabled: Theme.touchUi
+                                        onTapped: {
+                                            if (EditorState.selectedTrack < 0 || EditorState.selectedClip < 0) {
+                                                Toasts.info(qsTr("Select a clip first, then tap a transition."))
+                                                return
+                                            }
+                                            EditorState.addTransition(EditorState.selectedTrack,
+                                                                      EditorState.selectedClip,
+                                                                      transitionCard.modelData.kind, 0.5)
                                         }
                                     }
 
-                                    Drag.active: transitionDrag.active
-                                    Drag.dragType: Drag.Automatic
-                                    Drag.supportedActions: Qt.CopyAction
-                                    Drag.keys: ["application/x-drift-transition"]
-                                    Drag.mimeData: ({ "application/x-drift-transition": transitionCard.modelData.kind })
-                                    Drag.hotSpot.x: width / 2
-                                    Drag.hotSpot.y: Theme.assetCardWidth / 2
-
-                                    Rectangle {
-                                        width: Theme.assetCardWidth
-                                        height: Theme.assetCardWidth
-                                        radius: Theme.radiusSm
-                                        color: transitionHover.hovered ? Theme.panelSecondaryBg : Theme.panelAccent
-                                        border.width: transitionDrag.active ? Theme.borderWidth : 0
-                                        border.color: Theme.transitionOverlap
-                                        clip: true
-
-                                        // The card already had a considered hover
-                                        // scrub animation but no transition on its
-                                        // own colours.
-                                        Behavior on color {
-                                            ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
-                                        }
-                                        Behavior on border.width {
-                                            NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
-                                        }
-
-                                        HoverHandler {
-                                            id: transitionHover
-                                            cursorShape: Qt.PointingHandCursor
-                                        }
-
-                                        ThemedToolTip {
-                                            text: qsTr("%1 — drag onto an overlap between two clips").arg(transitionCard.modelData.label)
-                                            visible: transitionHover.hovered
-                                        }
-
-                                        DragHandler {
-                                            id: transitionDrag
-                                            target: null
-                                            acceptedButtons: Qt.LeftButton
-                                        }
-
-                                        SkeletonBox {
-                                            anchors.fill: parent
-                                            visible: transitionCard.strip.length > 0
-                                                     && transitionStrip.status === Image.Loading
-                                        }
-
-                                        // The strip is one row of square cells; slide it rather than
-                                        // re-decoding a sourceClipRect per frame.
-                                        Image {
-                                            id: transitionStrip
-                                            visible: transitionCard.strip.length > 0
-                                                     && status === Image.Ready
-                                            source: transitionCard.strip.length > 0
-                                                    ? EditorState.imageUrl(transitionCard.strip) : ""
-                                            height: parent.height
-                                            width: parent.height * transitionCard.frameCount
-                                            x: -transitionCard.frameIndex * parent.height
-                                            fillMode: Image.Stretch
-                                            asynchronous: true
-                                            smooth: true
-                                        }
-
-                                        IconGlyph {
-                                            anchors.centerIn: parent
-                                            visible: transitionCard.strip.length === 0
-                                                     || transitionStrip.status === Image.Error
-                                            glyph: Theme.icons.blend
-                                            iconSize: Theme.iconSizeXl
-                                            iconColor: Theme.transitionOverlap
-                                        }
+                                    AssetFavoriteButton {
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        anchors.margins: 3
+                                        tabId: "transitions"
+                                        itemId: transitionCard.modelData.kind
                                     }
 
-                                    Text {
-                                        width: parent.width
-                                        text: transitionCard.modelData.label
-                                        color: Theme.panelForeground
-                                        font.family: Theme.fontFamily
-                                        font.pixelSize: Theme.fontSizeCard
-                                        font.weight: Font.Medium
-                                        horizontalAlignment: Text.AlignHCenter
-                                        wrapMode: Text.WordWrap
-                                        maximumLineCount: 2
-                                        elide: Text.ElideRight
+                                    SkeletonBox {
+                                        anchors.fill: parent
+                                        visible: transitionCard.strip.length > 0
+                                                 && transitionStrip.status === Image.Loading
                                     }
+
+                                    // The strip is one row of square cells; slide it rather than
+                                    // re-decoding a sourceClipRect per frame.
+                                    Image {
+                                        id: transitionStrip
+                                        visible: transitionCard.strip.length > 0
+                                                 && status === Image.Ready
+                                        source: transitionCard.strip.length > 0
+                                                ? EditorState.imageUrl(transitionCard.strip) : ""
+                                        height: parent.height
+                                        width: parent.height * transitionCard.frameCount
+                                        x: -transitionCard.frameIndex * parent.height
+                                        fillMode: Image.Stretch
+                                        asynchronous: true
+                                        smooth: true
+                                    }
+
+                                    IconGlyph {
+                                        anchors.centerIn: parent
+                                        visible: transitionCard.strip.length === 0
+                                                 || transitionStrip.status === Image.Error
+                                        glyph: Theme.icons.chevronsRight
+                                        iconSize: Theme.iconSizeXl
+                                        iconColor: Theme.transitionOverlap
+                                    }
+                                }
+
+                                Text {
+                                    width: parent.width
+                                    text: transitionCard.modelData.label
+                                    color: Theme.panelForeground
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontSizeCard
+                                    font.weight: Font.Medium
+                                    horizontalAlignment: Text.AlignHCenter
+                                    wrapMode: Text.WordWrap
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
                                 }
                             }
                         }
@@ -604,16 +921,22 @@ PanelFrame {
                     }
                 }
             }
+            }
 
             // Shared media browser used by the Media tab.
             MediaAssetsTab {
                 visible: kindsForTab(tabsModel.get(activeTab).tabId).length > 0
                 width: parent.width
+                opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
                 gridMode: assetsContent.gridMode
                 importing: root.importing
                 assetVisibleFn: function(kind) { return root.assetVisible(kind) }
                 onAddRequested: (assetIndex) => root.addAssetToTimeline(assetIndex)
+                onRemoveRequested: (assetIndex) => root.requestRemoveAsset(assetIndex)
+                onReplaceRequested: (assetIndex) => root.requestReplaceAsset(assetIndex)
+                onRenameRequested: (assetIndex) => root.requestRenameAsset(assetIndex)
+                onExportRequested: (assetIndex) => root.requestExportAsset(assetIndex)
                 onImportRequested: root.importMedia()
             }
         }

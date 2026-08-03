@@ -264,6 +264,7 @@ Item {
                 }
                 ThemedSlider {
                     width: parent.width
+                    label: qsTr("Blur strength")
                     from: 1
                     to: 100
                     stepSize: 1
@@ -316,6 +317,43 @@ Item {
                           ? Updates.status
                           : qsTr("Drift %1").arg(Updates.currentVersion)
                 }
+            }
+
+            Text {
+                text: qsTr("Extra packs")
+                color: Theme.mutedForeground
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSizeXs
+                topPadding: Theme.spacingMd
+            }
+
+            ThemedSwitch {
+                checked: Addons.remindEssential
+                text: qsTr("Remind about essential packs")
+                tooltip: qsTr("Pulse the Extras icon when the video, transitions, and audio packs are not installed")
+                onToggled: Addons.remindEssential = checked
+            }
+
+            ThemedSwitch {
+                checked: Addons.remindUpdates
+                text: qsTr("Remind about pack updates")
+                tooltip: qsTr("Pulse the Extras icon when updates are available for packs you already have installed")
+                onToggled: Addons.remindUpdates = checked
+            }
+
+            Text {
+                text: qsTr("Startup")
+                color: Theme.mutedForeground
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSizeXs
+                topPadding: Theme.spacingMd
+            }
+
+            ThemedSwitch {
+                checked: EditorState.reopenLastProject
+                text: qsTr("Reopen last project on startup")
+                tooltip: qsTr("Automatically restore the last open project. Unsaved work is kept in a side snapshot and never overwrites your save file.")
+                onToggled: EditorState.reopenLastProject = checked
             }
         }
     }

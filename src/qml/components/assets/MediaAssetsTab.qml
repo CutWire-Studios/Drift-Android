@@ -16,11 +16,44 @@ Item {
     property bool importing: false
     // Kind visibility filter supplied by the parent (depends on the active tab).
     property var assetVisibleFn: function(kind) { return true }
+    readonly property string query: search.text.trim().toLowerCase()
 
     // Emitted when a card/row is clicked or tapped to add its asset.
     signal addRequested(int assetIndex)
+    // Emitted from the card/row context menu. The parent owns the in-use
+    // check and the confirmation.
+    signal removeRequested(int assetIndex)
+    // Emitted from the card/row context menu. The parent owns the file picker.
+    signal replaceRequested(int assetIndex)
+    // Emitted from the card/row context menu. The parent owns the rename dialog.
+    signal renameRequested(int assetIndex)
+    // Emitted from the card/row context menu, image rows only. The parent owns the save dialog.
+    signal exportRequested(int assetIndex)
     // Emitted when the empty-state action asks to import media.
     signal importRequested()
+
+    function assetMatches(name, kind) {
+        if (!root.assetVisibleFn(kind))
+            return false
+        if (root.query.length === 0)
+            return true
+        return name.toLowerCase().indexOf(root.query) >= 0
+    }
+
+    // How many bin rows pass kind + search — drives the "no matches" empty state.
+    readonly property int matchCount: {
+        const q = root.query
+        let n = 0
+        for (let i = 0; i < AssetLibrary.count; ++i) {
+            const asset = AssetLibrary.assetAt(i)
+            if (!root.assetVisibleFn(asset.kind))
+                continue
+            if (q.length > 0 && asset.name.toLowerCase().indexOf(q) < 0)
+                continue
+            ++n
+        }
+        return n
+    }
 
     // First-run screen for a project with no media. This area used to
     // render as a blank rectangle, with no hint that the panel accepts
@@ -37,11 +70,35 @@ Item {
         onActionTriggered: root.importRequested()
     }
 
+    ThemedTextField {
+        id: search
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.margins: Theme.pagePadding
+        visible: AssetLibrary.count > 0
+        placeholderText: qsTr("Search media")
+        font.family: Theme.fontFamily
+    }
+
+    EmptyState {
+        anchors.centerIn: parent
+        width: parent.width
+        visible: AssetLibrary.count > 0 && root.matchCount === 0
+        compact: true
+        glyph: Theme.icons.search
+        title: qsTr("No media match “%1”").arg(search.text.trim())
+        hint: qsTr("Try a different name.")
+    }
+
     Flickable {
         id: flick
-        visible: AssetLibrary.count > 0
-        width: parent.width
-        height: parent.height
+        visible: AssetLibrary.count > 0 && root.matchCount > 0
+        anchors.top: search.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.topMargin: Theme.spacingMd
         contentHeight: root.gridMode ? grid.height + Theme.spacing3xl
                                      : listColumn.height + Theme.spacing3xl
         clip: true
@@ -60,9 +117,9 @@ Item {
             Repeater {
                 model: AssetLibrary
                 delegate: Column {
-                    width: Theme.assetCardWidth
+                    width: visible ? Theme.assetCardWidth : 0
                     spacing: 4
-                    visible: root.assetVisibleFn(kind)
+                    visible: root.assetMatches(name, kind)
 
                     required property int index
                     required property string name
@@ -75,11 +132,28 @@ Item {
 
                     property int assetIndex: index
 
+                    // Lift on grab: dims and grows slightly, so the card reads as
+                    // picked up rather than just sitting there while a ghost moves.
+                    opacity: assetDrag.active ? 0.85 : 1
+                    scale: assetDrag.active ? 1.04 : 1.0
+
+                    Behavior on opacity {
+                        NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                    }
+                    Behavior on scale {
+                        NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                    }
+
                     Drag.active: assetDrag.active
                     Drag.dragType: Drag.Automatic
                     Drag.supportedActions: Qt.CopyAction
                     Drag.keys: ["text/plain"]
                     Drag.mimeData: { "text/plain": assetIndex.toString() }
+                    // Default hotspot is (0,0) at the card top-left; Wayland
+                    // compositors (notably Mutter) then deliver drop Y far from
+                    // the grab point. Center on the thumbnail like effect cards.
+                    Drag.hotSpot.x: width / 2
+                    Drag.hotSpot.y: Theme.assetCardWidth * 9 / 32
 
                     // Grid cards had neither hover feedback nor a pointing
                     // cursor, while the list rows had both.
@@ -91,25 +165,6 @@ Item {
                     ThemedToolTip {
                         text: name
                         visible: cardHover.hovered
-                    }
-
-                    TapHandler { onTapped: root.addRequested(assetIndex) }
-                    DragHandler {
-                        id: assetDrag
-                        // Without target: null the handler moves the card itself,
-                        // clobbering the Grid positioner's x/y.
-                        target: null
-                        acceptedButtons: Qt.LeftButton
-                        onActiveChanged: {
-                            if (active) {
-                                EditorState.draggingAssetIndex = assetIndex
-                            } else {
-                                Qt.callLater(function() {
-                                    if (!assetDrag.active)
-                                        EditorState.draggingAssetIndex = -1
-                                })
-                            }
-                        }
                     }
 
                     Rectangle {
@@ -168,6 +223,42 @@ Item {
                             iconColor: Theme.mutedForeground
                         }
 
+                        // Reading the replacement off disk is the one wait in the swap with
+                        // nothing on screen to show for it. Scrims this card only, so the rest of
+                        // the bin stays usable.
+                        Rectangle {
+                            id: gridBusy
+                            // Above the duration badge, which is a later sibling.
+                            z: 1
+                            anchors.fill: parent
+                            radius: parent.radius
+                            color: Theme.scrimStrong
+                            readonly property bool busy:
+                                EditorState.replacingAssetId.length > 0
+                                && EditorState.replacingAssetId === AssetLibrary.assetIdAt(assetIndex)
+                            visible: opacity > 0
+                            opacity: busy ? 1 : 0
+
+                            Behavior on opacity {
+                                NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                            }
+
+                            // Swallows taps and drags while the swap is in flight, so the card
+                            // cannot be added to the timeline against media that is changing.
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: gridBusy.busy
+                                acceptedButtons: Qt.AllButtons
+                            }
+
+                            CircularProgress {
+                                anchors.centerIn: parent
+                                indeterminate: true
+                                size: Theme.spacing3xl
+                                progressColor: Theme.onMedia
+                            }
+                        }
+
                         Rectangle {
                             visible: duration.length > 0
                             anchors.right: parent.right
@@ -184,6 +275,76 @@ Item {
                                 color: Theme.onMedia
                                 font.pixelSize: Theme.fontSizeXs
                                 font.family: Theme.fontFamily
+                            }
+                        }
+
+                        // Both handlers live on this child, not on the Column
+                        // that owns the Drag attached property. With them on the
+                        // Column, QDrag::exec() ungrabs the very item Drag.active
+                        // is attached to, the handler deactivates inside
+                        // setActive(true), and the `Drag.active: assetDrag.active`
+                        // binding re-enters it — "Binding loop detected for
+                        // property active", and the drag dies mid-flight.
+                        // EffectBrowser and ShapesTab already nest them this way.
+                        TapHandler {
+                            // Unguarded, the tap competes with the drag for the
+                            // grab and fires an add on release after a drag.
+                            enabled: !assetDrag.active
+                            onTapped: root.addRequested(assetIndex)
+                        }
+                        DragHandler {
+                            id: assetDrag
+                            // Without target: null the handler moves the card itself,
+                            // clobbering the Grid positioner's x/y.
+                            target: null
+                            acceptedButtons: Qt.LeftButton
+                            onActiveChanged: {
+                                if (active) {
+                                    EditorState.draggingAssetIndex = assetIndex
+                                } else {
+                                    Qt.callLater(function() {
+                                        if (!assetDrag.active)
+                                            EditorState.draggingAssetIndex = -1
+                                    })
+                                }
+                            }
+                        }
+                        TapHandler {
+                            acceptedButtons: Qt.RightButton
+                            onTapped: cardMenu.popup()
+                        }
+
+                        // Rename, replace, export and remove were right-click only, which
+                        // is no route at all on a phone. Long-press is the touch equivalent.
+                        TapHandler {
+                            acceptedButtons: Qt.LeftButton
+                            enabled: Theme.touchUi
+                            onLongPressed: cardMenu.popup()
+                        }
+
+                        ThemedContextMenu {
+                            id: cardMenu
+
+                            ThemedMenuItem {
+                                text: qsTr("Rename…")
+                                icon.name: Theme.icons.pencil
+                                onTriggered: root.renameRequested(assetIndex)
+                            }
+                            ThemedMenuItem {
+                                text: qsTr("Replace media…")
+                                icon.name: Theme.icons.refresh
+                                onTriggered: root.replaceRequested(assetIndex)
+                            }
+                            ThemedMenuItem {
+                                text: qsTr("Export image…")
+                                icon.name: Theme.icons.save
+                                visible: kind === "image"
+                                onTriggered: root.exportRequested(assetIndex)
+                            }
+                            ThemedMenuItem {
+                                text: qsTr("Remove from project")
+                                icon.name: Theme.icons.trash
+                                onTriggered: root.removeRequested(assetIndex)
                             }
                         }
                     }
@@ -213,10 +374,10 @@ Item {
                 delegate: Rectangle {
                     id: listRow
                     width: listColumn.width
-                    height: 48
+                    height: visible ? 48 : 0
                     radius: Theme.radiusSm
                     color: rowMouse.containsMouse ? Theme.popoverHover : Theme.panelAccent
-                    visible: root.assetVisibleFn(kind)
+                    visible: root.assetMatches(name, kind)
 
                     Behavior on color {
                         ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
@@ -229,6 +390,9 @@ Item {
                     required property string thumbnailPath
 
                     property int assetIndex: index
+                    readonly property bool replaceBusy:
+                        EditorState.replacingAssetId.length > 0
+                        && EditorState.replacingAssetId === AssetLibrary.assetIdAt(assetIndex)
 
                     Row {
                         id: listRowContent
@@ -270,6 +434,27 @@ Item {
                                 iconSize: Theme.iconSizeBase
                                 iconColor: Theme.mutedForeground
                             }
+
+                            // Same busy treatment as the grid card, scaled to the row thumbnail.
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: parent.radius
+                                color: Theme.scrimStrong
+                                visible: opacity > 0
+                                opacity: replaceBusy ? 1 : 0
+
+                                Behavior on opacity {
+                                    NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                                }
+
+                                CircularProgress {
+                                    anchors.centerIn: parent
+                                    indeterminate: true
+                                    size: Theme.iconSizeBase
+                                    strokeWidth: 2
+                                    progressColor: Theme.onMedia
+                                }
+                            }
                         }
 
                         Column {
@@ -307,8 +492,55 @@ Item {
                         id: rowMouse
                         anchors.fill: parent
                         hoverEnabled: true
+                        // Adding to the timeline mid-swap would bind a clip to media that is
+                        // about to change under it; the right-click menu goes with it.
+                        enabled: !replaceBusy
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.addRequested(assetIndex)
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        pressAndHoldInterval: 450
+                        // Long-press stands in for the right click the phone does not have.
+                        property bool heldMenu: false
+                        onPressed: heldMenu = false
+                        onPressAndHold: (mouse) => {
+                            if (!Theme.touchUi || mouse.button !== Qt.LeftButton)
+                                return
+                            heldMenu = true
+                            rowMenu.popup()
+                        }
+                        onClicked: (mouse) => {
+                            if (heldMenu)
+                                return
+                            if (mouse.button === Qt.RightButton)
+                                rowMenu.popup()
+                            else
+                                root.addRequested(assetIndex)
+                        }
+                    }
+
+                    ThemedContextMenu {
+                        id: rowMenu
+
+                        ThemedMenuItem {
+                            text: qsTr("Rename…")
+                            icon.name: Theme.icons.pencil
+                            onTriggered: root.renameRequested(assetIndex)
+                        }
+                        ThemedMenuItem {
+                            text: qsTr("Replace media…")
+                            icon.name: Theme.icons.refresh
+                            onTriggered: root.replaceRequested(assetIndex)
+                        }
+                        ThemedMenuItem {
+                            text: qsTr("Export image…")
+                            icon.name: Theme.icons.save
+                            visible: kind === "image"
+                            onTriggered: root.exportRequested(assetIndex)
+                        }
+                        ThemedMenuItem {
+                            text: qsTr("Remove from project")
+                            icon.name: Theme.icons.trash
+                            onTriggered: root.removeRequested(assetIndex)
+                        }
                     }
                 }
             }
