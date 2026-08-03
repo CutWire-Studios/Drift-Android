@@ -454,7 +454,7 @@ Item {
 
             IconGlyph {
                 anchors.horizontalCenter: parent.horizontalCenter
-                glyph: Theme.icons.messageSquare
+                glyph: Theme.icons.captions
                 iconSize: 24
                 iconColor: Theme.mutedForeground
             }
@@ -470,13 +470,20 @@ Item {
         }
     }
 
-    // ---- Fixed editor + add panel ----------------------------------------------
+    // ---- Editor + add panel (capped so the cue list keeps space; scrolls when short)
     Rectangle {
         id: editorPanel
         anchors.bottom: parent.bottom
         anchors.left: parent.left
         anchors.right: parent.right
-        height: panelCol.implicitHeight + 24
+        readonly property real naturalHeight: panelCol.implicitHeight + 24
+        readonly property real minListHeight: 80
+        readonly property real minEditorHeight: 72
+        readonly property real headerBlock: header.height + header.anchors.topMargin
+                                           + listView.anchors.topMargin
+        height: Math.min(naturalHeight,
+                         Math.max(minEditorHeight,
+                                  parent.height - headerBlock - minListHeight))
         color: Theme.panelBackground
 
         Rectangle {
@@ -487,181 +494,191 @@ Item {
             color: Theme.panelBorder
         }
 
-        Column {
-            id: panelCol
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.topMargin: 12
-            anchors.leftMargin: 12
-            anchors.rightMargin: 12
-            spacing: 8
+        Flickable {
+            id: editorFlick
+            anchors.fill: parent
+            anchors.margins: 12
+            contentWidth: width
+            contentHeight: panelCol.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+            ScrollBar.vertical: AppScrollBar {
+                policy: editorFlick.contentHeight > editorFlick.height
+                        ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
+            }
 
-            // Editor for the selected cue.
             Column {
+                id: panelCol
                 width: parent.width
                 spacing: 8
-                visible: root.selectedCue !== null
 
-                Row {
+                // Editor for the selected cue.
+                Column {
                     width: parent.width
-                    spacing: 6
+                    spacing: 8
+                    visible: root.selectedCue !== null
 
-                    ThemedTextArea {
-                        id: cueText
-                        width: parent.width - applyButton.width - parent.spacing
-                        height: 56
-                        placeholderText: qsTr("Type subtitle…")
-                        onEditingFinished: {
-                            if (root.selectedCueIndex >= 0)
-                                root.updateCue(root.selectedCueIndex, { text: text })
-                        }
-                    }
+                    Row {
+                        width: parent.width
+                        spacing: 6
 
-                    // Explicit "apply text" affordance (separate from adding a cue).
-                    Rectangle {
-                        id: applyButton
-                        width: 40
-                        height: 56
-                        radius: Theme.radiusSm
-                        readonly property bool dirty: root.selectedCue !== null
-                                                      && cueText.text !== (root.selectedCue ? root.selectedCue.text : "")
-                        color: applyMouse.containsMouse ? Qt.lighter(Theme.primary, 1.08) : Theme.primary
-                        opacity: (dirty || applyMouse.containsMouse) ? 1 : 0.5
-
-                        // Was a raw "✓" glyph while every other button in the app
-                        // uses IconGlyph + Theme.icons.
-                        IconGlyph {
-                            anchors.centerIn: parent
-                            glyph: Theme.icons.check
-                            iconSize: Theme.iconSizeBase
-                            iconColor: Theme.primaryForeground
-                        }
-
-                        MouseArea {
-                            id: applyMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
+                        ThemedTextArea {
+                            id: cueText
+                            width: parent.width - applyButton.width - parent.spacing
+                            height: 56
+                            placeholderText: qsTr("Type subtitle…")
+                            onEditingFinished: {
                                 if (root.selectedCueIndex >= 0)
-                                    root.updateCue(root.selectedCueIndex, { text: cueText.text })
+                                    root.updateCue(root.selectedCueIndex, { text: text })
                             }
                         }
 
-                        ThemedToolTip {
-                            visible: applyMouse.containsMouse
-                            text: qsTr("Apply text to this subtitle")
+                        // Explicit "apply text" affordance (separate from adding a cue).
+                        Rectangle {
+                            id: applyButton
+                            width: 40
+                            height: 56
+                            radius: Theme.radiusSm
+                            readonly property bool dirty: root.selectedCue !== null
+                                                          && cueText.text !== (root.selectedCue ? root.selectedCue.text : "")
+                            color: applyMouse.containsMouse ? Qt.lighter(Theme.primary, 1.08) : Theme.primary
+                            opacity: (dirty || applyMouse.containsMouse) ? 1 : 0.5
+
+                            // Was a raw "✓" glyph while every other button in the app
+                            // uses IconGlyph + Theme.icons.
+                            IconGlyph {
+                                anchors.centerIn: parent
+                                glyph: Theme.icons.check
+                                iconSize: Theme.iconSizeBase
+                                iconColor: Theme.primaryForeground
+                            }
+
+                            MouseArea {
+                                id: applyMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (root.selectedCueIndex >= 0)
+                                        root.updateCue(root.selectedCueIndex, { text: cueText.text })
+                                }
+                            }
+
+                            ThemedToolTip {
+                                visible: applyMouse.containsMouse
+                                text: qsTr("Apply text to this subtitle")
+                            }
                         }
+                    }
+
+                    Row {
+                        width: parent.width
+                        spacing: 8
+
+                        // Start
+                        Column {
+                            width: (parent.width - parent.spacing) / 2
+                            spacing: 4
+                            Text {
+                                text: qsTr("Start")
+                                color: Theme.mutedForeground
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontSizeXs
+                            }
+                            Row {
+                                width: parent.width
+                                spacing: 4
+                                ThemedTextField {
+                                    id: startField
+                                    width: parent.width - startPh.width - parent.spacing
+                                    onEditingFinished: {
+                                        const v = root.parseCueTime(text)
+                                        if (!isNaN(v) && root.selectedCueIndex >= 0)
+                                            root.updateCue(root.selectedCueIndex, { start: v })
+                                    }
+                                }
+                                IconButton {
+                                    id: startPh
+                                    glyph: Theme.icons.setStart
+                                    variant: "ghost"
+                                    enabled: root.localPlayhead >= 0
+                                    tooltip: qsTr("Set start to current time")
+                                    onClicked: root.setCueEdgeToPlayhead(root.selectedCueIndex, "start")
+                                }
+                            }
+                        }
+
+                        // End
+                        Column {
+                            width: (parent.width - parent.spacing) / 2
+                            spacing: 4
+                            Text {
+                                text: qsTr("End")
+                                color: Theme.mutedForeground
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontSizeXs
+                            }
+                            Row {
+                                width: parent.width
+                                spacing: 4
+                                ThemedTextField {
+                                    id: endField
+                                    width: parent.width - endPh.width - parent.spacing
+                                    onEditingFinished: {
+                                        const v = root.parseCueTime(text)
+                                        if (!isNaN(v) && root.selectedCueIndex >= 0)
+                                            root.updateCue(root.selectedCueIndex, { end: v })
+                                    }
+                                }
+                                IconButton {
+                                    id: endPh
+                                    glyph: Theme.icons.setEnd
+                                    variant: "ghost"
+                                    enabled: root.localPlayhead >= 0
+                                    tooltip: qsTr("Set end to current time")
+                                    onClicked: root.setCueEdgeToPlayhead(root.selectedCueIndex, "end")
+                                }
+                            }
+                        }
+                    }
+
+                    ThemedButton {
+                        text: qsTr("Delete caption")
+                        variant: "destructive"
+                        glyph: Theme.icons.trash
+                        onClicked: {
+                            if (root.selectedCueIndex >= 0)
+                                root.removeCue(root.selectedCueIndex)
+                        }
+                    }
+
+                    Rectangle {
+                        width: parent.width
+                        height: 1
+                        color: Theme.panelBorder
+                        opacity: 0.6
                     }
                 }
 
-                Row {
+                Text {
                     width: parent.width
-                    spacing: 8
-
-                    // Start
-                    Column {
-                        width: (parent.width - parent.spacing) / 2
-                        spacing: 4
-                        Text {
-                            text: qsTr("Start")
-                            color: Theme.mutedForeground
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.fontSizeXs
-                        }
-                        Row {
-                            width: parent.width
-                            spacing: 4
-                            ThemedTextField {
-                                id: startField
-                                width: parent.width - startPh.width - parent.spacing
-                                onEditingFinished: {
-                                    const v = root.parseCueTime(text)
-                                    if (!isNaN(v) && root.selectedCueIndex >= 0)
-                                        root.updateCue(root.selectedCueIndex, { start: v })
-                                }
-                            }
-                            IconButton {
-                                id: startPh
-                                glyph: Theme.icons.setStart
-                                variant: "ghost"
-                                enabled: root.localPlayhead >= 0
-                                tooltip: qsTr("Set start to current time")
-                                onClicked: root.setCueEdgeToPlayhead(root.selectedCueIndex, "start")
-                            }
-                        }
-                    }
-
-                    // End
-                    Column {
-                        width: (parent.width - parent.spacing) / 2
-                        spacing: 4
-                        Text {
-                            text: qsTr("End")
-                            color: Theme.mutedForeground
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.fontSizeXs
-                        }
-                        Row {
-                            width: parent.width
-                            spacing: 4
-                            ThemedTextField {
-                                id: endField
-                                width: parent.width - endPh.width - parent.spacing
-                                onEditingFinished: {
-                                    const v = root.parseCueTime(text)
-                                    if (!isNaN(v) && root.selectedCueIndex >= 0)
-                                        root.updateCue(root.selectedCueIndex, { end: v })
-                                }
-                            }
-                            IconButton {
-                                id: endPh
-                                glyph: Theme.icons.setEnd
-                                variant: "ghost"
-                                enabled: root.localPlayhead >= 0
-                                tooltip: qsTr("Set end to current time")
-                                onClicked: root.setCueEdgeToPlayhead(root.selectedCueIndex, "end")
-                            }
-                        }
-                    }
+                    text: root.localPlayhead >= 0
+                          ? qsTr("At %1").arg(root.formatCueTime(root.localPlayhead))
+                          : qsTr("Move to a time inside this clip to add a subtitle")
+                    color: Theme.mutedForeground
+                    font.family: Theme.monoFontFamily
+                    font.pixelSize: Theme.fontSizeXs
                 }
 
                 ThemedButton {
-                    text: qsTr("Delete caption")
-                    variant: "destructive"
-                    glyph: Theme.icons.trash
-                    onClicked: {
-                        if (root.selectedCueIndex >= 0)
-                            root.removeCue(root.selectedCueIndex)
-                    }
-                }
-
-                Rectangle {
                     width: parent.width
-                    height: 1
-                    color: Theme.panelBorder
-                    opacity: 0.6
+                    variant: "primary"
+                    glyph: Theme.icons.plus
+                    enabled: root.localPlayhead >= 0
+                    text: qsTr("Add subtitle at current time")
+                    onClicked: root.addCueAtPlayhead()
                 }
-            }
-
-            Text {
-                width: parent.width
-                text: root.localPlayhead >= 0
-                      ? qsTr("At %1").arg(root.formatCueTime(root.localPlayhead))
-                      : qsTr("Move to a time inside this clip to add a subtitle")
-                color: Theme.mutedForeground
-                font.family: Theme.monoFontFamily
-                font.pixelSize: Theme.fontSizeXs
-            }
-
-            ThemedButton {
-                width: parent.width
-                variant: "primary"
-                glyph: Theme.icons.plus
-                enabled: root.localPlayhead >= 0
-                text: qsTr("Add subtitle at current time")
-                onClicked: root.addCueAtPlayhead()
             }
         }
     }

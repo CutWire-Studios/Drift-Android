@@ -59,6 +59,11 @@ Item {
     property bool anyDragging: false
     property var displayCues: []
 
+    // Bumped when a mix lands, to re-run the voice-waveform binding. Assigning the result
+    // straight onto `peaks` would replace the binding, so the lane would never ask again
+    // after the first one — reopening it, or dropping another clip, would keep the old shape.
+    property int waveformRevision: 0
+
     height: visible ? 46 : 0
     visible: EditorState.subtitleEditing && isSubtitle
 
@@ -227,9 +232,14 @@ Item {
                         return Math.min(8192, Math.max(64, Math.ceil(w / 64) * 64))
                     }
 
+                    // Asking for these mixes every A/V clip on the timeline, so it must not
+                    // happen until the lane is actually open — bindings evaluate while the
+                    // lane is hidden too, which meant dropping a long clip paid for the whole
+                    // mix with nothing on screen to show for it.
                     property var peaks: {
                         void EditorState.tracks
-                        return (waveDuration > 0)
+                        void root.waveformRevision
+                        return (root.visible && waveDuration > 0)
                             ? EditorState.subtitleWaveformPeaks(waveStart, waveDuration, peakCount)
                             : []
                     }
@@ -246,7 +256,7 @@ Item {
                             if (Math.abs(s - voiceWaveform.waveStart) < 1e-6
                                 && Math.abs(d - voiceWaveform.waveDuration) < 1e-6
                                 && n === voiceWaveform.peakCount)
-                                voiceWaveform.peaks = EditorState.subtitleWaveformPeaks(s, d, n)
+                                root.waveformRevision++
                         }
                     }
 
