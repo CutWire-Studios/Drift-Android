@@ -1,7 +1,7 @@
 {
   "id": "adjust.hue",
   "displayName": "Hue",
-  "category": "impact",
+  "category": "color",
   "order": 50,
   "parameters": [
     {

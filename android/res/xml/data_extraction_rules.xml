@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backup / device-transfer rules for API 31+. Same reasoning as backup_rules.xml:
+     projects are worth carrying to a new device, rebuildable caches are not. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="reversed" />
+        <exclude domain="file" path="mattes" />
+        <exclude domain="file" path="facetracks" />
+        <exclude domain="file" path="denoised" />
+        <exclude domain="file" path="addons" />
+        <exclude domain="file" path="cache" />
+        <exclude domain="file" path="emoji" />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="reversed" />
+        <exclude domain="file" path="mattes" />
+        <exclude domain="file" path="facetracks" />
+        <exclude domain="file" path="denoised" />
+        <exclude domain="file" path="cache" />
+    </device-transfer>
+</data-extraction-rules>

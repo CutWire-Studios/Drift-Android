@@ -1,7 +1,7 @@
 {
   "id": "adjust.contrast",
   "displayName": "Contrast",
-  "category": "impact",
+  "category": "color",
   "order": 10,
   "parameters": [
     {

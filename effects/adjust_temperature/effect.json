@@ -1,7 +1,7 @@
 {
   "id": "adjust.temperature",
   "displayName": "Temperature",
-  "category": "impact",
+  "category": "color",
   "order": 60,
   "parameters": [
     {

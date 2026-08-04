@@ -1,7 +1,7 @@
 {
   "id": "adjust.saturation",
   "displayName": "Saturation",
-  "category": "impact",
+  "category": "color",
   "order": 30,
   "parameters": [
     {

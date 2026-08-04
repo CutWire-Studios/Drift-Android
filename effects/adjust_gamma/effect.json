@@ -1,7 +1,7 @@
 {
   "id": "adjust.gamma",
   "displayName": "Gamma",
-  "category": "impact",
+  "category": "color",
   "order": 40,
   "parameters": [
     {

@@ -1,7 +1,7 @@
 {
   "id": "adjust.brightness",
   "displayName": "Brightness",
-  "category": "impact",
+  "category": "color",
   "order": 20,
   "parameters": [
     {
