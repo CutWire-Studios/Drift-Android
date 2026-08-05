@@ -82,8 +82,9 @@ clone https://code.videolan.org/videolan/x264.git "$X264_TAG" x264
 # visibility makes them non-preemptible and the relocation valid. Safe because FFmpeg is linked
 # *into* the app's .so and its API is never re-exported.
 # Decoders and encoders both: Exporter is compiled in, so the muxers and encoders have to exist for
-# it to have anything to offer. MediaCodec is deliberately absent — see the plan; software decode
-# is the milestone-1 path and the hardware one needs its own measurement pass.
+# it to have anything to offer. MediaCodec gives ClipReader the h264/hevc/av1/vp9 decoders it asks
+# for by name on large frames; --enable-jni is what it is built on, not an extra. Prebuilts made
+# before these flags simply have no such decoder and ClipReader stays on software.
 clone https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_TAG" ffmpeg
 ( cd "$SRC/ffmpeg" && make distclean >/dev/null 2>&1 || true
   PKG_CONFIG_LIBDIR="$OUT/lib/pkgconfig" ./configure \
@@ -97,6 +98,9 @@ clone https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_TAG" ffmpeg
     --disable-programs --disable-doc --disable-avdevice \
     --disable-vaapi --disable-vdpau --disable-v4l2-m2m --disable-cuda-llvm \
     --disable-vulkan --disable-libdrm --disable-xlib \
+    --enable-jni --enable-mediacodec \
+    --enable-decoder=h264_mediacodec --enable-decoder=hevc_mediacodec \
+    --enable-decoder=av1_mediacodec --enable-decoder=vp9_mediacodec \
     --enable-avfilter --enable-swscale --enable-swresample
   make -j"$JOBS" && make install )
 
