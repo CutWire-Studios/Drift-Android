@@ -3,6 +3,7 @@
 #include <QList>
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -80,6 +81,15 @@ public:
     static ExportSettings defaultSettings();
     static ExportSettings settingsFromMap(const QVariantMap &map);
 
+    // `outputPath` is a filesystem path, or — on Android — the fully encoded content:// URI of a
+    // document the save picker created (AndroidUri::filePath of what FileDialogs returned).
     static bool run(const drift::Project &project, const ExportSettings &settings, const QString &outputPath,
                     QString *errorOut, const ProgressFn &onProgress = {});
+
+    // Copies a finished export into the shared Movies (or Music) collection and returns the
+    // MediaStore URI it now lives at, so the gallery and the share sheet can see it: a file left
+    // in app storage is reachable from neither. Empty with *errorOut set on failure, and always
+    // empty on desktop, where an export already lands wherever the user pointed it.
+    static QUrl publishToGallery(const QUrl &source, const QString &displayName,
+                                 QString *errorOut = nullptr);
 };

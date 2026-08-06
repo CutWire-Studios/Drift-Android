@@ -8,6 +8,19 @@
 #include <QFile>
 #include <QImage>
 
+#ifdef Q_OS_ANDROID
+#include "AndroidUri.h"
+
+#include <QDir>
+#include <QFileInfo>
+#include <QJniEnvironment>
+#include <QJniObject>
+#include <QMimeDatabase>
+#include <QStandardPaths>
+#include <QTemporaryFile>
+#include <QtCore/qcoreapplication_platform.h>
+#endif
+
 #include <climits>
 #include <cmath>
 #include <cstring>
@@ -25,6 +38,90 @@ extern "C" {
 }
 
 namespace {
+
+#ifdef Q_OS_ANDROID
+
+constexpr const char *kExportServiceClass = "org/cutwire/drift/ExportService";
+
+// Same flag, same reason and same UI-thread requirement as the playback one in PlaybackEngine.cpp:
+// a render that takes minutes gets no touch input, so the display idles out mid-export.
+void setKeepScreenOn(bool on)
+{
+    QNativeInterface::QAndroidApplication::runOnAndroidMainThread([on] {
+        QJniObject activity = QNativeInterface::QAndroidApplication::context();
+        if (!activity.isValid())
+            return;
+        QJniObject window = activity.callObjectMethod("getWindow", "()Landroid/view/Window;");
+        if (!window.isValid())
+            return;
+        // WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        constexpr jint kFlagKeepScreenOn = 0x00000080;
+        if (on)
+            window.callMethod<void>("addFlags", "(I)V", kFlagKeepScreenOn);
+        else
+            window.callMethod<void>("clearFlags", "(I)V", kFlagKeepScreenOn);
+    });
+}
+
+void callExportService(const char *method)
+{
+    QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (!context.isValid())
+        return;
+    QJniObject::callStaticMethod<void>(kExportServiceClass, method, "(Landroid/content/Context;)V",
+                                       context.object());
+    // An export that cannot raise its notification still has to run: the JNI failure is the
+    // service being unavailable, not the render being wrong.
+    QJniEnvironment().checkAndClearExceptions();
+}
+
+// Held for the length of an encode. Backgrounded, an ordinary process is frozen and then killed,
+// which loses a multi-minute render with nothing to resume from; a foreground service is what
+// keeps it scheduled, and Android grants that only against a visible progress notification.
+class ExportProcessGuard
+{
+public:
+    ExportProcessGuard()
+    {
+        callExportService("start");
+        setKeepScreenOn(true);
+    }
+
+    ~ExportProcessGuard()
+    {
+        setKeepScreenOn(false);
+        callExportService("stop");
+    }
+
+    void setProgress(double fraction)
+    {
+        const int percent = qBound(0, static_cast<int>(fraction * 100.0), 100);
+        if (percent == m_percent)
+            return;
+        m_percent = percent;
+
+        QJniObject context = QNativeInterface::QAndroidApplication::context();
+        if (!context.isValid())
+            return;
+        QJniObject::callStaticMethod<void>(kExportServiceClass, "setPercent",
+                                           "(Landroid/content/Context;I)V", context.object(),
+                                           percent);
+        QJniEnvironment().checkAndClearExceptions();
+    }
+
+private:
+    int m_percent = -1;
+};
+
+#else
+
+struct ExportProcessGuard
+{
+    ExportProcessGuard() = default;
+    void setProgress(double) {}
+};
+
+#endif
 
 enum class RateMode { Crf, Bitrate, Lossless };
 
@@ -426,6 +523,8 @@ bool runAudioOnlyExport(const drift::Project &project, const ExportSettings &set
     const int64_t totalAudioSamples =
         qMax<int64_t>(0, std::llround(static_cast<double>(durationUs) * sampleRate / 1e6));
 
+    ExportProcessGuard guard;
+
     AVFormatContext *fmt = nullptr;
     AVCodecContext *actx = nullptr;
     AVStream *astream = nullptr;
@@ -551,8 +650,9 @@ bool runAudioOnlyExport(const drift::Project &project, const ExportSettings &set
         };
 
         while (audioSamplesGenerated < totalAudioSamples) {
-            if (onProgress && totalAudioSamples > 0
-                && !onProgress(static_cast<double>(audioSamplesGenerated) / totalAudioSamples)) {
+            const double fraction = static_cast<double>(audioSamplesGenerated) / totalAudioSamples;
+            guard.setProgress(fraction);
+            if (onProgress && totalAudioSamples > 0 && !onProgress(fraction)) {
                 cancelled = true;
                 break;
             }
@@ -605,6 +705,64 @@ cleanup:
     }
     return ok;
 }
+
+#ifdef Q_OS_ANDROID
+// avio has no content:// protocol, and a document created by ACTION_CREATE_DOCUMENT has no path to
+// open instead — so the encode runs into app storage and the result is streamed into the document
+// afterwards. The staging name carries the suffix from the document's display name because that is
+// the only place the container the user asked for is still legible: the URI itself has none, and
+// avformat picks the muxer by extension.
+bool runToDocument(const drift::Project &project, const ExportSettings &settings, const QUrl &target,
+                   QString *errorOut, const Exporter::ProgressFn &onProgress)
+{
+    QString suffix = QFileInfo(AndroidUri::displayName(target)).suffix();
+    if (suffix.isEmpty()) {
+        suffix = settings.audioOnly
+                     ? Exporter::defaultSuffix(
+                           Exporter::preferredAudioOnlyContainer(settings.audioCodecId), true)
+                     : Exporter::defaultSuffix(
+                           Exporter::preferredContainer(settings.videoCodecId, settings.audioCodecId),
+                           false);
+    }
+
+    QTemporaryFile staging(QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
+                               .filePath(QStringLiteral("export-XXXXXX.") + suffix));
+    if (!staging.open()) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Could not stage the export");
+        return false;
+    }
+    const QString stagingPath = staging.fileName();
+    staging.close();
+
+    if (!Exporter::run(project, settings, stagingPath, errorOut, onProgress))
+        return false;
+
+    QFile encoded(stagingPath);
+    std::unique_ptr<QFile> sink = AndroidUri::openForWrite(target);
+    if (!sink || !encoded.open(QIODevice::ReadOnly)) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Could not write to the chosen location");
+        return false;
+    }
+
+    std::vector<char> buffer(1 << 16);
+    while (!encoded.atEnd()) {
+        const qint64 read = encoded.read(buffer.data(), static_cast<qint64>(buffer.size()));
+        if (read <= 0 || sink->write(buffer.data(), read) != read) {
+            if (errorOut)
+                *errorOut = QStringLiteral("Could not write to the chosen location");
+            return false;
+        }
+    }
+    if (!sink->flush()) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Could not write to the chosen location");
+        return false;
+    }
+    return true;
+}
+#endif
 
 } // namespace
 
@@ -918,6 +1076,11 @@ ExportSettings Exporter::settingsFromMap(const QVariantMap &map)
 bool Exporter::run(const drift::Project &project, const ExportSettings &settings, const QString &outputPath,
                    QString *errorOut, const ProgressFn &onProgress)
 {
+#ifdef Q_OS_ANDROID
+    if (const QUrl target(outputPath); AndroidUri::isContentUri(target))
+        return runToDocument(project, settings, target, errorOut, onProgress);
+#endif
+
     if (settings.audioOnly)
         return runAudioOnlyExport(project, settings, outputPath, errorOut, onProgress);
 
@@ -971,6 +1134,8 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
         qMax<int64_t>(1, std::llround(static_cast<double>(durationUs) * fpsValue / 1e6));
     const int64_t totalAudioSamples =
         qMax<int64_t>(0, std::llround(static_cast<double>(durationUs) * sampleRate / 1e6));
+
+    ExportProcessGuard guard;
 
     AVFormatContext *fmt = nullptr;
     AVCodecContext *vctx = nullptr;
@@ -1156,7 +1321,9 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
         };
 
         for (int64_t i = 0; i < totalFrames; ++i) {
-            if (onProgress && !onProgress(static_cast<double>(i) / totalFrames)) {
+            const double fraction = static_cast<double>(i) / totalFrames;
+            guard.setProgress(fraction);
+            if (onProgress && !onProgress(fraction)) {
                 cancelled = true;
                 break;
             }
@@ -1251,4 +1418,130 @@ cleanup:
                               : (error.isEmpty() ? QStringLiteral("Export failed") : error);
     }
     return ok;
+}
+
+QUrl Exporter::publishToGallery(const QUrl &source, const QString &displayName, QString *errorOut)
+{
+#ifdef Q_OS_ANDROID
+    // The scoped insert below (RELATIVE_PATH + IS_PENDING) is API 29. Publishing on 28 would mean
+    // WRITE_EXTERNAL_STORAGE and a raw path into the shared volume — a permission this app
+    // deliberately never asks for, for one release of Android.
+    if (QNativeInterface::QAndroidApplication::sdkVersion() < 29) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Saving to the gallery needs Android 10 or newer");
+        return {};
+    }
+
+    std::unique_ptr<QFile> encoded = AndroidUri::openForRead(source);
+    if (!encoded) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Could not read the exported file");
+        return {};
+    }
+
+    const QString mimeType =
+        QMimeDatabase().mimeTypeForFile(displayName, QMimeDatabase::MatchExtension).name();
+    const bool audio = mimeType.startsWith(QLatin1String("audio/"));
+
+    QJniObject context = QNativeInterface::QAndroidApplication::context();
+    QJniObject resolver =
+        context.callObjectMethod("getContentResolver", "()Landroid/content/ContentResolver;");
+    QJniObject collection = QJniObject::getStaticObjectField(
+        audio ? "android/provider/MediaStore$Audio$Media" : "android/provider/MediaStore$Video$Media",
+        "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;");
+    if (!resolver.isValid() || !collection.isValid()) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Could not reach the media library");
+        return {};
+    }
+
+    const auto putString = [](QJniObject &values, const char *key, const QString &value) {
+        values.callMethod<void>("put", "(Ljava/lang/String;Ljava/lang/String;)V",
+                                QJniObject::fromString(QString::fromLatin1(key)).object<jstring>(),
+                                QJniObject::fromString(value).object<jstring>());
+    };
+    const auto putInt = [](QJniObject &values, const char *key, jint value) {
+        values.callMethod<void>(
+            "put", "(Ljava/lang/String;Ljava/lang/Integer;)V",
+            QJniObject::fromString(QString::fromLatin1(key)).object<jstring>(),
+            QJniObject::callStaticObjectMethod("java/lang/Integer", "valueOf",
+                                               "(I)Ljava/lang/Integer;", value)
+                .object());
+    };
+
+    QJniObject values("android/content/ContentValues");
+    putString(values, "_display_name", displayName);
+    putString(values, "mime_type", mimeType);
+    putString(values, "relative_path", audio ? QStringLiteral("Music/Drift")
+                                             : QStringLiteral("Movies/Drift"));
+    // Pending until the bytes are there, so the gallery never shows a half-written video.
+    putInt(values, "is_pending", 1);
+
+    QJniObject item = resolver.callObjectMethod(
+        "insert", "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
+        collection.object(), values.object());
+    QJniEnvironment env;
+    env.checkAndClearExceptions();
+    if (!item.isValid()) {
+        if (errorOut)
+            *errorOut = QStringLiteral("Could not add the export to the media library");
+        return {};
+    }
+
+    // Written through the resolver's own stream rather than QFile: Qt's content file engine gates
+    // on Context.checkUriPermission, which reports nothing for a MediaStore row this app owns
+    // outright and has been granted no explicit URI permission for.
+    bool ok = false;
+    QJniObject stream = resolver.callObjectMethod(
+        "openOutputStream", "(Landroid/net/Uri;)Ljava/io/OutputStream;", item.object());
+    if (!env.checkAndClearExceptions() && stream.isValid()) {
+        constexpr jsize kChunk = 1 << 16;
+        jbyteArray chunk = env->NewByteArray(kChunk);
+        std::vector<char> buffer(kChunk);
+        ok = true;
+        while (!encoded->atEnd()) {
+            const qint64 read = encoded->read(buffer.data(), kChunk);
+            if (read <= 0) {
+                ok = false;
+                break;
+            }
+            env->SetByteArrayRegion(chunk, 0, static_cast<jsize>(read),
+                                    reinterpret_cast<const jbyte *>(buffer.data()));
+            stream.callMethod<void>("write", "([BII)V", chunk, jint(0), static_cast<jint>(read));
+            if (env.checkAndClearExceptions()) {
+                ok = false;
+                break;
+            }
+        }
+        env->DeleteLocalRef(chunk);
+        stream.callMethod<void>("close", "()V");
+        if (env.checkAndClearExceptions())
+            ok = false;
+    }
+
+    if (ok) {
+        QJniObject done("android/content/ContentValues");
+        putInt(done, "is_pending", 0);
+        resolver.callMethod<jint>("update",
+                                  "(Landroid/net/Uri;Landroid/content/ContentValues;"
+                                  "Ljava/lang/String;[Ljava/lang/String;)I",
+                                  item.object(), done.object(), static_cast<jstring>(nullptr),
+                                  static_cast<jobjectArray>(nullptr));
+        env.checkAndClearExceptions();
+        return QUrl(item.toString());
+    }
+
+    resolver.callMethod<jint>("delete", "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I",
+                              item.object(), static_cast<jstring>(nullptr),
+                              static_cast<jobjectArray>(nullptr));
+    env.checkAndClearExceptions();
+    if (errorOut)
+        *errorOut = QStringLiteral("Could not write the export to the media library");
+    return {};
+#else
+    Q_UNUSED(source);
+    Q_UNUSED(displayName);
+    Q_UNUSED(errorOut);
+    return {};
+#endif
 }

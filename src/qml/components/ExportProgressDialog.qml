@@ -47,5 +47,16 @@ ThemedDialog {
                   ? qsTr("Rendering your video. Close to keep editing, or cancel to stop.")
                   : qsTr("Export finished.")
         }
+
+        // canShareExport is false off Android, where an export already lands wherever the user
+        // pointed it and the system has no share sheet to hand it to.
+        ThemedButton {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: !EditorState.exportInProgress && EditorState.canShareExport
+            variant: "primary"
+            glyph: Theme.icons.upload
+            text: qsTr("Share")
+            onClicked: EditorState.shareLastExport()
+        }
     }
 }

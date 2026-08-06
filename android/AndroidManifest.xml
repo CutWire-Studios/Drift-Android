@@ -10,6 +10,13 @@
          INTERNET via %%INSERT_PERMISSIONS%%; listing them here keeps the requirement visible. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- A video export runs for minutes in the app process; backgrounded, that process is frozen
+         and then killed. ExportService holds it in the foreground for the length of the render,
+         which costs the service permission plus its media-processing type (API 34+) and the
+         notification permission the platform requires before it will show the progress. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Media import uses the Storage Access Framework (QFileDialog → ACTION_OPEN_DOCUMENT).
          Do not add READ_MEDIA_* / READ_EXTERNAL_STORAGE for import — access is granted per
          content:// URI when the user picks a file. Qt may still inject legacy storage
@@ -81,6 +88,15 @@
                 android:name="android.app.splash_screen_drawable"
                 android:resource="@drawable/splash_screen" />
         </activity>
+
+        <!-- Started only from Exporter::run and stopped when it returns. stopWithTask because the
+             encode dies with the activity anyway: a service outliving the task would leave a
+             progress notification for a render that no longer exists. -->
+        <service
+            android:name="org.cutwire.drift.ExportService"
+            android:exported="false"
+            android:stopWithTask="true"
+            android:foregroundServiceType="mediaProcessing" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
