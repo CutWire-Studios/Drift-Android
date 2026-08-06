@@ -103,11 +103,26 @@ Item {
 
             Divider { }
 
+            // The clip menu offers cut and copy, so without this the phone's clipboard
+            // is write-only: a cut clip could never come back.
+            ActionButton {
+                glyph: Theme.icons.clipboardPaste
+                tooltip: qsTr("Paste at current time")
+                onClicked: EditorState.pasteAtPlayhead()
+            }
+
             ActionButton {
                 glyph: Theme.icons.copyPlus
                 tooltip: qsTr("Duplicate clip")
                 enabled: root.hasSelection
                 onClicked: EditorState.duplicateSelectedClip()
+            }
+
+            ActionButton {
+                glyph: Theme.icons.linkTwo
+                tooltip: qsTr("Merge adjacent clips")
+                enabled: EditorState.mergeAvailable
+                onClicked: EditorState.mergeSelectedClips()
             }
 
             ActionButton {
@@ -161,6 +176,28 @@ Item {
                 tooltip: qsTr("Toggle snapping")
                 active: EditorState.snapEnabled
                 onClicked: EditorState.snapEnabled = !EditorState.snapEnabled
+            }
+
+            // Beat detection shipped with its only trigger inside the keyframe graph, which
+            // the mobile timeline never builds. Analysis covers the whole timeline rather
+            // than a clip range because the markers and the snap targets it feeds are
+            // timeline-wide here.
+            ActionButton {
+                glyph: Theme.icons.music
+                tooltip: EditorState.beatAnalysisRunning
+                         ? qsTr("Analyzing…")
+                         : (EditorState.beatGridVisible ? qsTr("Hide beat markers")
+                                                        : qsTr("Find the beat and show markers"))
+                active: EditorState.beatGridVisible
+                enabled: !EditorState.beatAnalysisRunning && EditorState.durationSeconds > 0
+                onClicked: {
+                    if (EditorState.beatGridVisible) {
+                        EditorState.beatGridVisible = false
+                    } else {
+                        EditorState.beatGridVisible = true
+                        EditorState.analyzeBeats(0, EditorState.durationSeconds)
+                    }
+                }
             }
 
             ActionButton {

@@ -13,6 +13,12 @@ Item {
     property real contentWidth: 800
     property real labelsWidth: Theme.trackLabelsWidth
 
+    // Touch targets. Defaulted from the platform rather than passed in, because the
+    // desktop timeline instantiates this lane without knowing the property exists.
+    property bool touchMode: Theme.touchUi
+    // The mobile shell hands this lane a 72px gutter, not the desktop's 130.
+    readonly property bool narrowGutter: labelsWidth < 120
+
     readonly property real minCueDur: 0.1
 
     readonly property var clip: {
@@ -64,7 +70,8 @@ Item {
     // after the first one — reopening it, or dropping another clip, would keep the old shape.
     property int waveformRevision: 0
 
-    height: visible ? 46 : 0
+    // Taller on touch so a cue block clears 40px and its two edge grips stay apart.
+    height: visible ? (touchMode ? 56 : 46) : 0
     visible: EditorState.subtitleEditing && isSubtitle
 
     function refreshDisplay() {
@@ -167,6 +174,8 @@ Item {
                 spacing: 2
 
                 Text {
+                    width: parent.width
+                    elide: Text.ElideRight
                     text: qsTr("Subtitles")
                     color: Theme.mutedForeground
                     font.family: Theme.fontFamily
@@ -174,7 +183,11 @@ Item {
                     font.weight: Font.Medium
                 }
                 Text {
-                    text: root.cues.length + qsTr(" caption(s)")
+                    width: parent.width
+                    elide: Text.ElideRight
+                    // "12 caption(s)" runs past a phone gutter and paints over the lane.
+                    text: root.narrowGutter ? qsTr("%n cue(s)", "", root.cues.length)
+                                            : (root.cues.length + qsTr(" caption(s)"))
                     color: Theme.mutedForeground
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.fontSizeXs
@@ -309,7 +322,13 @@ Item {
                             const ph = EditorState.playheadSeconds - root.clipStart
                             return ph >= modelData.start && ph < modelData.end
                         }
-                        readonly property real gripW: Math.min(8, Math.max(3, width / 4))
+                        // Touch takes the timeline clip's 20px trim strip, and a plain third
+                        // of the block below that — with no lower floor, so a short cue keeps
+                        // a body to drag instead of being covered by its own two grips.
+                        readonly property real gripW: root.touchMode
+                                                      ? Math.min(Theme.androidClipTrimHandleWidth,
+                                                                 width / 3)
+                                                      : Math.min(8, Math.max(3, width / 4))
 
                         property bool dragging: false
                         property real dragX: 0
@@ -358,6 +377,14 @@ Item {
                             font.family: Theme.fontFamily
                             font.pixelSize: Theme.fontSizeXs
                             font.italic: !(block.modelData.text && block.modelData.text.length)
+                        }
+
+                        // The body strip is a third of a block that can be a handful of pixels
+                        // wide at low zoom, so on touch the whole block selects — including
+                        // over the edge grips, which keep their drags either way.
+                        TapHandler {
+                            enabled: root.touchMode
+                            onTapped: EditorState.selectedSubtitleCue = block.index
                         }
 
                         // Body: click to select, drag to move (keeps duration).

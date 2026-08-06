@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Window
 import Drift
 import "components"
 
@@ -14,6 +15,11 @@ Item {
     readonly property var mediaFilter: [
         qsTr("Media files (*.mp4 *.mov *.mkv *.avi *.webm *.m4v *.mp3 *.wav *.aac *.flac *.ogg *.m4a *.png *.jpg *.jpeg *.gif *.webp *.bmp)")
     ]
+
+    readonly property bool needsAttention: {
+        const win = root.Window.window
+        return (win ? win.addonAttentionNeeded : false) || Updates.updateAvailable
+    }
 
     function applyLayoutAndPrepare() {
         EditorState.newProject()
@@ -112,7 +118,7 @@ Item {
             // --- Header -------------------------------------------------------
             Item {
                 width: parent.width - parent.leftPadding - parent.rightPadding
-                height: Math.max(brandCol.height, openBtn.height)
+                height: Math.max(brandCol.height, headerActions.height)
 
                 Column {
                     id: brandCol
@@ -136,14 +142,72 @@ Item {
                     }
                 }
 
-                ThemedButton {
-                    id: openBtn
+                Row {
+                    id: headerActions
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    text: qsTr("Open")
-                    glyph: Theme.icons.folder
-                    variant: "secondary"
-                    onClicked: root.openProjectRequested()
+                    spacing: Theme.spacingSm
+
+                    ThemedButton {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: qsTr("Open")
+                        glyph: Theme.icons.folder
+                        variant: "secondary"
+                        onClicked: root.openProjectRequested()
+                    }
+
+                    // The theme toggle, the addon manager and the update prompt used to live
+                    // only in the editor's overflow, so a first run — which has no project yet
+                    // — could not reach the packs the editor needs to be usable at all.
+                    Item {
+                        width: Theme.androidIconButtonSize
+                        height: Theme.androidIconButtonSize
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        IconButton {
+                            anchors.fill: parent
+                            buttonSize: Theme.androidIconButtonSize
+                            iconSize: Theme.iconSizeLg
+                            glyph: Theme.icons.sliders
+                            variant: "text"
+                            tooltip: qsTr("More")
+                            onClicked: homeMenu.popup()
+                        }
+
+                        // The editor's Extras button pulses; a badge is the phone-sized
+                        // version of the same "something needs you" signal.
+                        Rectangle {
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: 4
+                            width: 8
+                            height: 8
+                            radius: 4
+                            visible: root.needsAttention
+                            color: Theme.destructive
+                        }
+
+                        ThemedContextMenu {
+                            id: homeMenu
+
+                            ThemedMenuItem {
+                                text: Theme.darkMode ? qsTr("Light mode") : qsTr("Dark mode")
+                                icon.name: Theme.darkMode ? Theme.icons.sun : Theme.icons.moon
+                                onTriggered: Theme.toggleDarkMode()
+                            }
+                            ThemedMenuItem {
+                                text: qsTr("Extras")
+                                icon.name: Theme.icons.package
+                                onTriggered: Window.window.openExtras()
+                            }
+                            ThemedMenuItem {
+                                text: qsTr("Update available")
+                                icon.name: Theme.icons.download
+                                visible: Updates.updateAvailable
+                                onTriggered: Window.window.openUpdateDialog()
+                            }
+                        }
+                    }
                 }
             }
 
@@ -193,22 +257,35 @@ Item {
 
                                     Rectangle {
                                         width: parent.width
-                                        height: 40
+                                        height: 32
                                         radius: Theme.radiusSm
                                         color: Theme.panelAccent
 
                                         IconGlyph {
                                             anchors.centerIn: parent
                                             glyph: Theme.icons.film
-                                            iconSize: 20
+                                            iconSize: 18
                                             iconColor: Theme.mutedForeground
+                                        }
+
+                                        // Same on-disk signal the desktop recents list carries;
+                                        // the card's dimming alone did not say what was wrong.
+                                        Rectangle {
+                                            anchors.right: parent.right
+                                            anchors.top: parent.top
+                                            anchors.margins: 4
+                                            width: 8
+                                            height: 8
+                                            radius: 4
+                                            color: card.modelData.exists === false
+                                                   ? Theme.mutedForeground : Theme.constructive
                                         }
                                     }
 
                                     Text {
                                         width: parent.width
                                         text: {
-                                            const n = modelData.name || ""
+                                            const n = card.modelData.name || ""
                                             return n.replace(/\.drift$/i, "") || qsTr("Untitled")
                                         }
                                         color: Theme.panelForeground
@@ -216,19 +293,49 @@ Item {
                                         font.pixelSize: Theme.fontSizeXs
                                         font.weight: Font.Medium
                                         elide: Text.ElideMiddle
-                                        maximumLineCount: 2
-                                        wrapMode: Text.Wrap
+                                    }
+
+                                    // Elided from the left: on a 140px card the tail — the folder
+                                    // and file name — is the half that tells two projects apart.
+                                    Text {
+                                        width: parent.width
+                                        text: card.modelData.path
+                                        color: Theme.mutedForeground
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontSizeXs
+                                        elide: Text.ElideLeft
                                     }
                                 }
 
                                 MouseArea {
                                     anchors.fill: parent
+                                    pressAndHoldInterval: 450
+                                    // Long-press stands in for the right click the phone
+                                    // does not have.
+                                    property bool heldMenu: false
+                                    onPressed: heldMenu = false
+                                    onPressAndHold: {
+                                        heldMenu = true
+                                        cardMenu.popup()
+                                    }
                                     onClicked: {
-                                        if (modelData.exists === false) {
+                                        if (heldMenu)
+                                            return
+                                        if (card.modelData.exists === false) {
                                             Toasts.warning(qsTr("That project file is missing."))
                                             return
                                         }
-                                        root.openRecentRequested(modelData.path)
+                                        root.openRecentRequested(card.modelData.path)
+                                    }
+                                }
+
+                                ThemedContextMenu {
+                                    id: cardMenu
+
+                                    ThemedMenuItem {
+                                        text: qsTr("Remove from recents")
+                                        icon.name: Theme.icons.trash
+                                        onTriggered: EditorState.removeRecentProject(card.modelData.path)
                                     }
                                 }
                             }

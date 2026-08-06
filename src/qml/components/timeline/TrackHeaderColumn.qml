@@ -92,6 +92,16 @@ Item {
         return Theme.icons.video;
     }
 
+    // Single-letter stand-in for the type glyph plus name band, which do not fit a
+    // 72px compact header. "V1"/"A2" is the whole identification a phone gets.
+    function trackTypeShortLabel(type) {
+        if (type === "audio") return qsTr("A");
+        if (type === "text") return qsTr("T");
+        if (type === "subtitle") return qsTr("S");
+        if (type === "shape") return qsTr("G");
+        return qsTr("V");
+    }
+
     // Human label for a track type.
     function trackTypeLabel(type) {
         if (type === "audio") return qsTr("Audio");
@@ -369,6 +379,41 @@ Item {
                 }
             }
 
+            // Compact stand-in for the glyph and the name band: sits in the gap
+            // between the grip and the mute/hide pair, which is the only free
+            // horizontal space a 72px header has.
+            Text {
+                visible: root.compact
+                anchors.left: parent.left
+                anchors.leftMargin: 18
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.verticalCenterOffset: index < root.tracks.length - 1 ? -Theme.trackGap / 2 : 0
+                text: root.trackTypeShortLabel(root.tracks[index].type) + (index + 1)
+                color: Theme.mutedForeground
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSizeTiny
+            }
+
+            // Filmstrip/waveform toggle for compact headers. Parked in the bottom-left
+            // corner rather than in the icon row, which a video track has no room left
+            // in — and only video rows (65px) are tall enough for a second corner.
+            IconGlyph {
+                visible: root.compact && root.tracks[index].type === "video"
+                anchors.left: parent.left
+                anchors.leftMargin: 4
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: (index < root.tracks.length - 1 ? Theme.trackGap : 0) + 4
+                glyph: trackLabelRow.trackWaveform ? Theme.icons.audioLines : Theme.icons.film
+                iconSize: Theme.iconSizeMd
+                iconColor: trackLabelRow.trackWaveform ? Theme.primary : Theme.mutedForeground
+
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -8
+                    onClicked: EditorState.setTrackShowWaveform(index, !trackLabelRow.trackWaveform)
+                }
+            }
+
             // Track name. Nothing in the header used to say which
             // track this was beyond the type glyph.
             Text {
@@ -424,6 +469,23 @@ Item {
                                          index, !trackLabelRow.trackWaveform)
                     }
                     ThemedMenuSeparator {}
+                    // Desktop resizes a lane by wheeling over its header. Touch has no
+                    // wheel, so the same nudge is offered explicitly — without it
+                    // heightScale is stuck at 1 and "Reset row height" never enables.
+                    ThemedMenuItem {
+                        visible: root.touchMode
+                        text: qsTr("Taller row")
+                        icon.name: Theme.icons.chevronUp
+                        enabled: root.tracks[index].heightScale < EditorState.trackHeightScaleMax()
+                        onTriggered: EditorState.nudgeTrackHeightScale(index, 1)
+                    }
+                    ThemedMenuItem {
+                        visible: root.touchMode
+                        text: qsTr("Shorter row")
+                        icon.name: Theme.icons.chevronDown
+                        enabled: root.tracks[index].heightScale > EditorState.trackHeightScaleMin()
+                        onTriggered: EditorState.nudgeTrackHeightScale(index, -1)
+                    }
                     ThemedMenuItem {
                         text: qsTr("Reset row height")
                         icon.name: Theme.icons.minimize

@@ -119,8 +119,12 @@ ApplicationWindow {
     // Android's system Back. Order matters: a full-screen clip tool, then any open
     // sheet/dialog, and only then the home/exit step — otherwise Back walked out of the
     // editor from behind a modal that stayed on screen.
+    // Application context, not the default window context: every tool window below calls
+    // requestActivate() and so becomes the active window, which left a WindowShortcut on
+    // this window dead exactly when the toolWindowOpen branch was needed.
     Shortcut {
         sequences: [StandardKey.Back, "Esc"]
+        context: Qt.ApplicationShortcut
         onActivated: {
             if (window.toolWindowOpen) {
                 window.closeTopToolWindow()
@@ -138,9 +142,10 @@ ApplicationWindow {
     // without this Back left them on screen and walked out of the editor behind them.
     // Ordered by how they stack: newest-opened first.
     function closeTopModal() {
-        const modals = [projectSetupDialog, layoutChooserDialog, recoveryDialog, unsavedDialog,
-                        addonStartupDialog, addonManagerDialog, missingAddonsDialog, updateDialog,
-                        reverseProgressDialog, subtitleProgressDialog]
+        const modals = [projectSetupDialog, layoutChooserDialog, projectPropertiesDialog,
+                        recoveryDialog, unsavedDialog, addonStartupDialog, addonManagerDialog,
+                        missingAddonsDialog, updateDialog, reverseProgressDialog,
+                        subtitleProgressDialog]
         for (var i = 0; i < modals.length; ++i) {
             if (modals[i] && modals[i].visible) {
                 modals[i].close()
@@ -152,6 +157,14 @@ ApplicationWindow {
 
     ProjectSetupDialog { id: projectSetupDialog }
     LayoutChooserDialog { id: layoutChooserDialog }
+
+    // Desktop reaches this from EditorHeader, which Android replaces with AndroidTopBar;
+    // hosting it here is what gives that bar's overflow something to open.
+    ProjectPropertiesDialog { id: projectPropertiesDialog }
+
+    function openProjectProperties() {
+        projectPropertiesDialog.openDialog()
+    }
 
     RecoveryDialog {
         id: recoveryDialog
@@ -273,6 +286,17 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        // Tapping a .drift in a file manager launches us with ACTION_VIEW. That project is
+        // what the user asked for, so it outranks the reopen-last-project restore below.
+        // Empty on desktop, where the intent does not exist.
+        const launched = FileDialogs.takeLaunchUrl()
+        if (launched !== "") {
+            window.confirmIfDirty(function () {
+                EditorState.loadProject(launched)
+                Qt.callLater(window.showEditor)
+            })
+            return
+        }
         // "Reopen last project" restores the autosave or the last clean .drift silently and
         // lands straight in the editor; the home page would be a step backwards from it.
         if (EditorState.restoreLastSessionIfEnabled()) {
@@ -348,8 +372,13 @@ ApplicationWindow {
     Connections {
         target: Qt.application
         function onStateChanged() {
-            if (Qt.application.state !== Qt.ApplicationActive && EditorState.playing)
+            if (Qt.application.state === Qt.ApplicationActive)
+                return
+            if (EditorState.playing)
                 EditorState.playback.pause()
+            // Losing the foreground is the last moment guaranteed to run: the OS can reclaim the
+            // process from here without another callback, and aboutToQuit does not fire when it does.
+            EditorState.flushRecoverySnapshot()
         }
     }
 

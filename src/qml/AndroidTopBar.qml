@@ -250,6 +250,11 @@ Item {
                 onTriggered: root.layoutRequested()
             }
             MenuRow {
+                text: qsTr("Project properties")
+                glyph: Theme.icons.info
+                onTriggered: Window.window.openProjectProperties()
+            }
+            MenuRow {
                 text: Theme.darkMode ? qsTr("Light mode") : qsTr("Dark mode")
                 glyph: Theme.darkMode ? Theme.icons.sun : Theme.icons.moon
                 onTriggered: Theme.toggleDarkMode()

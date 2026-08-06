@@ -193,7 +193,9 @@ Window {
 
         Text {
             width: parent.width
-            text: qsTr("Drag the middle points to shape the ramp (ends stay silent→full). Double-click to add a point; Delete removes the selection.")
+            text: Theme.touchUi
+                  ? qsTr("Drag the middle points to shape the ramp (ends stay silent→full). Double-tap to add a point; Delete point removes the selection.")
+                  : qsTr("Drag the middle points to shape the ramp (ends stay silent→full). Double-click to add a point; Delete removes the selection.")
             color: Theme.mutedForeground
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontSizeXs
@@ -303,21 +305,29 @@ Window {
             Repeater {
                 model: root.points.length
 
-                delegate: Rectangle {
+                delegate: Item {
                     id: knob
                     required property int index
                     readonly property var point: root.points[index]
                     readonly property bool isEnd: index === 0 || index === root.points.length - 1
 
-                    width: 14
-                    height: 14
-                    radius: 7
+                    // The 14px dot is the mark, not the target: handlers live on this Item, and
+                    // a child cannot be grabbed outside its parent's bounds.
+                    width: Theme.touchUi ? 36 : 14
+                    height: width
                     z: 4
-                    color: root.selectedPoint === index ? Theme.primary : Theme.panelBackground
-                    border.width: 2
-                    border.color: Theme.primary
                     x: plot.xForT(point.t) - width / 2
                     y: plot.yForG(point.g) - height / 2
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 14
+                        height: 14
+                        radius: 7
+                        color: root.selectedPoint === knob.index ? Theme.primary : Theme.panelBackground
+                        border.width: 2
+                        border.color: Theme.primary
+                    }
 
                     // DragHandler reports translation from press; freeze the starting t/g so each
                     // move is absolute from that origin instead of compounding.
@@ -383,6 +393,13 @@ Window {
                 text: qsTr("Cancel")
                 variant: "ghost"
                 onClicked: root.close()
+            }
+            // Delete/Backspace is the only other way to drop a knot, and touch has no keyboard.
+            ThemedButton {
+                text: qsTr("Delete point")
+                variant: "ghost"
+                enabled: root.selectedPoint > 0 && root.selectedPoint < root.points.length - 1
+                onClicked: root.removeSelected()
             }
             Item { width: parent.width; height: 1 }
         }

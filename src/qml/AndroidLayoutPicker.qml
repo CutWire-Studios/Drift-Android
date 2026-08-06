@@ -11,6 +11,13 @@ Item {
     property string activeCategory: "tiktok"
     property string templateId: "tiktok"
     property string qualityId: "1080p"
+    // The project timebase. This picker is the only place it can be set on Android: the
+    // desktop route (ProjectSetupDialog on the first clip) never opens here, because
+    // applying a layout marks the project's canvas as decided.
+    property int fps: 30
+    // Only meaningful while the "Custom" template is selected.
+    property int customWidth: 1080
+    property int customHeight: 1920
     // When true, use a denser layout suited to a phone scroll page.
     property bool compact: true
 
@@ -38,7 +45,9 @@ Item {
         { id: "linkedin", category: "more", label: qsTr("LinkedIn"), detail: "16:9", aspect: "16:9", icon: Theme.icons.brandLinkedin },
         { id: "square", category: "more", label: qsTr("Square"), detail: "1:1", aspect: "1:1", icon: Theme.icons.square },
         { id: "landscape", category: "more", label: qsTr("Landscape"), detail: "16:9", aspect: "16:9", icon: Theme.icons.monitor },
-        { id: "portrait", category: "more", label: qsTr("Portrait"), detail: "9:16", aspect: "9:16", icon: Theme.icons.smartphone }
+        { id: "portrait", category: "more", label: qsTr("Portrait"), detail: "9:16", aspect: "9:16", icon: Theme.icons.smartphone },
+        { id: "classic", category: "more", label: qsTr("Classic"), detail: "4:3", aspect: "4:3", icon: Theme.icons.monitor },
+        { id: "custom", category: "more", label: qsTr("Custom"), detail: qsTr("Any size"), aspect: "custom", icon: Theme.icons.sliders }
     ]
 
     readonly property var qualities: [
@@ -65,6 +74,9 @@ Item {
     }
 
     readonly property string aspect: selectedTemplate.aspect || "9:16"
+    readonly property bool customSize: aspect === "custom"
+    // "custom" is a free size, not a ratio, so it is not something to print as one.
+    readonly property string aspectLabel: customSize ? qsTr("Custom") : aspect
 
     readonly property int qualityEdge: {
         if (qualityId === "4k") return 2160
@@ -73,10 +85,13 @@ Item {
     }
 
     readonly property int outWidth: {
+        if (customSize)
+            return customWidth
         switch (aspect) {
         case "9:16": return qualityEdge
         case "4:5": return qualityEdge
         case "1:1": return qualityEdge
+        case "4:3": return Math.round(qualityEdge * 4 / 3)
         case "16:9":
         default:
             if (qualityId === "4k") return 3840
@@ -86,6 +101,8 @@ Item {
     }
 
     readonly property int outHeight: {
+        if (customSize)
+            return customHeight
         switch (aspect) {
         case "9:16":
             if (qualityId === "4k") return 3840
@@ -95,6 +112,8 @@ Item {
             return Math.round(outWidth * 5 / 4)
         case "1:1":
             return outWidth
+        case "4:3":
+            return qualityEdge
         case "16:9":
         default:
             if (qualityId === "4k") return 2160
@@ -130,6 +149,9 @@ Item {
         activeCategory = "tiktok"
         templateId = "tiktok"
         qualityId = "1080p"
+        fps = EditorState.projectFps()
+        customWidth = EditorState.projectWidth()
+        customHeight = EditorState.projectHeight()
     }
 
     function matchCurrentProject() {
@@ -148,6 +170,9 @@ Item {
 
         for (let i = 0; i < templates.length; ++i) {
             const t = templates[i]
+            // A free size matches anything, so scoring it would have it win every time.
+            if (t.aspect === "custom")
+                continue
             for (let q = 0; q < qs.length; ++q) {
                 const edge = qs[q].edge
                 let tw = 0
@@ -163,6 +188,10 @@ Item {
                     break
                 case "1:1":
                     tw = edge
+                    th = edge
+                    break
+                case "4:3":
+                    tw = Math.round(edge * 4 / 3)
                     th = edge
                     break
                 default:
@@ -183,10 +212,13 @@ Item {
         templateId = bestId
         activeCategory = bestCat
         qualityId = bestQuality
+        fps = EditorState.projectFps()
+        customWidth = w
+        customHeight = h
     }
 
     function apply() {
-        EditorState.setProjectSetup(outWidth, outHeight, EditorState.projectFps())
+        EditorState.setProjectSetup(outWidth, outHeight, fps)
         EditorState.markProjectLayoutChosen()
     }
 
@@ -268,6 +300,12 @@ Item {
             }
         }
 
+        ThemedLabel {
+            text: qsTr("Template")
+            tone: "default"
+            size: "sm"
+        }
+
         Rectangle {
             width: parent.width
             height: Math.min(root.compact ? 176 : 220,
@@ -347,12 +385,15 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             width: 28
                             height: 28
+                            // Custom has no ratio to draw until the numbers are typed.
+                            visible: row.modelData.aspect !== "custom"
 
                             readonly property real aw: {
                                 switch (row.modelData.aspect) {
                                 case "9:16": return 12
                                 case "4:5": return 16
                                 case "1:1": return 20
+                                case "4:3": return 24
                                 default: return 26
                                 }
                             }
@@ -361,6 +402,7 @@ Item {
                                 case "9:16": return 22
                                 case "4:5": return 20
                                 case "1:1": return 20
+                                case "4:3": return 18
                                 default: return 15
                                 }
                             }
@@ -382,19 +424,89 @@ Item {
             }
         }
 
-        Flow {
+        Row {
             width: parent.width
-            spacing: 6
+            spacing: Theme.spacingLg
+            visible: root.customSize
 
-            Repeater {
-                model: root.qualities
-                delegate: ThemedChip {
-                    required property var modelData
-                    text: modelData.label
-                    selected: root.qualityId === modelData.id
-                    chipHeight: 28
-                    onClicked: root.qualityId = modelData.id
+            Column {
+                width: (parent.width - parent.spacing) / 2
+                spacing: Theme.spacingSm
+                ThemedLabel { text: qsTr("Width") }
+                ThemedNumberField {
+                    width: parent.width
+                    from: 16
+                    to: 16384
+                    step: 2
+                    unit: "px"
+                    value: root.customWidth
+                    onEdited: v => root.customWidth = v
                 }
+            }
+
+            Column {
+                width: (parent.width - parent.spacing) / 2
+                spacing: Theme.spacingSm
+                ThemedLabel { text: qsTr("Height") }
+                ThemedNumberField {
+                    width: parent.width
+                    from: 16
+                    to: 16384
+                    step: 2
+                    unit: "px"
+                    value: root.customHeight
+                    onEdited: v => root.customHeight = v
+                }
+            }
+        }
+
+        // The chip row read as an unlabelled row of numbers without this, and quality is
+        // what the template does not decide — so hide it when the size is typed by hand.
+        Column {
+            width: parent.width
+            spacing: Theme.spacingLg
+            visible: !root.customSize
+
+            ThemedLabel {
+                text: qsTr("Quality")
+                tone: "default"
+                size: "sm"
+            }
+
+            Flow {
+                width: parent.width
+                spacing: 6
+
+                Repeater {
+                    model: root.qualities
+                    delegate: ThemedChip {
+                        required property var modelData
+                        text: modelData.label
+                        selected: root.qualityId === modelData.id
+                        chipHeight: 28
+                        onClicked: root.qualityId = modelData.id
+                    }
+                }
+            }
+        }
+
+        Column {
+            width: parent.width
+            spacing: Theme.spacingSm
+
+            ThemedLabel {
+                text: qsTr("Frames per second")
+                tone: "default"
+                size: "sm"
+            }
+
+            ThemedNumberField {
+                width: (parent.width - Theme.spacingLg) / 2
+                from: 1
+                to: 240
+                unit: "fps"
+                value: root.fps
+                onEdited: v => root.fps = v
             }
         }
 
@@ -419,9 +531,17 @@ Item {
                     border.width: Theme.borderWidth
                     border.color: Theme.primary
 
+                    // A morph between two aspect ratios, not an entrance.
+                    Behavior on width {
+                        NumberAnimation { duration: Theme.durationBase; easing.type: Theme.easingInOut }
+                    }
+                    Behavior on height {
+                        NumberAnimation { duration: Theme.durationBase; easing.type: Theme.easingInOut }
+                    }
+
                     Text {
                         anchors.centerIn: parent
-                        text: root.aspect
+                        text: root.aspectLabel
                         color: Theme.panelForeground
                         font.family: Theme.monoFontFamily
                         font.pixelSize: Theme.fontSizeXs
@@ -435,20 +555,39 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 4
 
-                ThemedLabel {
-                    tone: "default"
-                    size: "sm"
-                    text: root.selectedTemplate.label
+                Row {
+                    spacing: 8
+
+                    IconGlyph {
+                        anchors.verticalCenter: parent.verticalCenter
+                        glyph: root.selectedTemplate.icon || ""
+                        iconSize: 16
+                        iconColor: Theme.panelForeground
+                    }
+
+                    ThemedLabel {
+                        anchors.verticalCenter: parent.verticalCenter
+                        tone: "default"
+                        size: "sm"
+                        text: root.selectedTemplate.label
+                    }
                 }
 
                 ThemedLabel {
                     width: parent.width
                     size: "sm"
                     font.family: Theme.monoFontFamily
-                    text: qsTr("%1×%2 · %3")
+                    text: qsTr("%1×%2 · %3 · %4 fps")
                           .arg(root.outWidth)
                           .arg(root.outHeight)
-                          .arg(root.aspect)
+                          .arg(root.aspectLabel)
+                          .arg(root.fps)
+                }
+
+                ThemedLabel {
+                    width: parent.width
+                    size: "xs"
+                    text: qsTr("Preview shows the canvas aspect ratio")
                 }
             }
         }

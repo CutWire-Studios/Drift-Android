@@ -228,7 +228,8 @@ Window {
         }
 
         // ----- Transport + window position -------------------------------------------------
-        Row {
+        // Flow, not Row: at touch sizes these three do not fit a phone's width on one line.
+        Flow {
             width: parent.width
             spacing: Theme.spacingMd
 
@@ -268,7 +269,9 @@ Window {
             ThemedSlider {
                 id: windowSlider
                 label: qsTr("Preview from")
-                width: parent.width - 260
+                // The desktop reserve for the two labels is wider than a phone's whole row,
+                // which left this slider a few pixels — or a negative width.
+                width: Math.max(80, parent.width - (Theme.touchUi ? 150 : 260))
                 anchors.verticalCenter: parent.verticalCenter
                 from: 0
                 to: Math.max(0.001, root.clipDurationSeconds - root.previewSpan)

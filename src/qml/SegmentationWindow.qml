@@ -57,7 +57,10 @@ Window {
     }
 
     Grid {
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: footer.top
         anchors.margins: Theme.spacingLg
         spacing: Theme.spacingLg
         // One column stacks stage over controls on a phone; two puts them side by side.
@@ -355,5 +358,18 @@ Window {
                 }
             }
         }
+    }
+
+    // ----- Footer ---------------------------------------------------------------------------
+    // The only way out on Android, which gives this window no frame — and "Cancel" inside the
+    // sidebar cancels the run, not the session.
+    ThemedButton {
+        id: footer
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: Theme.spacingLg
+        variant: "ghost"
+        text: qsTr("Close")
+        onClicked: root.close()
     }
 }

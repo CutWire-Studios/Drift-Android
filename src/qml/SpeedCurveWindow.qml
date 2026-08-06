@@ -192,8 +192,10 @@ Window {
         Rectangle {
             id: stage
             width: parent.width
-            height: parent.height - transport.height - strip.height - toolbar.height - graph.height
-                    - Theme.spacingMd * 4
+            // Guarded: the toolbar wraps to two or three lines on a phone, which can claim more
+            // than the column has.
+            height: Math.max(0, parent.height - transport.height - strip.height - toolbar.height
+                                - graph.height - Theme.spacingMd * 4)
             radius: Theme.radiusMd
             color: Theme.panelBackground
 
@@ -223,13 +225,15 @@ Window {
         }
 
         // ----- Transport --------------------------------------------------------------------
-        Row {
+        // Flow rather than Row so a phone's width wraps the readouts instead of cutting them
+        // off. Flow drives both axes, so its children carry their own height instead of
+        // anchoring to it.
+        Flow {
             id: transport
             width: parent.width
             spacing: Theme.spacingMd
 
             IconButton {
-                anchors.verticalCenter: parent.verticalCenter
                 glyph: EditorState.speedCurvePlaying ? Theme.icons.pause : Theme.icons.play
                 tooltip: EditorState.speedCurvePlaying ? qsTr("Pause") : qsTr("Play")
                 onClicked: EditorState.speedCurvePlaying
@@ -238,13 +242,15 @@ Window {
             }
 
             ThemedLabel {
-                anchors.verticalCenter: parent.verticalCenter
+                height: Theme.iconButtonSize
+                verticalAlignment: Text.AlignVCenter
                 text: EditorState.speedCurvePosition.toFixed(2) + qsTr("s / ")
                       + EditorState.speedCurveRetimedDuration.toFixed(2) + qsTr("s")
             }
 
             ThemedLabel {
-                anchors.verticalCenter: parent.verticalCenter
+                height: Theme.iconButtonSize
+                verticalAlignment: Text.AlignVCenter
                 tone: "muted"
                 text: EditorState.speedCurveSourceDuration.toFixed(2) + qsTr("s → ")
                       + EditorState.speedCurveRetimedDuration.toFixed(2) + qsTr("s")
@@ -346,7 +352,9 @@ Window {
         }
 
         // ----- Toolbar ----------------------------------------------------------------------
-        Row {
+        // Six controls do not fit a phone's width; a Row simply cut Delete point, Reset and the
+        // readout off the right edge.
+        Flow {
             id: toolbar
             width: parent.width
             spacing: Theme.spacingSm
@@ -385,7 +393,8 @@ Window {
             }
 
             ThemedLabel {
-                anchors.verticalCenter: parent.verticalCenter
+                height: Theme.controlHeight
+                verticalAlignment: Text.AlignVCenter
                 tone: "muted"
                 visible: root.selected !== null
                 text: root.selected ? root.selected.speed.toFixed(2) + "×" : ""
@@ -530,7 +539,7 @@ Window {
 
                     MouseArea {
                         id: graphPlayheadDrag
-                        width: 9
+                        width: Theme.touchUi ? 32 : 9
                         height: parent.height
                         x: -(width - Theme.playheadLineWidth) / 2
                         cursorShape: Qt.SizeHorCursor
@@ -553,21 +562,30 @@ Window {
                 Repeater {
                     model: root.points.length
 
-                    delegate: Rectangle {
+                    delegate: Item {
                         id: knob
                         required property int index
                         readonly property var point: root.points[index]
                         readonly property bool isEnd: index === 0 || index === root.points.length - 1
 
-                        width: 11
-                        height: 11
-                        radius: 2
+                        // The 11px square is the mark, not the target: the handlers live on this
+                        // Item, and a child cannot be grabbed outside its parent's bounds.
+                        width: Theme.touchUi ? 36 : 11
+                        height: width
                         z: 4
-                        color: root.selectedPoint === index ? Theme.primary : Theme.panelBackground
-                        border.width: 2
-                        border.color: Theme.primary
                         x: point.pos * plot.width - width / 2
                         y: root.yForSpeed(point.speed, plot.height) - height / 2
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 11
+                            height: 11
+                            radius: 2
+                            color: root.selectedPoint === knob.index ? Theme.primary
+                                                                     : Theme.panelBackground
+                            border.width: 2
+                            border.color: Theme.primary
+                        }
 
                         // DragHandler reports translation from where the drag began, so the
                         // values it is applied to have to be frozen there too — reading the live
@@ -617,7 +635,7 @@ Window {
                 Repeater {
                     model: root.selected ? 2 : 0
 
-                    delegate: Rectangle {
+                    delegate: Item {
                         id: handle
                         required property int index
                         readonly property bool isOut: index === 1
@@ -628,15 +646,21 @@ Window {
                         property real baseDx: 0
                         property real baseDy: 0
 
-                        width: 9
-                        height: 9
-                        radius: 4.5
+                        width: Theme.touchUi ? 32 : 9
+                        height: width
                         z: 5
-                        color: Theme.panelBackground
-                        border.width: 2
-                        border.color: Theme.mutedForeground
                         x: (root.selected.pos + dx) * plot.width - width / 2
                         y: root.yForSpeed(root.selected.speed + dy, plot.height) - height / 2
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 9
+                            height: 9
+                            radius: 4.5
+                            color: Theme.panelBackground
+                            border.width: 2
+                            border.color: Theme.mutedForeground
+                        }
 
                         DragHandler {
                             target: null
@@ -697,6 +721,11 @@ Window {
         ThemedLabel {
             anchors.verticalCenter: parent.verticalCenter
             tone: "muted"
+            // The footer is anchored right, so an unbounded hint runs off the left edge of a
+            // phone rather than shrinking.
+            width: Math.min(implicitWidth, Math.max(0, root.width - 220))
+            wrapMode: Text.NoWrap
+            elide: Text.ElideRight
             text: qsTr("Applied as a copy on a new track — the original clip is left alone.")
         }
 

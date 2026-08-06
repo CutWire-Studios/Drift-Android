@@ -380,6 +380,8 @@ add_library(driftengine STATIC
     src/engine/AddonRegistry.h
     src/engine/AddonRegistry.cpp
     src/engine/AddonSigningKey.h
+    src/engine/AndroidUri.h
+    src/engine/AndroidUri.cpp
     src/engine/MediaProbe.h
     src/engine/MediaProbe.cpp
     src/engine/MediaThumbnail.h
@@ -578,6 +580,8 @@ qt_add_qml_module(drift
         src/qml/components/preview/TransformOverlay.qml
         src/qml/components/preview/CropOverlay.qml
         src/qml/components/preview/PreviewToolbar.qml
+        src/qml/components/preview/AndroidTransformOverlay.qml
+        src/qml/components/preview/AndroidCropOverlay.qml
         src/qml/SegmentationWindow.qml
         src/qml/DenoiseWindow.qml
         src/qml/SpeedCurveWindow.qml

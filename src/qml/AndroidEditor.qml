@@ -14,6 +14,15 @@ Item {
 
     property string sheetKind: "" // "" | "assets" | "properties"
 
+    // Fullscreen preview: the timeline pane, top bar and rail step aside and
+    // AndroidPreview takes the page. Readable from outside so AndroidMain's Back
+    // dispatcher can be pointed at exitPreviewFullscreen().
+    property bool previewFullscreen: false
+
+    function exitPreviewFullscreen() {
+        previewFullscreen = false
+    }
+
     readonly property var projectFilter: [qsTr("Drift project (*.drift)")]
 
     function openAssetsTab(tabId) {
@@ -66,6 +75,14 @@ Item {
             root.closeSheets()
             return true
         }
+        if (EditorState.canvasCropMode) {
+            EditorState.canvasCropMode = false
+            return true
+        }
+        if (root.previewFullscreen) {
+            root.exitPreviewFullscreen()
+            return true
+        }
         return false
     }
 
@@ -111,6 +128,7 @@ Item {
         AndroidTopBar {
             id: topBar
             width: parent.width
+            visible: !root.previewFullscreen
             onBackRequested: root.backRequested()
             onExportRequested: exportDialog.openDialog()
             onExportProgressRequested: {
@@ -127,7 +145,10 @@ Item {
         SplitView {
             id: editorSplit
             width: parent.width
-            height: Math.max(0, parent.height - topBar.height - rail.height)
+            // Column skips hidden children but their `height` still reads non-zero,
+            // so the two strips only count while they are on screen.
+            height: Math.max(0, parent.height - (topBar.visible ? topBar.height : 0)
+                                - (rail.visible ? rail.height : 0))
             // Landscape and multi-window leave roughly 260px of height, which a vertical
             // split cannot divide into a usable preview and a usable timeline. Side by
             // side it divides the axis there is room on instead.
@@ -188,24 +209,34 @@ Item {
 
             AndroidPreview {
                 id: preview
+                fullscreen: root.previewFullscreen
+                onFullscreenToggleRequested: root.previewFullscreen = !root.previewFullscreen
+
+                // With the timeline pane hidden the preview is the only item left, and
+                // its ceiling would otherwise still hold it to 72% of the split.
                 // Avoid fixed mins larger than the first layout pass (height may be 0).
-                SplitView.preferredHeight: Math.min(
-                    implicitHeight,
-                    Math.max(editorSplit.previewMin, editorSplit.height * 0.42))
-                SplitView.minimumHeight: editorSplit.previewMin
-                SplitView.maximumHeight: Math.max(
-                    editorSplit.previewMin, editorSplit.height * 0.72)
+                SplitView.preferredHeight: root.previewFullscreen
+                    ? editorSplit.height
+                    : Math.min(implicitHeight,
+                               Math.max(editorSplit.previewMin, editorSplit.height * 0.42))
+                SplitView.minimumHeight: root.previewFullscreen ? 0 : editorSplit.previewMin
+                SplitView.maximumHeight: root.previewFullscreen
+                    ? editorSplit.height
+                    : Math.max(editorSplit.previewMin, editorSplit.height * 0.72)
                 // SplitView reads only the pair matching its current orientation, so both
                 // sets are declared rather than swapped.
-                SplitView.preferredWidth: Math.max(editorSplit.previewMinW,
-                                                   editorSplit.width * 0.45)
-                SplitView.minimumWidth: editorSplit.previewMinW
-                SplitView.maximumWidth: Math.max(editorSplit.previewMinW,
-                                                 editorSplit.width * 0.65)
+                SplitView.preferredWidth: root.previewFullscreen
+                    ? editorSplit.width
+                    : Math.max(editorSplit.previewMinW, editorSplit.width * 0.45)
+                SplitView.minimumWidth: root.previewFullscreen ? 0 : editorSplit.previewMinW
+                SplitView.maximumWidth: root.previewFullscreen
+                    ? editorSplit.width
+                    : Math.max(editorSplit.previewMinW, editorSplit.width * 0.65)
             }
 
             Item {
                 id: timelinePane
+                visible: !root.previewFullscreen
                 SplitView.fillHeight: true
                 SplitView.fillWidth: true
                 SplitView.minimumHeight: editorSplit.timelineMin
@@ -291,6 +322,7 @@ Item {
         AndroidBottomRail {
             id: rail
             width: parent.width
+            visible: !root.previewFullscreen
             onTabRequested: (tabId) => root.openAssetsTab(tabId)
             onEditRequested: root.openPropertiesSheet()
         }
@@ -353,6 +385,14 @@ Item {
                 exportProgressDialog.dismissed = false
                 exportProgressDialog.openDialog()
             }
+        }
+        // The crop frame is dragged on the preview, and the Settings tab it is
+        // started from covers most of the screen. Cropping therefore takes the page
+        // for as long as it is on, and hands it back when it ends.
+        function onCanvasCropModeChanged() {
+            if (EditorState.canvasCropMode)
+                root.closeSheets()
+            root.previewFullscreen = EditorState.canvasCropMode
         }
         // Selection must not auto-open the Edit sheet: that ran on press (before
         // release), stole the gesture so clips could not drag, and blocked long-press

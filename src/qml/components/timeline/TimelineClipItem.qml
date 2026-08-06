@@ -118,6 +118,19 @@ Item {
                                              ? Theme.androidTrimHotspotExtra
                                              : 10
 
+    // Fade dots. On touch they used to be switched off outright: at the clip corners
+    // they landed inside the trim strips, which own the full height of both edges.
+    // Instead they are sized to a fingertip and inset past those strips, and — like the
+    // trim handles — only appear on the selected clip. Desktop keeps the 13px corner
+    // dots and a zero inset, so nothing there moves.
+    readonly property real fadeHandleSize: touchMode ? 22 : 13
+    // Clears the trim strip's own hotspot (trimHandleWidth + 4) plus the dot's -6
+    // hit margin, so the two never contend for the same press.
+    readonly property real fadeHandleInset: touchMode ? trimHandleWidth + 12 : 0
+    readonly property real fadeHandleMinWidth: touchMode
+                                               ? 2 * fadeHandleInset + fadeHandleSize + 12
+                                               : 26
+
     // Name band height, derived once instead of
     // being hardcoded at three separate sites,
     // and clamped so it can never swallow a
@@ -619,6 +632,11 @@ Item {
                 clipContextMenu.popup()
                 return
             }
+            // Touch multi-select mode (see the panel's multiSelectActive): the press
+            // does nothing so a pan still reaches the Flickable, and the tap toggles
+            // on release. Undefined on desktop, which has shift-click and the marquee.
+            if (panel.multiSelectActive === true)
+                return
             if ((mouse.modifiers & Qt.ShiftModifier) !== 0)
                 EditorState.addToSelection(clipItem.trackIndex, clipItem.clipIndex)
             else
@@ -629,7 +647,7 @@ Item {
         onPressAndHold: (mouse) => {
             if (!clipItem.touchMode || mouse.button === Qt.RightButton)
                 return
-            if (didDrag || drag.active)
+            if (didDrag || drag.active || panel.multiSelectActive === true)
                 return
             moveArmed = true
             if (!clipItem.selected)
@@ -638,6 +656,10 @@ Item {
         onClicked: (mouse) => {
             if (mouse.button === Qt.RightButton || didDrag)
                 return
+            if (panel.multiSelectActive === true) {
+                panel.toggleInSelection(clipItem.trackIndex, clipItem.clipIndex)
+                return
+            }
             if ((mouse.modifiers & Qt.ShiftModifier) !== 0)
                 EditorState.addToSelection(clipItem.trackIndex, clipItem.clipIndex)
             else
@@ -659,6 +681,14 @@ Item {
                     if (typeof panel.openClipProperties === "function")
                         panel.openClipProperties()
                 }
+            }
+            ThemedMenuItem {
+                // Touch route into multi-clip selection; the panel owns the mode and
+                // the desktop panel does not declare the property at all.
+                text: qsTr("Select multiple")
+                icon.name: Theme.icons.check
+                visible: panel.multiSelectActive === false
+                onTriggered: panel.multiSelectActive = true
             }
             ThemedMenuSeparator { }
             ThemedMenuItem {
@@ -819,13 +849,15 @@ Item {
     // edge below the dots; grab the dots to fade.
     Rectangle {
         id: fadeInHandle
-        width: 13
-        height: 13
-        radius: 6.5
-        y: 2
+        width: clipItem.fadeHandleSize
+        height: clipItem.fadeHandleSize
+        radius: clipItem.fadeHandleSize / 2
+        y: clipItem.touchMode
+           ? Math.max(0, (clipItem.height - clipItem.fadeHandleSize) / 2)
+           : 2
         z: 40
-        visible: clipItem.timelineFadeHandles && !clipItem.touchMode
-                 && clipItem.selected && clipItem.width > 26
+        visible: clipItem.timelineFadeHandles && clipItem.selected
+                 && clipItem.width > clipItem.fadeHandleMinWidth
         color: Theme.primary
         border.color: Theme.onMedia
         border.width: 2
@@ -834,8 +866,9 @@ Item {
             target: fadeInHandle
             property: "x"
             when: !fadeInMouse.pressed
-            value: Math.max(0, Math.min(clipItem.width - fadeInHandle.width,
-                                        (clipItem.clipData.fadeIn || 0) * panel.pxPerSecond - fadeInHandle.width / 2))
+            value: Math.max(clipItem.fadeHandleInset,
+                            Math.min(clipItem.width - clipItem.fadeHandleInset - fadeInHandle.width,
+                                     (clipItem.clipData.fadeIn || 0) * panel.pxPerSecond - fadeInHandle.width / 2))
         }
 
         MouseArea {
@@ -855,7 +888,10 @@ Item {
                     return
                 const px = Math.max(0, Math.min(clipItem.width,
                                                 mapToItem(clipItem, mouse.x, mouse.y).x))
-                fadeInHandle.x = Math.min(clipItem.width - fadeInHandle.width, px - fadeInHandle.width / 2)
+                fadeInHandle.x = Math.max(clipItem.fadeHandleInset,
+                                          Math.min(clipItem.width - clipItem.fadeHandleInset
+                                                   - fadeInHandle.width,
+                                                   px - fadeInHandle.width / 2))
                 EditorState.previewSetClipFade(clipItem.trackIndex, clipItem.clipIndex,
                                                px / panel.pxPerSecond,
                                                clipItem.clipData.fadeOut || 0)
@@ -874,13 +910,15 @@ Item {
 
     Rectangle {
         id: fadeOutHandle
-        width: 13
-        height: 13
-        radius: 6.5
-        y: 2
+        width: clipItem.fadeHandleSize
+        height: clipItem.fadeHandleSize
+        radius: clipItem.fadeHandleSize / 2
+        y: clipItem.touchMode
+           ? Math.max(0, (clipItem.height - clipItem.fadeHandleSize) / 2)
+           : 2
         z: 40
-        visible: clipItem.timelineFadeHandles && !clipItem.touchMode
-                 && clipItem.selected && clipItem.width > 26
+        visible: clipItem.timelineFadeHandles && clipItem.selected
+                 && clipItem.width > clipItem.fadeHandleMinWidth
         color: Theme.primary
         border.color: Theme.onMedia
         border.width: 2
@@ -889,8 +927,9 @@ Item {
             target: fadeOutHandle
             property: "x"
             when: !fadeOutMouse.pressed
-            value: Math.max(0, Math.min(clipItem.width - fadeOutHandle.width,
-                                        clipItem.width - (clipItem.clipData.fadeOut || 0) * panel.pxPerSecond - fadeOutHandle.width / 2))
+            value: Math.max(clipItem.fadeHandleInset,
+                            Math.min(clipItem.width - clipItem.fadeHandleInset - fadeOutHandle.width,
+                                     clipItem.width - (clipItem.clipData.fadeOut || 0) * panel.pxPerSecond - fadeOutHandle.width / 2))
         }
 
         MouseArea {
@@ -910,7 +949,10 @@ Item {
                     return
                 const px = Math.max(0, Math.min(clipItem.width,
                                                 mapToItem(clipItem, mouse.x, mouse.y).x))
-                fadeOutHandle.x = Math.max(0, px - fadeOutHandle.width / 2)
+                fadeOutHandle.x = Math.max(clipItem.fadeHandleInset,
+                                           Math.min(clipItem.width - clipItem.fadeHandleInset
+                                                    - fadeOutHandle.width,
+                                                    px - fadeOutHandle.width / 2))
                 EditorState.previewSetClipFade(clipItem.trackIndex, clipItem.clipIndex,
                                                clipItem.clipData.fadeIn || 0,
                                                Math.max(0, (clipItem.width - px) / panel.pxPerSecond))

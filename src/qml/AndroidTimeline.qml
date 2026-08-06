@@ -4,8 +4,10 @@ import Drift
 import "components"
 import "components/timeline"
 
-// CapCut-style phone timeline: multi-track, seek, select/move/trim/blade, pinch zoom.
-// Omits keyframe graph, subtitle lane, marquee, library drops, and transition chrome.
+// CapCut-style phone timeline: multi-track, seek, select/move/trim/blade, pinch zoom,
+// plus the keyframe, subtitle-cue and beat lanes and transition chrome.
+// Omits the marquee and library drops — neither has a touch gesture; box-select is
+// replaced by the long-press multi-select mode below.
 // Edit tools live in AndroidEditActions (above the bottom rail), not on this panel.
 Item {
     id: root
@@ -15,6 +17,33 @@ Item {
     property real cutHoverSeconds: -1
     property int cutHoverTrack: -1
     property int cutHoverClip: -1
+
+    // Keyframe lane: opened from the lane bar, and only offered when the selected
+    // clip has something animated. KeyframeGraph gates itself on propertiesTab, so
+    // the collapse goes through that rather than through `visible` — otherwise the
+    // lane would keep its height while folded away.
+    property bool keyframeLaneOpen: false
+
+    // Touch replacement for marquee + shift-click: armed from a clip's long-press
+    // menu, after which a tap adds or removes instead of replacing the selection.
+    property bool multiSelectActive: false
+
+    function toggleInSelection(trackIndex, clipIndex) {
+        const existing = EditorState.selection
+        const next = []
+        var found = false
+        for (var i = 0; i < existing.length; i++) {
+            if (existing[i].track === trackIndex && existing[i].clip === clipIndex) {
+                found = true
+                continue
+            }
+            next.push({ "track": existing[i].track, "clip": existing[i].clip })
+        }
+        if (found)
+            EditorState.setSelection(next)
+        else
+            EditorState.addToSelection(trackIndex, clipIndex)
+    }
 
     signal openMediaRequested()
     signal openPropertiesRequested()
@@ -81,6 +110,48 @@ Item {
         }
     }
 
+    ThemedDialog {
+        id: bookmarkRenameDialog
+        title: qsTr("Rename bookmark")
+        acceptText: qsTr("Rename")
+        preferredWidth: Theme.dialogWidthSm
+
+        property int bookmarkIndex: -1
+
+        contentItem: Column {
+            width: parent ? parent.width : Theme.dialogWidthSm
+            spacing: Theme.spacingMd
+
+            ThemedLabel {
+                width: parent.width
+                text: qsTr("Label")
+                size: "sm"
+            }
+            ThemedTextField {
+                id: bookmarkRenameField
+                width: parent.width
+                placeholderText: qsTr("Bookmark name")
+            }
+        }
+
+        onOpened: {
+            bookmarkRenameField.forceActiveFocus()
+            bookmarkRenameField.selectAll()
+        }
+        onAccepted: {
+            const marks = EditorState.bookmarks
+            if (bookmarkRenameDialog.bookmarkIndex < 0
+                    || bookmarkRenameDialog.bookmarkIndex >= marks.length)
+                return
+            const label = bookmarkRenameField.text.trim()
+            EditorState.updateBookmark(bookmarkRenameDialog.bookmarkIndex,
+                                       marks[bookmarkRenameDialog.bookmarkIndex].seconds,
+                                       label.length > 0 ? label : qsTr("Bookmark"))
+            bookmarkRenameDialog.bookmarkIndex = -1
+        }
+        onRejected: bookmarkRenameDialog.bookmarkIndex = -1
+    }
+
     onTimelineToolChanged: if (timelineTool === "") {
         cutHoverSeconds = -1
         cutHoverTrack = -1
@@ -134,10 +205,74 @@ Item {
         filmstripRefreshEpoch++
     }
     readonly property real labelsWidth: Theme.androidTrackLabelsWidth
-    // Ruler plus the bookmark lane. Also the playhead's scrub target and, in its left
-    // corner, the add-track button — so it is deliberately taller than the desktop ruler.
+
+    // Beat analysis is triggered from AndroidEditActions (the music button, which sets
+    // beatGridVisible / onsetsVisible and calls analyzeBeats over the whole timeline);
+    // this panel only draws what came back.
+    readonly property var beatData: EditorState.beatAnalysis
+    readonly property bool beatGridOn: EditorState.beatGridVisible && !!beatData
+                                       && !!beatData.beats && beatData.beats.length > 0
+    readonly property bool onsetsOn: EditorState.onsetsVisible && !!beatData
+                                     && !!beatData.onsets && beatData.onsets.length > 0
+    readonly property bool beatLaneVisible: beatGridOn || onsetsOn
+    readonly property real beatLaneHeight: beatLaneVisible ? 14 : 0
+
+    // An onset this close to a grid line is already drawn as one.
+    function nearAnyBeat(seconds) {
+        const list = beatData ? beatData.beats : null
+        if (!list)
+            return false
+        for (var i = 0; i < list.length; i++) {
+            if (Math.abs(list[i] - seconds) < 0.06)
+                return true
+        }
+        return false
+    }
+
+    // Both beat canvases are viewport-sized and shifted by contentX rather than sized
+    // to the content: at 40x zoom a content-wide Canvas is past GL_MAX_TEXTURE_SIZE and
+    // gets silently downsampled. `alpha` separates the marker lane from the fainter
+    // grid drawn down the tracks.
+    function paintBeatMarks(ctx, w, h, alpha) {
+        ctx.clearRect(0, 0, w, h)
+        const a = root.beatData
+        if (!a)
+            return
+        const localX = (t) => Math.round(t * root.pxPerSecond - flick.contentX)
+        ctx.globalAlpha = alpha
+        if (root.beatGridOn) {
+            const perBar = a.beatsPerBar || 4
+            const first = a.firstDownbeat || 0
+            for (var i = 0; i < a.beats.length; i++) {
+                const px = localX(a.beats[i])
+                if (px < -2 || px > w + 2)
+                    continue
+                const isBar = ((i - first) % perBar + perBar) % perBar === 0
+                ctx.fillStyle = String(isBar ? Theme.beatBarColor : Theme.beatGridColor)
+                ctx.fillRect(px, isBar ? 0 : h * 0.35, isBar ? 2 : 1, isBar ? h : h * 0.65)
+            }
+        }
+        if (root.onsetsOn) {
+            ctx.fillStyle = String(Theme.beatOnsetColor)
+            const onsets = a.onsets || []
+            for (var j = 0; j < onsets.length; j++) {
+                if (root.beatGridOn && root.nearAnyBeat(onsets[j].seconds))
+                    continue
+                const ox = localX(onsets[j].seconds)
+                if (ox < -2 || ox > w + 2)
+                    continue
+                const oh = Math.max(4, onsets[j].strength * h * 0.5)
+                ctx.fillRect(ox - 1, (h - oh) / 2, 2, oh)
+            }
+        }
+        ctx.globalAlpha = 1
+    }
+
+    // Ruler, bookmark lane and (when analysis is showing) the beat marker lane. Also
+    // the playhead's scrub target and, in its left corner, the add-track button — so it
+    // is deliberately taller than the desktop ruler.
     readonly property real seekHeaderHeight:
-        Theme.timelineRulerHeight + Theme.timelineBookmarkRowHeight
+        Theme.timelineRulerHeight + Theme.timelineBookmarkRowHeight + beatLaneHeight
     // Exposed for clip filmstrip viewport culling (Flickable id is local).
     readonly property real timelineViewX: flick.contentX
     readonly property real timelineViewW: flick.width
@@ -368,9 +503,111 @@ Item {
     Column {
         anchors.fill: parent
 
+        // Lane bar: the keyframe lane's collapse toggle, and — while multi-select is
+        // armed — the controls that gesture has no other home for.
+        Item {
+            id: laneBar
+            width: parent.width
+            visible: root.multiSelectActive || keyframeLane.allSeries.length > 0
+            height: visible ? 32 : 0
+
+            Rectangle {
+                anchors.fill: parent
+                color: Theme.panelBackground
+            }
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 1
+                color: Theme.panelBorder
+            }
+
+            Row {
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.spacingLg
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.spacingLg
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Theme.spacingSm
+                visible: !root.multiSelectActive
+
+                ThemedChip {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Keyframes")
+                    chipHeight: 26
+                    selected: root.keyframeLaneOpen
+                    onClicked: root.keyframeLaneOpen = !root.keyframeLaneOpen
+                }
+            }
+
+            Row {
+                anchors.left: parent.left
+                anchors.leftMargin: Theme.spacingLg
+                anchors.right: parent.right
+                anchors.rightMargin: Theme.spacingLg
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Theme.spacingSm
+                visible: root.multiSelectActive
+
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("%n clip(s)", "", EditorState.selection.length)
+                    color: Theme.panelForeground
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSizeXs
+                }
+                ThemedChip {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("All")
+                    chipHeight: 26
+                    variant: "outline"
+                    onClicked: EditorState.selectAllClips()
+                }
+                ThemedChip {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("None")
+                    chipHeight: 26
+                    variant: "outline"
+                    onClicked: EditorState.clearSelection()
+                }
+                ThemedChip {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: qsTr("Done")
+                    chipHeight: 26
+                    selected: true
+                    onClicked: root.multiSelectActive = false
+                }
+            }
+        }
+
+        // Both lanes size themselves to zero when they have nothing to show, so the
+        // track area only loses height while one is actually open.
+        KeyframeGraph {
+            id: keyframeLane
+            width: parent.width
+            pxPerSecond: root.pxPerSecond
+            labelsWidth: root.labelsWidth
+            propertiesTab: root.keyframeLaneOpen ? "transform" : ""
+            contentX: flick.contentX
+            contentWidth: flick.contentWidth
+            // Tangent grips are only armed above 140px, so on a phone the lane opens
+            // tall enough to shape a curve rather than at the desktop's 88px overview.
+            laneHeight: Math.round(Math.max(140, Math.min(220, root.height * 0.5)))
+        }
+
+        SubtitleCueLane {
+            id: subtitleLane
+            width: parent.width
+            pxPerSecond: root.pxPerSecond
+            labelsWidth: root.labelsWidth
+            contentX: flick.contentX
+            contentWidth: flick.contentWidth
+        }
+
         Row {
             width: parent.width
-            height: parent.height
+            height: parent.height - laneBar.height - keyframeLane.height - subtitleLane.height
 
             Column {
                 width: root.labelsWidth
@@ -573,11 +810,12 @@ Item {
                             }
                         }
 
-                        // Bookmark lane. Read-only compared to desktop — tap to jump, and
-                        // that is all: adding, moving and renaming live in the edit strip
-                        // and would need a drag gesture this strip has already promised to
-                        // the scrubber. Sits above rulerScrub with preventStealing so a tap
-                        // on a flag is not read as a seek.
+                        // Bookmark lane. Tap a flag to jump; hold it for the menu desktop
+                        // gets from the right button. Retiming is "Move to playhead"
+                        // rather than a drag: this strip has already promised the drag to
+                        // the scrubber, and a 10px flag is not a drag target on touch.
+                        // Sits above rulerScrub with preventStealing so a tap on a flag is
+                        // not read as a seek.
                         Item {
                             id: bookmarkRow
                             y: Theme.timelineRulerHeight
@@ -585,9 +823,45 @@ Item {
                             height: Theme.timelineBookmarkRowHeight
                             z: 2
 
+                            ThemedContextMenu {
+                                id: bookmarkContextMenu
+                                property int bookmarkIndex: -1
+                                property string bookmarkLabel: ""
+
+                                ThemedMenuItem {
+                                    text: qsTr("Go to bookmark")
+                                    icon.name: Theme.icons.bookmark
+                                    onTriggered: EditorState.goToBookmark(bookmarkContextMenu.bookmarkIndex)
+                                }
+                                ThemedMenuItem {
+                                    text: qsTr("Move to playhead")
+                                    icon.name: Theme.icons.moveHorizontal
+                                    onTriggered: EditorState.updateBookmark(
+                                                     bookmarkContextMenu.bookmarkIndex,
+                                                     EditorState.playheadSeconds,
+                                                     bookmarkContextMenu.bookmarkLabel)
+                                }
+                                ThemedMenuItem {
+                                    text: qsTr("Rename…")
+                                    icon.name: Theme.icons.pencil
+                                    onTriggered: {
+                                        bookmarkRenameDialog.bookmarkIndex = bookmarkContextMenu.bookmarkIndex
+                                        bookmarkRenameField.text = bookmarkContextMenu.bookmarkLabel
+                                        bookmarkRenameDialog.open()
+                                    }
+                                }
+                                ThemedMenuSeparator { }
+                                ThemedMenuItem {
+                                    text: qsTr("Delete")
+                                    icon.name: Theme.icons.trash
+                                    onTriggered: EditorState.removeBookmark(bookmarkContextMenu.bookmarkIndex)
+                                }
+                            }
+
                             Repeater {
                                 model: EditorState.bookmarks
                                 delegate: Item {
+                                    id: bookmarkFlag
                                     required property int index
                                     required property var modelData
 
@@ -614,14 +888,64 @@ Item {
                                         color: Theme.primary
                                     }
 
+                                    // A project marked up on desktop arrived as a row of
+                                    // anonymous diamonds; the label is the whole point of
+                                    // a bookmark. Overflows the 10px flag deliberately.
+                                    Text {
+                                        x: 8
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: bookmarkFlag.modelData.label
+                                        color: Theme.mutedForeground
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontSizeTiny
+                                    }
+
                                     MouseArea {
                                         anchors.fill: parent
                                         // The flag is 10px; the target is a fingertip.
                                         anchors.margins: -14
                                         preventStealing: true
-                                        onClicked: EditorState.goToBookmark(parent.index)
+                                        pressAndHoldInterval: 400
+
+                                        property bool held: false
+
+                                        onPressed: held = false
+                                        onPressAndHold: {
+                                            held = true
+                                            bookmarkContextMenu.bookmarkIndex = bookmarkFlag.index
+                                            bookmarkContextMenu.bookmarkLabel = bookmarkFlag.modelData.label
+                                            bookmarkContextMenu.popup()
+                                        }
+                                        onClicked: if (!held) EditorState.goToBookmark(bookmarkFlag.index)
                                     }
                                 }
+                            }
+                        }
+
+                        // Beat / onset markers. Analysis itself is triggered from
+                        // AndroidEditActions; this lane only appears once a result is in
+                        // and the corresponding layer is switched on.
+                        Canvas {
+                            id: beatLane
+                            x: flick.contentX
+                            y: Theme.timelineRulerHeight + Theme.timelineBookmarkRowHeight
+                            width: flick.width
+                            height: root.beatLaneHeight
+                            visible: root.beatLaneVisible
+                            z: 1
+
+                            onPaint: root.paintBeatMarks(getContext("2d"), width, height, 1.0)
+                            onWidthChanged: requestPaint()
+                            onHeightChanged: requestPaint()
+                            onVisibleChanged: if (visible) requestPaint()
+
+                            Connections {
+                                target: root
+                                function onBeatDataChanged() { beatLane.requestPaint() }
+                                function onBeatGridOnChanged() { beatLane.requestPaint() }
+                                function onOnsetsOnChanged() { beatLane.requestPaint() }
+                                function onPxPerSecondChanged() { beatLane.requestPaint() }
+                                function onTimelineViewXChanged() { beatLane.requestPaint() }
                             }
                         }
                     }
@@ -652,7 +976,188 @@ Item {
                                         touchMode: true
                                     }
                                 }
+
+                                // Transition chrome. Same geometry as the desktop panel,
+                                // minus its DropArea — there is no drag-and-drop here, so
+                                // a tap on a bare overlap creates the crossfade instead.
+                                // No preventStealing: a pan across an overlap must still
+                                // reach the Flickable.
+                                Repeater {
+                                    model: root.tracks[trackRow.trackIndex].clips.length
+                                    delegate: Item {
+                                        id: transitionRegion
+                                        required property int index
+                                        readonly property int leftClipIndex: index
+                                        readonly property var leftClip:
+                                            root.tracks[trackRow.trackIndex].clips[leftClipIndex]
+                                        readonly property string trackType: root.tracks[trackRow.trackIndex].type
+                                        // transitionBetweenClips is a plain call with no
+                                        // notifier of its own, and adding a transition
+                                        // leaves the clip count — the Repeater's model —
+                                        // untouched, so this has to depend on tracks
+                                        // explicitly or the region never repaints.
+                                        readonly property var transitionData: {
+                                            void EditorState.tracks
+                                            return EditorState.transitionBetweenClips(
+                                                       trackRow.trackIndex, leftClipIndex)
+                                        }
+                                        readonly property bool hasTransition:
+                                            transitionData && Object.keys(transitionData).length > 0
+                                        readonly property bool transitionSelected:
+                                            EditorState.selectedTransitionTrack === trackRow.trackIndex
+                                            && EditorState.selectedTransitionLeftClip === leftClipIndex
+
+                                        // Nearest later clip that abuts or overlaps this one.
+                                        readonly property int partnerIndex: {
+                                            const clips = root.tracks[trackRow.trackIndex].clips
+                                            const left = leftClip
+                                            if (!left)
+                                                return -1
+                                            var best = -1
+                                            var bestStart = 1e12
+                                            for (var i = 0; i < clips.length; i++) {
+                                                if (i === leftClipIndex)
+                                                    continue
+                                                const right = clips[i]
+                                                if (right.start < left.start)
+                                                    continue
+                                                if (right.start - (left.start + left.duration) > 0.001)
+                                                    continue
+                                                if (right.start < bestStart) {
+                                                    bestStart = right.start
+                                                    best = i
+                                                }
+                                            }
+                                            return best
+                                        }
+                                        readonly property var rightClip: partnerIndex >= 0
+                                            ? root.tracks[trackRow.trackIndex].clips[partnerIndex]
+                                            : null
+                                        readonly property bool physicallyOverlapping:
+                                            leftClip && rightClip
+                                            && rightClip.start < (leftClip.start + leftClip.duration)
+                                        readonly property real regionStart: {
+                                            if (!leftClip || !rightClip)
+                                                return 0
+                                            if (hasTransition && transitionData.start !== undefined)
+                                                return transitionData.start
+                                            return physicallyOverlapping ? rightClip.start : 0
+                                        }
+                                        readonly property real regionEnd: {
+                                            if (!leftClip || !rightClip)
+                                                return 0
+                                            if (hasTransition && transitionData.end !== undefined)
+                                                return transitionData.end
+                                            return physicallyOverlapping
+                                                   ? leftClip.start + leftClip.duration : 0
+                                        }
+                                        readonly property bool showRegion:
+                                            (trackType === "video" || trackType === "shape"
+                                             || trackType === "text")
+                                            && leftClip && rightClip
+                                            && (physicallyOverlapping || hasTransition)
+                                            && regionEnd > regionStart
+
+                                        z: 10
+                                        visible: showRegion
+                                        x: regionStart * root.pxPerSecond
+                                        // Floored to a fingertip rather than the desktop's
+                                        // 8px, so a half-second crossfade is still tappable.
+                                        width: Math.max(Theme.androidIconButtonSize,
+                                                        (regionEnd - regionStart) * root.pxPerSecond)
+                                        y: Theme.clipSelectionRingWidth
+                                        height: parent.height - Theme.clipSelectionRingWidth * 2
+
+                                        Rectangle {
+                                            anchors.fill: parent
+                                            radius: Theme.radiusSm
+                                            color: Qt.rgba(Theme.transitionOverlap.r,
+                                                           Theme.transitionOverlap.g,
+                                                           Theme.transitionOverlap.b,
+                                                           transitionRegion.transitionSelected ? 0.85
+                                                           : (transitionRegion.hasTransition ? 0.65 : 0.35))
+                                            border.width: transitionRegion.transitionSelected ? 2 : 1
+                                            border.color: Theme.transitionOverlap
+
+                                            Canvas {
+                                                anchors.fill: parent
+                                                anchors.margins: 1
+                                                opacity: 0.35
+                                                onPaint: {
+                                                    const ctx = getContext("2d")
+                                                    ctx.clearRect(0, 0, width, height)
+                                                    ctx.strokeStyle = Theme.onMedia
+                                                    ctx.lineWidth = 1
+                                                    for (var x = -height; x < width; x += 6) {
+                                                        ctx.beginPath()
+                                                        ctx.moveTo(x, height)
+                                                        ctx.lineTo(x + height, 0)
+                                                        ctx.stroke()
+                                                    }
+                                                }
+                                                onWidthChanged: requestPaint()
+                                                onHeightChanged: requestPaint()
+                                            }
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: transitionRegion.hasTransition
+                                                      ? (transitionRegion.transitionData.label
+                                                         ? transitionRegion.transitionData.label.charAt(0)
+                                                         : "≫")
+                                                      : "≫"
+                                                color: Theme.onMedia
+                                                font.family: Theme.fontFamily
+                                                font.pixelSize: Theme.fontSizeTiny
+                                                font.weight: Font.Bold
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: {
+                                                if (transitionRegion.hasTransition)
+                                                    EditorState.selectTransition(trackRow.trackIndex,
+                                                                                 transitionRegion.leftClipIndex)
+                                                else
+                                                    EditorState.addTransition(trackRow.trackIndex,
+                                                                              transitionRegion.leftClipIndex,
+                                                                              "crossfade", 0.5)
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                        }
+                    }
+
+                    // Beat grid down the tracks. The 14px marker lane is pinned to the top
+                    // of the viewport, which is no help at all when the cut you are lining
+                    // up is a hundred pixels below it.
+                    Canvas {
+                        id: beatGridOverlay
+                        x: flick.contentX
+                        y: root.seekHeaderHeight
+                        width: flick.width
+                        height: root.totalTracksHeight()
+                        visible: root.beatLaneVisible
+                        // Same z as the track column, declared after it: over the clips,
+                        // but still under the seek strip, which slides down over the
+                        // tracks whenever they are scrolled vertically.
+                        z: 1
+
+                        onPaint: root.paintBeatMarks(getContext("2d"), width, height, 0.35)
+                        onWidthChanged: requestPaint()
+                        onHeightChanged: requestPaint()
+                        onVisibleChanged: if (visible) requestPaint()
+
+                        Connections {
+                            target: root
+                            function onBeatDataChanged() { beatGridOverlay.requestPaint() }
+                            function onBeatGridOnChanged() { beatGridOverlay.requestPaint() }
+                            function onOnsetsOnChanged() { beatGridOverlay.requestPaint() }
+                            function onPxPerSecondChanged() { beatGridOverlay.requestPaint() }
+                            function onTimelineViewXChanged() { beatGridOverlay.requestPaint() }
                         }
                     }
 

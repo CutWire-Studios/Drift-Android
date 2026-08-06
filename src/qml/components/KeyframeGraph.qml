@@ -18,6 +18,13 @@ Item {
     property real labelsWidth: Theme.trackLabelsWidth
     property string propertiesTab: ""
 
+    // Touch targets. Defaulted from the platform rather than passed in, because the
+    // desktop timeline instantiates this lane without knowing the property exists.
+    property bool touchMode: Theme.touchUi
+    // The mobile shell hands this lane a 72px gutter, not the desktop's 130: the header
+    // label and the two beat buttons cannot share a line that narrow.
+    readonly property bool narrowGutter: labelsWidth < 120
+
     readonly property bool hasClip: EditorState.selectedTrack >= 0 && EditorState.selectedClip >= 0
     readonly property var clip: {
         void EditorState.selectedClipData
@@ -229,7 +236,12 @@ Item {
 
     // A handle with no length still needs to be grabbable, so an unset tangent is drawn at a
     // default reach into its segment rather than sitting exactly on the key.
-    readonly property real defaultHandleSeconds: 0.12
+    // On touch the grips are 32px wide, so at low zoom the in- and out-handles of the same
+    // key would land on top of each other and on the key dot between them. Reaching a fixed
+    // number of pixels instead keeps all three separately grabbable at any zoom.
+    readonly property real defaultHandleSeconds: touchMode
+                                                 ? Math.max(0.12, 36 / Math.max(1, pxPerSecond))
+                                                 : 0.12
     function handleSeconds(point, outgoing) {
         const raw = outgoing ? (point.outDx || 0) : (point.inDx || 0)
         if (Math.abs(raw) > 1e-6)
@@ -322,6 +334,28 @@ Item {
         focusedProp = entry.prop
     }
 
+    // A long press that lands on a key or a grip belongs to that handle. The handles hold
+    // the press with a passive grab, which does not stop it reaching the background below
+    // them, so the background has to check for itself rather than rely on the z order.
+    function handleNear(px, py) {
+        const r = 18
+        for (let i = 0; i < keyHandles.length; ++i) {
+            const h = keyHandles[i]
+            if (Math.abs(xForSeconds(h.seconds) - px) < r
+                && Math.abs(yForValue(h.value, series[h.seriesIndex]) - py) < r)
+                return true
+        }
+        for (let t = 0; t < tangentHandles.length; ++t) {
+            const p = tangentHandles[t].point
+            const outgoing = tangentHandles[t].outgoing
+            const entry = series[focusedIndex]
+            if (Math.abs(xForSeconds(p.seconds + handleSeconds(p, outgoing)) - px) < r
+                && Math.abs(yForValue(handleValue(p, outgoing), entry) - py) < r)
+                return true
+        }
+        return false
+    }
+
     // Absolute timeline X — same mapping as clips on the track.
     function xForSeconds(seconds) {
         return seconds * pxPerSecond
@@ -353,10 +387,13 @@ Item {
         Item {
             width: root.labelsWidth
             height: parent.height
+            // A phone gutter can run out of room for the chips; cutting them off is far
+            // better than painting them over the graph next door.
+            clip: root.narrowGutter
 
             Column {
                 anchors.fill: parent
-                anchors.margins: 6
+                anchors.margins: root.narrowGutter ? 4 : 6
                 spacing: 4
 
                 Row {
@@ -364,6 +401,9 @@ Item {
                     spacing: 4
 
                     Text {
+                        // The lane already announces itself through the timeline's
+                        // "Keyframes" toggle, so on a phone the two buttons take the line.
+                        visible: !root.narrowGutter
                         anchors.verticalCenter: parent.verticalCenter
                         text: qsTr("Keyframes")
                         color: Theme.mutedForeground
@@ -377,8 +417,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         glyph: Theme.icons.music
                         variant: "text"
-                        buttonSize: 20
-                        iconSize: 14
+                        buttonSize: root.narrowGutter ? 30 : 20
+                        iconSize: root.narrowGutter ? 18 : 14
                         active: EditorState.beatGridVisible
                         enabled: !EditorState.beatAnalysisRunning
                         tooltip: EditorState.beatAnalysisRunning
@@ -398,8 +438,8 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         glyph: Theme.icons.audioLines
                         variant: "text"
-                        buttonSize: 20
-                        iconSize: 14
+                        buttonSize: root.narrowGutter ? 30 : 20
+                        iconSize: root.narrowGutter ? 18 : 14
                         active: EditorState.onsetsVisible
                         enabled: !EditorState.beatAnalysisRunning
                         tooltip: EditorState.beatAnalysisRunning
@@ -425,8 +465,8 @@ Item {
                         delegate: ThemedChip {
                             required property var modelData
                             text: modelData.label
-                            chipHeight: 18
-                            horizontalPadding: 3
+                            chipHeight: root.narrowGutter ? 26 : 18
+                            horizontalPadding: root.narrowGutter ? 6 : 3
                             accentColor: modelData.color
                             // A property whose keyframes are switched off in the inspector still
                             // has a curve to look at; it just is not driving anything.
@@ -456,8 +496,11 @@ Item {
                     width: parent.width
                     wrapMode: Text.WordWrap
                     text: {
-                        const keys = root.keyCount === 0 ? qsTr("No keyframes")
-                                                         : (root.keyCount + qsTr(" keyframe(s)"))
+                        // "3 keyframe(s)" needs three wrapped lines in a phone gutter.
+                        const keys = root.narrowGutter
+                                     ? qsTr("%n key(s)", "", root.keyCount)
+                                     : (root.keyCount === 0 ? qsTr("No keyframes")
+                                                            : (root.keyCount + qsTr(" keyframe(s)")))
                         if (!EditorState.beatGridVisible || !root.analyzed)
                             return keys
                         // The detector publishes no bpm when the tempo estimate was not
@@ -732,26 +775,50 @@ Item {
                         z: 1
                         acceptedButtons: Qt.LeftButton
                         onDoubleClicked: function (mouse) { root.addKeyAt(mouse.x) }
+
+                        // Landing a double-tap in the gaps between fingertip-sized key
+                        // targets is a coin flip, so touch inserts on a long press instead.
+                        TapHandler {
+                            enabled: root.touchMode
+                            onLongPressed: {
+                                if (!root.handleNear(point.position.x, point.position.y))
+                                    root.addKeyAt(point.position.x)
+                            }
+                        }
                     }
 
                     Repeater {
                         model: root.keyHandles
-                        delegate: Rectangle {
+                        delegate: Item {
                             id: keyDot
                             required property var modelData
                             readonly property var entry: root.series[modelData.seriesIndex]
-                            width: 10
-                            height: 10
-                            rotation: 45
-                            radius: 1
-                            color: modelData.color
-                            border.width: 1
-                            border.color: "#ffffff"
-                            opacity: (root.curveEditing && !root.isFocused(modelData.seriesIndex))
-                                     ? 0.4 : 1.0
+                            readonly property bool focused: root.isFocused(modelData.seriesIndex)
+
+                            // The 10px diamond is the mark, not the target: the handlers live
+                            // on this Item, and a child cannot be grabbed outside its parent's
+                            // bounds. Same shape as the speed editor's knobs.
+                            width: root.touchMode ? 36 : 10
+                            height: width
+                            opacity: (root.curveEditing && !focused) ? 0.4 : 1.0
                             x: root.xForSeconds(modelData.seconds) - width / 2 + dragDx
                             y: root.yForValue(modelData.value, entry) - height / 2 + dragDy
-                            z: 2
+                            // Fingertip targets from two overlaid curves overlap, so the curve
+                            // being edited takes the press — its keys are the ones whose
+                            // tangents are armed. Both stay under the grips (z 4), which is
+                            // where a handle folded back over its own key has to win.
+                            z: (root.touchMode && focused) ? 3 : 2
+
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 10
+                                height: 10
+                                rotation: 45
+                                radius: 1
+                                color: keyDot.modelData.color
+                                border.width: 1
+                                border.color: "#ffffff"
+                            }
 
                             // Offsets rather than direct x/y writes, which would
                             // clobber the bindings above for good.
@@ -859,16 +926,24 @@ Item {
                             property real dragDx: 0
                             property real dragDy: 0
 
-                            Rectangle {
+                            Item {
                                 id: grip
-                                width: 8
-                                height: 8
-                                radius: 4
-                                color: Theme.panelBackground
-                                border.width: 1.5
-                                border.color: tangent.modelData.color
+                                // Transparent target around an 8px dot, for the same reason
+                                // the key dots are built that way.
+                                width: root.touchMode ? 32 : 8
+                                height: width
                                 x: tangent.tipX - width / 2 + tangent.dragDx
                                 y: tangent.tipY - height / 2 + tangent.dragDy
+
+                                Rectangle {
+                                    anchors.centerIn: parent
+                                    width: 8
+                                    height: 8
+                                    radius: 4
+                                    color: Theme.panelBackground
+                                    border.width: 1.5
+                                    border.color: tangent.modelData.color
+                                }
 
                                 HoverHandler { cursorShape: Qt.PointingHandCursor }
 
@@ -959,6 +1034,11 @@ Item {
         anchors.bottom: parent.bottom
         height: 5
         z: 100
+        // Off on touch: a 5px hover-lit strip is neither visible nor grabbable with a
+        // finger, while widening it would swallow drags aimed at the keys and grips that
+        // sit right above it. The mobile shell binds laneHeight to the panel instead, and
+        // a drag here would overwrite that binding for good.
+        visible: !root.touchMode
         color: resizeHover.hovered || resizeDrag.active ? Theme.primary : "transparent"
         opacity: 0.6
 

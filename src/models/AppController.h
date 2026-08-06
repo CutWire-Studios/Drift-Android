@@ -79,6 +79,7 @@ class AppController : public QObject
     Q_PROPERTY(bool redoAvailable READ redoAvailable NOTIFY undoStackChanged)
     Q_PROPERTY(bool exportInProgress READ exportInProgress NOTIFY exportInProgressChanged)
     Q_PROPERTY(double exportProgress READ exportProgress NOTIFY exportProgressChanged)
+    Q_PROPERTY(bool canShareExport READ canShareExport NOTIFY canShareExportChanged)
     Q_PROPERTY(bool subtitleGenerating READ subtitleGenerating NOTIFY subtitleGeneratingChanged)
     // Id of the asset whose replacement is being probed, empty when idle. Only that one bin row
     // goes busy: the rest of the panel stays usable, and the wait belongs to the row the user
@@ -194,6 +195,7 @@ public:
     bool redoAvailable() const { return m_undoStack.canRedo(); }
     bool exportInProgress() const { return m_exportInProgress; }
     double exportProgress() const;
+    bool canShareExport() const;
     bool subtitleGenerating() const { return m_subtitleGenerating; }
     QString replacingAssetId() const { return m_replacingAssetId; }
     double subtitleGenProgress() const { return m_subtitleGenProgress; }
@@ -676,6 +678,10 @@ public:
     // When reopenLastProject is on: restore recovery silently, else load lastSessionPath.
     // Returns true if a restore/load was started (caller should skip RecoveryDialog).
     Q_INVOKABLE bool restoreLastSessionIfEnabled();
+    // The autosave timer and aboutToQuit cover desktop, but Android never emits aboutToQuit when
+    // the OS reclaims a backgrounded process — and backgrounding is how a phone app normally ends.
+    // The shell calls this on the way out so the floor is the last edit, not the last 15s tick.
+    Q_INVOKABLE void flushRecoverySnapshot();
     Q_INVOKABLE QVariantList exportPresets() const; // legacy scale ids/labels
     Q_INVOKABLE QVariantList exportScaleOptions() const;
     // Frame rate choices; the "project" entry is labelled with the current project fps.
@@ -696,6 +702,10 @@ public:
     Q_INVOKABLE void exportWithPreset(const QUrl &outputUrl, const QString &presetId);
     Q_INVOKABLE void exportWithSettings(const QUrl &outputUrl, const QVariantMap &settings);
     Q_INVOKABLE void cancelExport();
+    // Copies the finished export into the shared media collection and hands it to the system share
+    // sheet. Deferred to this point rather than done as part of the export because it is a second
+    // full copy of the video, and most exports are never shared.
+    Q_INVOKABLE void shareLastExport();
     Q_INVOKABLE QUrl fileUrl(const QString &path) const;
     Q_INVOKABLE QString imageUrl(const QString &path) const;
     // Same as imageUrl but requests a single frame of a filmstrip strip (see DriftImageProvider).
@@ -725,6 +735,7 @@ signals:
     void undoStackChanged();
     void exportInProgressChanged();
     void exportProgressChanged();
+    void canShareExportChanged();
     void subtitleGeneratingChanged();
     void subtitleGenProgressChanged();
     void subtitleGenStatusChanged();
@@ -932,8 +943,13 @@ protected:
     bool m_exportInProgress = false;
     double m_exportProgress = 0.0;
     QAtomicInt m_exportCancel = 0;
+    QUrl m_lastExportUrl;
+    QString m_lastExportName;
     bool m_subtitleGenerating = false;
     QString m_replacingAssetId;
+    // Android: content:// URI the replacement media was copied out of, carried across the probe
+    // so the asset can record where its copy came from.
+    QString m_replacingSourceUri;
     double m_subtitleGenProgress = 0.0;
     QString m_subtitleGenStatus;
     QAtomicInt m_subtitleGenCancel = 0;
