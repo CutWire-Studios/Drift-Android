@@ -582,14 +582,31 @@ GpuFrameTexture renderToTexture(const GpuScene &scene)
     if (scene.canvasSize.isEmpty())
         return out;
 
-#ifdef Q_OS_ANDROID
-    // Shared FBO textures are unreliable under Qt's Android ANGLE backend; read
-    // back and let PreviewItem upload a QImage instead (same path as export).
-    out.image = render(scene);
-    out.size = out.image.size();
-    return out;
-#else
     GlRuntime &rt = runtime();
+
+#ifdef Q_OS_ANDROID
+    // Handing over a texture *name* only works while both contexts are in one share
+    // group; a driver that refuses sharing would leave the preview black rather than
+    // merely slow, so fall back to a readback in that case.
+    if (!rt.sharesWithGuiContext()) {
+        rt.exec([&] {
+            GlTarget canvas = rt.acquireTarget(scene.canvasSize.width(), scene.canvasSize.height());
+            if (!canvas.isValid())
+                return;
+
+            composeOnGlThread(rt, scene, canvas);
+
+            // Straight out of the FBO, premultiplied, which is exactly what the scene
+            // graph uploads: render()'s un-premultiply to RGBA8888 and PreviewItem's
+            // convert back would both be pure waste on this path.
+            out.image = canvas.fbo->toImage(false);
+            out.size = out.image.size();
+            rt.releaseTarget(std::move(canvas));
+        });
+        return out;
+    }
+#endif
+
     rt.exec([&] {
         GlTarget &canvas = rt.acquirePresentTarget(scene.canvasSize.width(), scene.canvasSize.height());
         if (!canvas.isValid())
@@ -605,7 +622,6 @@ GpuFrameTexture renderToTexture(const GpuScene &scene)
         out.size = canvas.size();
     });
     return out;
-#endif
 }
 
 } // namespace GpuCompositor

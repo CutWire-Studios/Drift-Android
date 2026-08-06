@@ -5,13 +5,17 @@
 
 namespace {
 #ifdef Q_OS_ANDROID
-// Android preview readbacks every frame (ANGLE cannot share FBO textures). A 100 ms
-// deadline drops every frame on mid-range phones and leaves the playhead running over
-// a frozen/blank canvas. Allow a full second so slow composites still display.
+// How late a finished frame may be and still be worth showing. A phone can miss the
+// desktop 100 ms deadline on every single frame, and dropping them all leaves the
+// playhead running over a frozen canvas, which is worse than a late picture.
 constexpr drift::TimeUs kMaxPreviewFrameStalenessUs = 1'000'000;
 #else
 constexpr drift::TimeUs kMaxPreviewFrameStalenessUs = 100'000;
 #endif
+// How late a frame may be before the adaptive scaler treats it as a miss. Kept at the
+// desktop deadline on every platform: tying it to the display allowance above meant a
+// phone one second behind still counted as on time and never stepped its scale down.
+constexpr drift::TimeUs kAdaptiveLatenessUs = 100'000;
 constexpr double kAdaptiveScaleMin = 0.25;
 constexpr double kAdaptiveScaleStepDown = 0.75;
 constexpr double kAdaptiveScaleStepUp = 1.15;
@@ -168,10 +172,10 @@ void CompositorService::onWorkerFrameReady(const GpuFrameTexture &frame, drift::
 
     // Quality mode shows every frame it renders, however far behind the request
     // it finished; only fast mode discards frames the playhead has run past.
-    const bool stale = m_dropLateFrames && latest > timeUs
-        && latest - timeUs > kMaxPreviewFrameStalenessUs;
+    const drift::TimeUs lateBy = latest > timeUs ? latest - timeUs : 0;
+    const bool stale = m_dropLateFrames && lateBy > kMaxPreviewFrameStalenessUs;
     if (m_dropLateFrames)
-        noteFrameStale(stale);
+        noteFrameStale(lateBy > kAdaptiveLatenessUs);
     if (!stale && frame.isValid())
         emit frameReady(frame);
 

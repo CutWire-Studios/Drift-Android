@@ -7,9 +7,10 @@
 
 class PlaybackEngine;
 
-// Displays the compositor's output. On desktop the frame is already a GL texture
-// in the shared context and is wrapped with fromNative. On Android the compositor
-// publishes a QImage (ANGLE texture sharing is unreliable) which is uploaded here.
+// Displays the compositor's output. The frame is normally already a GL texture in
+// the shared context, so it is wrapped with fromNative — no copy, no upload. Only
+// when the driver refused to share contexts does the compositor publish a QImage
+// instead, which is uploaded here per frame.
 //
 // Frames are pulled from PlaybackEngine in C++ — QML cannot reliably assign QImage
 // between properties, which left the Android preview permanently blank.

@@ -96,9 +96,10 @@ QSGNode *PreviewItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
     if (needNewWrapper) {
         QSGTexture *texture = nullptr;
         if (hasImage) {
-            // Qt Quick's GLES/ANGLE path needs premultiplied ARGB32. RGBA8888 (and
+            // Qt Quick's GLES path needs premultiplied ARGB32. RGBA8888 (and
             // TextureCanUseAtlas) silently produced a blank node on Android even when
-            // the compositor handed over a valid QImage.
+            // the compositor handed over a valid QImage. The compositor already reads
+            // back in this format, so the convert below normally does not run.
             QImage upload = m_image;
             if (upload.format() != QImage::Format_ARGB32_Premultiplied)
                 upload = upload.convertToFormat(QImage::Format_ARGB32_Premultiplied);

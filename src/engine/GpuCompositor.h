@@ -86,9 +86,9 @@ struct GpuFrameTexture
 {
     unsigned int textureId = 0;
     QSize size;
-    // Filled on Android: ANGLE/Vulkan context sharing often yields a black
-    // fromNative() preview even when the FBO itself composites correctly
-    // (selftest readback proves the GPU path). Desktop keeps texture-only.
+    // Readback fallback, only ever filled on Android and only when the driver
+    // refused to put the compositor's context in the scene graph's share group,
+    // which makes textureId unusable there. Premultiplied ARGB32, ready to upload.
     QImage image;
 
     bool isValid() const

@@ -201,7 +201,8 @@ bool GlRuntime::initGlObjects()
     // Share with the Qt Quick scene-graph context so composited textures can be
     // handed to the preview item without a readback. Requires
     // Qt::AA_ShareOpenGLContexts, set in main() before the QApplication.
-    if (QOpenGLContext *shared = QOpenGLContext::globalShareContext())
+    QOpenGLContext *const shared = QOpenGLContext::globalShareContext();
+    if (shared)
         context->setShareContext(shared);
     if (!context->create()) {
         qWarning("GlRuntime: failed to create OpenGL context");
@@ -209,6 +210,10 @@ bool GlRuntime::initGlObjects()
         surface.reset();
         return false;
     }
+
+    // create() succeeds even when the driver refuses to share, dropping the request
+    // on the floor, so whether sharing actually happened has to be read back.
+    m_sharesWithGui = shared && QOpenGLContext::areSharing(context.get(), shared);
 
     if (!context->makeCurrent(surface.get())) {
         qWarning("GlRuntime: makeCurrent failed on the GL thread");
@@ -221,6 +226,26 @@ bool GlRuntime::initGlObjects()
     if (!gl) {
         qWarning("GlRuntime: OpenGL extra functions unavailable");
         context->doneCurrent();
+        return false;
+    }
+
+    // setVersion() above is a request; the driver decides. Everything after this line
+    // assumes ES 3.0 / GL 3.3 — the ES 3.0 enums hand-defined at the top of this file,
+    // the `#version 300 es` / `330 core` shaders, glGenVertexArrays, glFenceSync. On an
+    // older context each of those fails separately and the user just gets a blank
+    // preview, so refuse the context here with something that names the actual cause.
+    const bool isEs = context->isOpenGLES();
+    const int major = context->format().majorVersion();
+    const int minor = context->format().minorVersion();
+    if (isEs ? major < 3 : (major < 3 || (major == 3 && minor < 3))) {
+        qCritical("GlRuntime: this device reports OpenGL%s %d.%d; Drift needs OpenGL ES 3.0 or "
+                  "OpenGL 3.3. GPU rendering is unavailable. (vendor: %s, renderer: %s)",
+                  isEs ? " ES" : "", major, minor,
+                  reinterpret_cast<const char *>(gl->glGetString(GL_VENDOR)),
+                  reinterpret_cast<const char *>(gl->glGetString(GL_RENDERER)));
+        context->doneCurrent();
+        context.reset();
+        surface.reset();
         return false;
     }
 
@@ -292,6 +317,11 @@ bool GlRuntime::ensureReady()
 bool GlRuntime::available()
 {
     return ensureReady();
+}
+
+bool GlRuntime::sharesWithGuiContext()
+{
+    return ensureReady() && m_sharesWithGui;
 }
 
 bool GlRuntime::exec(const std::function<void()> &fn)

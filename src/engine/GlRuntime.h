@@ -99,6 +99,12 @@ public:
     // True when a context could be created. Safe to call from any thread.
     bool available();
 
+    // True when this context landed in the Qt Quick scene graph's share group, so a
+    // texture *name* from here resolves in the scene graph's context. Qt::AA_Share-
+    // OpenGLContexts only requests that: if the driver refuses, QOpenGLContext::create()
+    // quietly falls back to an unshared context and the name would sample as black.
+    bool sharesWithGuiContext();
+
     QOpenGLExtraFunctions *functions();
 
     // Compiled programs are cached by key + source signature.
@@ -139,6 +145,7 @@ private:
     QMutex m_initMutex;
     bool m_initTried = false;
     bool m_ok = false;
+    bool m_sharesWithGui = false;
     QThread *m_glThread = nullptr;
     QObject *m_glOwner = nullptr; // lives on m_glThread; the invoke target
 
