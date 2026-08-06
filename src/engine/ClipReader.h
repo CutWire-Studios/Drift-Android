@@ -77,6 +77,9 @@ private:
     bool ensureAudioDecoder();
     bool openSoftwareVideoDecoder();
     bool tryOpenHardwareDecoder();
+#ifdef Q_OS_ANDROID
+    bool tryOpenMediaCodecDecoder();
+#endif
     bool hardwareDecodeIsWorthIt() const;
     void teardownVideoDecoder();
     bool fallbackFromHardwareDecoder();
@@ -125,6 +128,12 @@ private:
     int m_outputSampleRate = 48000;
     bool m_hwAccelActive = false;
     bool m_hwAccelDisabled = false; // sticky after a failed VAAPI decode
+    // Android MediaCodec decoding into ordinary system-memory frames. Never a hwaccel in the
+    // AV_PIX_FMT_FLAG_HWACCEL sense — m_hwAccelActive and the VPP scaler below stay VAAPI-only —
+    // but it changes two things the decode loop cannot infer: send_packet may legitimately
+    // return EAGAIN, and a decode error is recoverable by reopening in software. Always false
+    // off Android.
+    bool m_mediaCodecActive = false;
     AVPixelFormat m_hwPixFmt = AV_PIX_FMT_NONE;
 
     // scale_vaapi graph, rebuilt when the decode size or the decoder's frame

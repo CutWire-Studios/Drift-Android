@@ -16,6 +16,11 @@ struct MediaAsset
 {
     QString id;
     QString path;
+    // Android only: the content:// URI the media was imported from. `path` is a copy this app
+    // made of it, and app storage is not forever — a device running low deletes app data, and
+    // the user can wipe it from Settings — so the URI is kept as the way back to the bytes.
+    // Empty on desktop, where `path` is the user's own file.
+    QString sourceUri;
     QString name;
     MediaKind kind = MediaKind::Other;
     TimeUs durationUs = 0;

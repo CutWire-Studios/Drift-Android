@@ -12,6 +12,16 @@ namespace drift {
 class Project;
 }
 
+// A picked file once it is readable by the media pipeline.
+struct ImportSource
+{
+    // Real filesystem path. On Android a SAF document has none, so it is a copy this app made.
+    QString path;
+    // The content:// URI `path` was copied from, empty unless it came from the SAF picker.
+    // Kept on the asset so the copy can be re-fetched if app storage is ever reclaimed.
+    QString sourceUri;
+};
+
 // Media bin model backed by the project's asset table.
 class AssetLibrary : public QAbstractListModel
 {
@@ -104,9 +114,17 @@ signals:
     void assetSourceProbed(const QString &assetId, const drift::MediaAsset &filled, bool ok);
 
 private:
-    void importFiles(const QStringList &paths);
+    void importFiles(const QList<ImportSource> &sources);
     void setImporting(bool importing);
     bool m_importing = false;
+
+    // Android: re-materializes assets whose copy is gone — evicted, cache-cleared, or moved out
+    // of the old cache location by an older build — from the content:// URI they were imported
+    // from. No-op everywhere else.
+    void restoreMissingSources();
+    void startRestoreJob(const QString &assetId, const QString &sourceUri);
+    // Moves an asset and every clip bound to it onto a different file for the same media.
+    void repointAssetSource(const QString &assetId, const QString &path);
 
     bool containsPath(const QString &path) const;
     void refreshMediaAt(int index);

@@ -671,6 +671,9 @@ QJsonObject assetToJson(const MediaAsset &asset)
     };
     if (asset.hasAudioKnown)
         object.insert(QStringLiteral("hasAudio"), asset.hasAudio);
+    // Only ever set on Android, so desktop projects keep the exact shape they had.
+    if (!asset.sourceUri.isEmpty())
+        object.insert(QStringLiteral("sourceUri"), asset.sourceUri);
     return object;
 }
 
@@ -683,6 +686,7 @@ MediaAsset assetFromJsonV2(const QJsonObject &object)
     asset.durationUs = static_cast<TimeUs>(object.value(QStringLiteral("durationUs")).toDouble());
     asset.durationLabel = object.value(QStringLiteral("duration")).toString();
     asset.path = object.value(QStringLiteral("path")).toString();
+    asset.sourceUri = object.value(QStringLiteral("sourceUri")).toString();
     asset.width = object.value(QStringLiteral("width")).toInt();
     asset.height = object.value(QStringLiteral("height")).toInt();
     asset.fps = object.value(QStringLiteral("fps")).toDouble();

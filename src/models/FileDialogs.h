@@ -26,4 +26,15 @@ public:
                               const QString &suggestedName = QString(),
                               const QString &suffix = QString(),
                               const QString &initialDirectory = QString()) const;
+
+    // Android share sheet (ACTION_SEND) for a content:// URI — a finished export as
+    // Exporter::publishToGallery left it in the media library. `mimeType` is read from the
+    // provider when empty. False on desktop, and for anything that is not a content:// URI:
+    // the sheet can only hand another app a URI it is allowed to read.
+    Q_INVOKABLE bool shareFile(const QUrl &url, const QString &mimeType = QString()) const;
+
+    // The file the app was launched with (ACTION_VIEW on a .drift project from a file manager),
+    // or an empty URL. Consumed by the first call: the activity keeps its launch intent for the
+    // life of the process, so an unconsumed one would reopen the project on every check.
+    Q_INVOKABLE QUrl takeLaunchUrl();
 };

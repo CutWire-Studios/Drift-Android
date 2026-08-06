@@ -2,9 +2,11 @@
 
 #include "core/Project.h"
 
+#include "engine/AndroidUri.h"
 #include "engine/MediaProbe.h"
 #include "engine/MediaThumbnail.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -22,69 +24,172 @@
 
 namespace {
 
-// FFmpeg and the rest of the media pipeline need real filesystem paths. On Android the SAF
-// picker returns content:// URIs; Qt can read them via QFile, but avformat cannot. Copy into
-// app cache once so the rest of the code stays path-based. Desktop file:// URLs pass through.
-QString materializeImportUrl(const QUrl &url)
+#ifdef Q_OS_ANDROID
+
+constexpr qint64 kChunk = 1024 * 1024;
+
+// Copies of SAF documents. AppDataLocation and not CacheLocation: a saved project points
+// straight at these files, and Android reclaims the cache under storage pressure while
+// Settings > Clear cache wipes it outright.
+QString importsDir()
 {
-    if (url.isLocalFile()) {
-        const QString path = url.toLocalFile();
-        return QFileInfo::exists(path) ? QFileInfo(path).absoluteFilePath() : QString();
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+           + QStringLiteral("/imports");
+}
+
+// Where migrateLegacyImports() parks copies made by a build that materialized into the cache.
+// They keep their old file names because that is all a project saved by that build recorded.
+QString legacyImportsDir()
+{
+    return importsDir() + QStringLiteral("/legacy");
+}
+
+// Builds before this one materialized into CacheLocation and threw the content:// URI away, so
+// a cache wipe left every saved project pointing at bytes that no longer existed anywhere.
+// Move what is still there somewhere durable; restoreMissingSources() repoints the projects.
+void migrateLegacyImports()
+{
+    QDir stale(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+               + QStringLiteral("/imports"));
+    if (!stale.exists())
+        return;
+
+    const QString destDir = legacyImportsDir();
+    if (!QDir().mkpath(destDir)) {
+        qWarning("import: cannot create %s", qPrintable(destDir));
+        return;
     }
 
-    if (url.scheme().compare(QLatin1String("content"), Qt::CaseInsensitive) != 0)
-        return {};
-
-    const QString uri = url.toString(QUrl::FullyEncoded);
-    QFile src(uri);
-    if (!src.open(QIODevice::ReadOnly)) {
-        qWarning("import: cannot open %s (%s)", qPrintable(uri), qPrintable(src.errorString()));
-        return {};
+    for (const QString &name : stale.entryList(QDir::Files)) {
+        const QString from = stale.filePath(name);
+        const QString to = destDir + QLatin1Char('/') + name;
+        if (QFileInfo::exists(to))
+            QFile::remove(from);
+        else
+            QFile::rename(from, to);
     }
+    QDir().rmdir(stale.absolutePath());
+}
 
-    QString name = QFileInfo(uri).fileName();
+// Deletes a copy this app made, and the per-file directory holding it. Anything else on disk is
+// left alone — on desktop an asset points at the user's own file and never matches.
+void discardMaterializedCopy(const QString &path)
+{
+    const QString root = importsDir();
+    if (path.isEmpty() || !path.startsWith(root + QLatin1Char('/')))
+        return;
+
+    QFile::remove(path);
+    const QString dir = QFileInfo(path).absolutePath();
+    if (dir != root && dir != legacyImportsDir())
+        QDir().rmdir(dir); // no-op unless that was the last file in it
+}
+
+QString sanitizedFileName(QString name)
+{
     name.replace(QLatin1Char('/'), QLatin1Char('_'));
     name.replace(QLatin1Char('\\'), QLatin1Char('_'));
     if (name.isEmpty() || name == QLatin1String(".") || name == QLatin1String(".."))
         name = QStringLiteral("import.bin");
+    return name;
+}
 
-    const QString destDir =
-        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/imports");
-    if (!QDir().mkpath(destDir)) {
-        qWarning("import: cannot create cache dir %s", qPrintable(destDir));
+#else
+
+inline void migrateLegacyImports() {}
+inline void discardMaterializedCopy(const QString &) {}
+
+#endif // Q_OS_ANDROID
+
+// FFmpeg and the rest of the media pipeline need real filesystem paths. On Android the SAF
+// picker returns content:// URIs; Qt can read them via QFile, but avformat cannot. Copy into
+// app storage once so the rest of the code stays path-based. Desktop file:// URLs pass through.
+ImportSource materializeImportUrl(const QUrl &url)
+{
+    if (url.isLocalFile()) {
+        const QString path = url.toLocalFile();
+        if (!QFileInfo::exists(path))
+            return {};
+        return {QFileInfo(path).absoluteFilePath(), {}};
+    }
+
+#ifdef Q_OS_ANDROID
+    if (!AndroidUri::isContentUri(url))
+        return {};
+
+    const QString uri = url.toString(QUrl::FullyEncoded);
+    std::unique_ptr<QFile> src = AndroidUri::openForRead(url);
+    if (!src) {
+        qWarning("import: cannot open %s", qPrintable(uri));
         return {};
     }
 
-    // Stable name per URI so re-importing the same document reuses the cached copy.
+    // The grant that came with the picker result dies with the process, which would make the URI
+    // stored on the asset worthless the next time the project is opened.
+    AndroidUri::takePersistableReadPermission(url);
+
+    // The same file picked through Photos, Files and a cloud provider arrives as three unrelated
+    // URIs, so the URI cannot key the copy: the head of the stream and its length can, and the
+    // head is a chunk of the copy that is about to happen anyway.
+    const QByteArray head = src->read(kChunk);
+    if (head.isEmpty() && src->error() != QFile::NoError) {
+        qWarning("import: read failed for %s (%s)", qPrintable(uri), qPrintable(src->errorString()));
+        return {};
+    }
+    QCryptographicHash key(QCryptographicHash::Sha1);
+    key.addData(head);
+    key.addData(QByteArray::number(src->size()));
+
+    // One directory per file so the copy can keep the document's real name — the bin, the clip
+    // labels and the export default all show it, and probeAsset reads the kind off its suffix.
+    const QString destDir = importsDir() + QLatin1Char('/')
+                            + QString::fromLatin1(key.result().left(8).toHex());
     const QString destPath =
-        destDir + QLatin1Char('/') + QString::number(qHash(uri), 16) + QLatin1Char('_') + name;
-    if (QFileInfo::exists(destPath) && QFileInfo(destPath).size() > 0)
-        return destPath;
+        destDir + QLatin1Char('/') + sanitizedFileName(AndroidUri::displayName(url));
+    if (QFileInfo::exists(destPath))
+        return {destPath, uri};
 
-    QFile dst(destPath);
-    if (!dst.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        qWarning("import: cannot write %s (%s)", qPrintable(destPath), qPrintable(dst.errorString()));
+    if (!QDir().mkpath(destDir)) {
+        qWarning("import: cannot create %s", qPrintable(destDir));
         return {};
     }
 
-    constexpr qint64 kChunk = 1024 * 1024;
-    while (!src.atEnd()) {
-        const QByteArray chunk = src.read(kChunk);
-        if (chunk.isEmpty() && src.error() != QFile::NoError) {
-            qWarning("import: read failed for %s (%s)", qPrintable(uri), qPrintable(src.errorString()));
-            dst.close();
-            QFile::remove(destPath);
+    // Copy aside and rename, so a process death mid-copy cannot leave a truncated file that
+    // every later import of the same media would reuse.
+    const QString partPath = destPath + QStringLiteral(".part");
+    QFile dst(partPath);
+    if (!dst.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qWarning("import: cannot write %s (%s)", qPrintable(partPath), qPrintable(dst.errorString()));
+        return {};
+    }
+
+    QByteArray chunk = head;
+    while (!chunk.isEmpty()) {
+        if (dst.write(chunk) != chunk.size()) {
+            qWarning("import: write failed for %s (%s)", qPrintable(partPath),
+                     qPrintable(dst.errorString()));
+            dst.remove();
             return {};
         }
-        if (dst.write(chunk) != chunk.size()) {
-            qWarning("import: write failed for %s (%s)", qPrintable(destPath),
-                     qPrintable(dst.errorString()));
-            dst.close();
-            QFile::remove(destPath);
+        chunk = src->read(kChunk);
+        if (chunk.isEmpty() && src->error() != QFile::NoError) {
+            qWarning("import: read failed for %s (%s)", qPrintable(uri),
+                     qPrintable(src->errorString()));
+            dst.remove();
             return {};
         }
     }
-    return destPath;
+
+    dst.close();
+    if (!dst.rename(destPath)) {
+        qWarning("import: cannot finish %s (%s)", qPrintable(destPath), qPrintable(dst.errorString()));
+        dst.remove();
+        return {};
+    }
+    return {destPath, uri};
+#else
+    return {};
+#endif
 }
 
 bool isImagePath(const QString &path)
@@ -241,6 +346,8 @@ std::optional<drift::MediaAsset> probeAsset(const QString &absolutePath, bool im
 AssetLibrary::AssetLibrary(QObject *parent)
     : QAbstractListModel(parent)
 {
+    migrateLegacyImports();
+
     // Re-broadcast every row-count change as countChanged so QML bindings on
     // `count` stay live without each mutation site having to remember to emit.
     connect(this, &QAbstractItemModel::rowsInserted, this, &AssetLibrary::countChanged);
@@ -283,6 +390,8 @@ void AssetLibrary::syncToProject()
     if (m_syncedOrder != m_project->assetOrder()) {
         beginResetModel();
         endResetModel();
+        // An undone removal brings back a row whose materialized copy removeAssetAt deleted.
+        restoreMissingSources();
         return;
     }
 
@@ -310,6 +419,86 @@ void AssetLibrary::setProject(drift::Project *project)
     m_thumbPending.clear();
     m_audioProbePending.clear();
     endResetModel();
+
+    restoreMissingSources();
+}
+
+void AssetLibrary::restoreMissingSources()
+{
+#ifdef Q_OS_ANDROID
+    // Queued: the call sites run in the middle of a project load or an undo, and repointing an
+    // asset emits into AppController, which is not finished wiring the project up yet.
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            if (!m_project)
+                return;
+
+            for (const QString &id : m_project->assetOrder()) {
+                const drift::MediaAsset *asset = m_project->asset(id);
+                if (!asset || asset->path.isEmpty() || QFileInfo::exists(asset->path))
+                    continue;
+
+                // Imports an older build left in the cache were moved out of it at startup; the
+                // project still names the cache path they had.
+                const QString moved =
+                    legacyImportsDir() + QLatin1Char('/') + QFileInfo(asset->path).fileName();
+                if (QFileInfo::exists(moved)) {
+                    repointAssetSource(id, moved);
+                    continue;
+                }
+
+                if (!asset->sourceUri.isEmpty())
+                    startRestoreJob(id, asset->sourceUri);
+            }
+        },
+        Qt::QueuedConnection);
+#endif
+}
+
+void AssetLibrary::startRestoreJob(const QString &assetId, const QString &sourceUri)
+{
+    if (m_importPending.contains(assetId))
+        return;
+
+    m_importPending.insert(assetId);
+    (void)QtConcurrent::run([this, assetId, sourceUri]() {
+        const ImportSource restored = materializeImportUrl(QUrl(sourceUri));
+        QMetaObject::invokeMethod(
+            this,
+            [this, assetId, sourceUri, restored]() {
+                m_importPending.remove(assetId);
+                if (restored.path.isEmpty()) {
+                    qWarning("import: cannot restore %s", qPrintable(sourceUri));
+                    return;
+                }
+                repointAssetSource(assetId, restored.path);
+            },
+            Qt::QueuedConnection);
+    });
+}
+
+void AssetLibrary::repointAssetSource(const QString &assetId, const QString &path)
+{
+    const int index = indexOfId(assetId);
+    drift::MediaAsset *asset = index < 0 ? nullptr : m_project->asset(assetId);
+    if (!asset || asset->path == path)
+        return;
+
+    asset->path = path;
+    // Clips keep their own copy of the source path and nothing else updates it, so the media
+    // would still be missing everywhere it is actually played from.
+    for (drift::Track &track : m_project->tracks()) {
+        for (drift::Clip &clip : track.clips) {
+            if (clip.assetId == assetId)
+                clip.path = path;
+        }
+    }
+
+    snapshotAssets();
+    emitAssetRowChanged(index, {PathRole});
+    emit assetMetadataChanged(assetId);
+    refreshMediaAt(index);
 }
 
 int AssetLibrary::rowCount(const QModelIndex &parent) const
@@ -796,10 +985,16 @@ bool AssetLibrary::removeAssetAt(int index)
         return false;
 
     const QString assetId = m_project->assetIdAt(index);
+    // The copy is dead weight the moment the row goes: nothing else on the device references it,
+    // and a project saved earlier that does gets it back from the URI on load.
+    const drift::MediaAsset *asset = assetAtIndex(index);
+    const QString materialized = asset ? asset->path : QString();
+
     beginRemoveRows({}, index, index);
     m_project->assets().remove(assetId);
     m_project->assetOrder().removeAll(assetId);
     endRemoveRows();
+    discardMaterializedCopy(materialized);
 
     // In-flight probe/thumb jobs already no-op when the id is gone; this just
     // keeps the pending sets from retaining ids nothing will ever clear.
@@ -814,6 +1009,12 @@ void AssetLibrary::clear()
     if (!m_project || m_project->assetOrder().isEmpty())
         return;
 
+    QStringList materialized;
+    for (const QString &id : m_project->assetOrder()) {
+        if (const drift::MediaAsset *asset = m_project->asset(id))
+            materialized.append(asset->path);
+    }
+
     beginResetModel();
     m_project->assets().clear();
     m_project->assetOrder().clear();
@@ -821,6 +1022,9 @@ void AssetLibrary::clear()
     m_thumbPending.clear();
     m_audioProbePending.clear();
     endResetModel();
+
+    for (const QString &path : materialized)
+        discardMaterializedCopy(path);
 }
 
 QJsonArray AssetLibrary::toJsonArray() const
@@ -852,6 +1056,8 @@ QJsonArray AssetLibrary::toJsonArray() const
         };
         if (asset->hasAudioKnown)
             object.insert(QStringLiteral("hasAudio"), asset->hasAudio);
+        if (!asset->sourceUri.isEmpty())
+            object.insert(QStringLiteral("sourceUri"), asset->sourceUri);
         assets.append(object);
     }
     return assets;
@@ -882,6 +1088,7 @@ void AssetLibrary::loadFromJsonArray(const QJsonArray &assets)
             asset.durationUs = drift::secondsToUs(object.value(QStringLiteral("durationSeconds")).toDouble());
         }
         asset.path = object.value(QStringLiteral("path")).toString();
+        asset.sourceUri = object.value(QStringLiteral("sourceUri")).toString();
         asset.width = object.value(QStringLiteral("width")).toInt();
         asset.height = object.value(QStringLiteral("height")).toInt();
         asset.fps = object.value(QStringLiteral("fps")).toDouble();
@@ -903,25 +1110,26 @@ void AssetLibrary::loadFromJsonArray(const QJsonArray &assets)
 
     endResetModel();
 
+    restoreMissingSources();
     for (int i = 0; i < m_project->assetOrder().size(); ++i)
         refreshMediaAt(i);
 }
 
 void AssetLibrary::importUrls(const QList<QUrl> &urls)
 {
-    QStringList paths;
-    paths.reserve(urls.size());
+    QList<ImportSource> sources;
+    sources.reserve(urls.size());
     for (const QUrl &url : urls) {
         if (url.isEmpty())
             continue;
-        const QString path = materializeImportUrl(url);
-        if (path.isEmpty()) {
+        const ImportSource source = materializeImportUrl(url);
+        if (source.path.isEmpty()) {
             qWarning("import: skipped unreadable URL %s", qPrintable(url.toString()));
             continue;
         }
-        paths.append(path);
+        sources.append(source);
     }
-    importFiles(paths);
+    importFiles(sources);
 }
 
 void AssetLibrary::setImporting(bool importing)
@@ -945,22 +1153,23 @@ bool AssetLibrary::importUrlsAsync(const QList<QUrl> &urls)
     setImporting(true);
 
     (void)QtConcurrent::run([this, urls]() {
-        QStringList paths;
-        paths.reserve(urls.size());
+        QList<ImportSource> sources;
+        sources.reserve(urls.size());
         int failed = 0;
         const int total = urls.size();
         for (int i = 0; i < total; ++i) {
             const QUrl &url = urls.at(i);
-            QString path;
+            ImportSource source;
             if (!url.isEmpty())
-                path = materializeImportUrl(url);
-            if (path.isEmpty()) {
+                source = materializeImportUrl(url);
+            if (source.path.isEmpty()) {
                 ++failed;
                 qWarning("import: skipped unreadable URL %s", qPrintable(url.toString()));
             } else {
-                paths.append(path);
+                sources.append(source);
             }
-            const QString name = QFileInfo(path.isEmpty() ? url.fileName() : path).fileName();
+            const QString name =
+                QFileInfo(source.path.isEmpty() ? url.fileName() : source.path).fileName();
             const int done = i + 1;
             QMetaObject::invokeMethod(
                 this, [this, done, total, name]() { emit importProgress(done, total, name); },
@@ -970,10 +1179,10 @@ bool AssetLibrary::importUrlsAsync(const QList<QUrl> &urls)
         // importFiles mutates the project and the model, so it only runs on the GUI thread.
         QMetaObject::invokeMethod(
             this,
-            [this, paths, failed]() {
-                importFiles(paths);
+            [this, sources, failed]() {
+                importFiles(sources);
                 setImporting(false);
-                emit importFinished(paths.size(), failed);
+                emit importFinished(sources.size(), failed);
             },
             Qt::QueuedConnection);
     });
@@ -996,13 +1205,13 @@ QString AssetLibrary::addGeneratedAsset(drift::MediaAsset asset)
     return id;
 }
 
-void AssetLibrary::importFiles(const QStringList &paths)
+void AssetLibrary::importFiles(const QList<ImportSource> &sources)
 {
     if (!m_project)
         return;
 
-    for (const QString &path : paths) {
-        const QFileInfo fileInfo(path);
+    for (const ImportSource &source : sources) {
+        const QFileInfo fileInfo(source.path);
         const QString absolutePath = fileInfo.absoluteFilePath();
         if (!fileInfo.isFile())
             continue;
@@ -1017,6 +1226,7 @@ void AssetLibrary::importFiles(const QStringList &paths)
         placeholder.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
         placeholder.name = fileInfo.fileName();
         placeholder.path = absolutePath;
+        placeholder.sourceUri = source.sourceUri;
         placeholder.kind = provisionalKind(absolutePath);
 
         const int row = m_project->assetOrder().size();
@@ -1024,6 +1234,6 @@ void AssetLibrary::importFiles(const QStringList &paths)
         m_project->addAsset(placeholder);
         endInsertRows();
 
-        startImportJob(placeholder.id, absolutePath, isImagePath(path));
+        startImportJob(placeholder.id, absolutePath, isImagePath(absolutePath));
     }
 }

@@ -223,6 +223,7 @@ void ClipReader::teardownVideoDecoder()
     if (m_hwDeviceCtx)
         av_buffer_unref(&m_hwDeviceCtx);
     m_hwAccelActive = false;
+    m_mediaCodecActive = false;
     m_hwPixFmt = AV_PIX_FMT_NONE;
     m_videoPositioned = false;
     m_lastVideoPtsUs = 0;
@@ -531,13 +532,13 @@ bool ClipReader::tryOpenHardwareDecoder()
         return m_hwAccelActive;
 
 #ifdef Q_OS_ANDROID
-    // The only hardware path below is VAAPI, which is Linux-only, and the Android FFmpeg is
-    // configured --disable-vaapi. MediaCodec is the eventual replacement and belongs right here,
-    // but it is not a drop-in: AV_PIX_FMT_MEDIACODEC is an opaque SurfaceTexture handle, and the
-    // compositor seeks randomly per frame, which is the access pattern MediaCodec's pipeline and
-    // flush cost handle worst. That needs measuring on its own rather than on the way to first
-    // pixels, so software decode it is — the sticky flag below is exactly the existing mechanism
-    // for saying so, and everything downstream already handles it.
+    // The path below is VAAPI, which is Linux-only and configured out of the Android FFmpeg.
+    // MediaCodec takes its place, but deliberately not as a hwaccel — see
+    // tryOpenMediaCodecDecoder. Anything it declines leaves m_hwAccelDisabled set, which is
+    // already how this reader says "software from here on".
+    if (!qEnvironmentVariableIsSet("DRIFT_NO_MEDIACODEC") && tryOpenMediaCodecDecoder())
+        return true;
+
     m_hwAccelDisabled = true;
     return false;
 #else
@@ -610,9 +611,74 @@ bool ClipReader::tryOpenHardwareDecoder()
 #endif // Q_OS_ANDROID
 }
 
+#ifdef Q_OS_ANDROID
+// MediaCodec configured *without* a Surface. avcodec_default_get_format only picks
+// AV_PIX_FMT_MEDIACODEC when an AV_HWDEVICE_TYPE_MEDIACODEC device is attached, and we attach
+// none, so ff_get_format returns AV_PIX_FMT_NONE, mediacodecdec leaves its surface null, and each
+// output buffer is copied out as an ordinary NV12/YUV420P AVFrame. That keeps the opaque
+// SurfaceTexture — which would need a GL bridge and is hostile to the compositor's per-frame
+// seeking — out of the picture entirely: sws, both frame caches and the compositor see exactly
+// what the software decoder produces, while the entropy decode and motion compensation move to
+// the video block.
+//
+// Restricted to content where that trade is not close. MediaCodec costs a codec instance (phones
+// share a small pool of them), a pipeline fill after every flush, and it cannot downscale on the
+// way out, so the preview's full-resolution sws downscale is unchanged. Below 4K H.264 / 1080p
+// HEVC-AV1-VP9 the software decoder is not the bottleneck on a phone and this path has no
+// on-device measurements behind it.
+//
+// Seek cost is handled by the reader's existing sequential-decode state, not by anything new
+// here: playback and export walk forward and never flush, and a scrub already has to decode from
+// the preceding keyframe, so the one flush it does add is amortised over that whole GOP — which
+// is precisely the bulk sequential work MediaCodec is fastest at.
+bool ClipReader::tryOpenMediaCodecDecoder()
+{
+    const AVCodecParameters *par = m_fmt->streams[m_videoStream]->codecpar;
+
+    const char *name = nullptr;
+    switch (par->codec_id) {
+    case AV_CODEC_ID_H264: name = "h264_mediacodec"; break;
+    case AV_CODEC_ID_HEVC: name = "hevc_mediacodec"; break;
+    case AV_CODEC_ID_AV1: name = "av1_mediacodec"; break;
+    case AV_CODEC_ID_VP9: name = "vp9_mediacodec"; break;
+    default: return false;
+    }
+
+    const int64_t pixels = int64_t(par->width) * par->height;
+    const int64_t floor = par->codec_id == AV_CODEC_ID_H264 ? 3840LL * 2160 : 1920LL * 1080;
+    if (pixels < floor)
+        return false;
+
+    // Null when FFmpeg was built without --enable-mediacodec, which is the only state the
+    // prebuilt libraries have shipped in so far.
+    const AVCodec *codec = avcodec_find_decoder_by_name(name);
+    if (!codec)
+        return false;
+
+    m_videoCtx = avcodec_alloc_context3(codec);
+    if (!m_videoCtx)
+        return false;
+
+    if (avcodec_parameters_to_context(m_videoCtx, par) < 0) {
+        avcodec_free_context(&m_videoCtx);
+        return false;
+    }
+
+    // Unsupported profile or dimensions, no decoder instance free, or no MediaCodec at all.
+    if (avcodec_open2(m_videoCtx, codec, nullptr) < 0) {
+        avcodec_free_context(&m_videoCtx);
+        return false;
+    }
+
+    m_mediaCodecActive = true;
+    m_hwPixFmt = AV_PIX_FMT_NONE;
+    return true;
+}
+#endif // Q_OS_ANDROID
+
 bool ClipReader::fallbackFromHardwareDecoder()
 {
-    if (!m_hwAccelActive && !m_hwDeviceCtx)
+    if (!m_hwAccelActive && !m_hwDeviceCtx && !m_mediaCodecActive)
         return openSoftwareVideoDecoder();
 
     teardownVideoDecoder();
@@ -909,7 +975,7 @@ bool ClipReader::decodeVideoFrameAtOnce(drift::TimeUs sourceUs, QImage &out, int
     bool sawHwFailure = false;
 
     auto markHwFailure = [&]() {
-        if (m_hwAccelActive) {
+        if (m_hwAccelActive || m_mediaCodecActive) {
             sawHwFailure = true;
             done = true;
         }
@@ -958,6 +1024,7 @@ bool ClipReader::decodeVideoFrameAtOnce(drift::TimeUs sourceUs, QImage &out, int
     };
 
     bool eof = false;
+    bool droppedPacket = false;
     while (!done) {
         if (av_read_frame(m_fmt, packet) < 0) {
             eof = true;
@@ -969,6 +1036,17 @@ bool ClipReader::decodeVideoFrameAtOnce(drift::TimeUs sourceUs, QImage &out, int
         }
 
         int sendRc = avcodec_send_packet(m_videoCtx, packet);
+        // MediaCodec's input queue is finite, so EAGAIN here is routine rather than the
+        // cannot-happen it is for a software decoder — and dropping the packet would corrupt
+        // every frame up to the next keyframe. Drain, resend, and if it still will not fit,
+        // give up the sequential position so the next read seeks instead of decoding from a hole.
+        if (sendRc == AVERROR(EAGAIN) && m_mediaCodecActive) {
+            receiveFrames();
+            if (!done)
+                sendRc = avcodec_send_packet(m_videoCtx, packet);
+            if (sendRc == AVERROR(EAGAIN))
+                droppedPacket = true;
+        }
         av_packet_unref(packet);
         if (sendRc == AVERROR(EAGAIN)) {
             // Decoder is full; drain below then retry is handled by the next read.
@@ -1023,7 +1101,7 @@ bool ClipReader::decodeVideoFrameAtOnce(drift::TimeUs sourceUs, QImage &out, int
     if (convertedOk) {
         out = converted;
         storeCachedFrame(bestPtsUs, converted);
-        m_videoPositioned = !drained;
+        m_videoPositioned = !drained && !droppedPacket;
         return true;
     }
 
@@ -1085,7 +1163,7 @@ bool ClipReader::decodeVideoFrameAtOnceNv12(drift::TimeUs sourceUs, Nv12Frame &o
     bool sawHwFailure = false;
 
     auto markHwFailure = [&]() {
-        if (m_hwAccelActive) {
+        if (m_hwAccelActive || m_mediaCodecActive) {
             sawHwFailure = true;
             done = true;
         }
@@ -1127,6 +1205,7 @@ bool ClipReader::decodeVideoFrameAtOnceNv12(drift::TimeUs sourceUs, Nv12Frame &o
     };
 
     bool eof = false;
+    bool droppedPacket = false;
     while (!done) {
         if (av_read_frame(m_fmt, packet) < 0) {
             eof = true;
@@ -1138,6 +1217,15 @@ bool ClipReader::decodeVideoFrameAtOnceNv12(drift::TimeUs sourceUs, Nv12Frame &o
         }
 
         int sendRc = avcodec_send_packet(m_videoCtx, packet);
+        // See decodeVideoFrameAtOnce: MediaCodec can refuse a packet, and dropping it corrupts
+        // the rest of the GOP.
+        if (sendRc == AVERROR(EAGAIN) && m_mediaCodecActive) {
+            receiveFrames();
+            if (!done)
+                sendRc = avcodec_send_packet(m_videoCtx, packet);
+            if (sendRc == AVERROR(EAGAIN))
+                droppedPacket = true;
+        }
         av_packet_unref(packet);
         if (sendRc == AVERROR(EAGAIN)) {
             // Fall through to receive.
@@ -1185,7 +1273,7 @@ bool ClipReader::decodeVideoFrameAtOnceNv12(drift::TimeUs sourceUs, Nv12Frame &o
     if (convertedOk) {
         out = converted;
         storeCachedNv12(bestPtsUs, converted);
-        m_videoPositioned = !drained;
+        m_videoPositioned = !drained && !droppedPacket;
         return true;
     }
 
