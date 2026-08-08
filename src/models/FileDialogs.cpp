@@ -6,10 +6,78 @@
 #ifdef Q_OS_ANDROID
 #include <QJniEnvironment>
 #include <QJniObject>
+#include <QtCore/private/qjnihelpers_p.h>
 #include <QtCore/qcoreapplication_platform.h>
 #endif
 
-FileDialogs::FileDialogs(QObject *parent) : QObject(parent) {}
+#ifdef Q_OS_ANDROID
+namespace {
+FileDialogs *g_newIntentOwner = nullptr;
+}
+
+// A warm-start ACTION_VIEW never shows up in getIntent(): QtActivityBase::onNewIntent forwards
+// the intent to QtNative without calling setIntent(), so the activity keeps returning the intent
+// it was cold-started with. Qt's private new-intent listener is the only place it surfaces.
+class FileDialogs::NewIntentBridge : public QtAndroidPrivate::NewIntentListener
+{
+public:
+    explicit NewIntentBridge(FileDialogs *owner) : m_owner(owner) {}
+
+    bool handleNewIntent(JNIEnv *env, jobject intent) override
+    {
+        Q_UNUSED(env);
+        const QJniObject in(intent);
+        const QString action = in.callObjectMethod("getAction", "()Ljava/lang/String;").toString();
+        if (action != QLatin1String("android.intent.action.VIEW"))
+            return false;
+
+        const QJniObject data = in.callObjectMethod("getData", "()Landroid/net/Uri;");
+        if (!data.isValid())
+            return false;
+
+        // Called on the Android UI thread; everything downstream of the signal (loadProject and
+        // the QML it drives) is GUI-thread only.
+        const QUrl url(data.toString());
+        FileDialogs *owner = m_owner;
+        QMetaObject::invokeMethod(
+            owner,
+            [owner, url] {
+                owner->m_pendingLaunchUrl = url;
+                emit owner->launchUrlReceived(url);
+            },
+            Qt::QueuedConnection);
+        return true;
+    }
+
+private:
+    FileDialogs *const m_owner;
+};
+#endif
+
+FileDialogs::FileDialogs(QObject *parent) : QObject(parent)
+{
+#ifdef Q_OS_ANDROID
+    // AppController builds throwaway FileDialogs temporaries just to call shareFile(); only the
+    // process-wide instance main.cpp exposes to QML is worth wiring up, and a listener registered
+    // by a temporary would be called back on an object that no longer exists.
+    if (!g_newIntentOwner) {
+        g_newIntentOwner = this;
+        m_newIntentBridge = new NewIntentBridge(this);
+        QtAndroidPrivate::registerNewIntentListener(m_newIntentBridge);
+    }
+#endif
+}
+
+FileDialogs::~FileDialogs()
+{
+#ifdef Q_OS_ANDROID
+    if (g_newIntentOwner == this) {
+        QtAndroidPrivate::unregisterNewIntentListener(m_newIntentBridge);
+        delete m_newIntentBridge;
+        g_newIntentOwner = nullptr;
+    }
+#endif
+}
 
 namespace {
 
@@ -159,6 +227,14 @@ bool FileDialogs::shareFile(const QUrl &url, const QString &mimeType) const
 QUrl FileDialogs::takeLaunchUrl()
 {
 #ifdef Q_OS_ANDROID
+    // A warm-start intent outranks the launch one: getIntent() still holds whatever the process
+    // was started with, which by then is stale.
+    if (!m_pendingLaunchUrl.isEmpty()) {
+        const QUrl pending = m_pendingLaunchUrl;
+        m_pendingLaunchUrl.clear();
+        return pending;
+    }
+
     QJniObject activity = QNativeInterface::QAndroidApplication::context();
     if (!activity.isValid())
         return {};

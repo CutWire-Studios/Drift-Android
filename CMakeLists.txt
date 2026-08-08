@@ -693,6 +693,12 @@ target_link_libraries(drift PRIVATE
 target_include_directories(drift PRIVATE src src/preview)
 
 if(ANDROID)
+    # FileDialogs registers a QtAndroidPrivate::NewIntentListener so a second ACTION_VIEW reaches a
+    # running instance (singleTop delivers it to onNewIntent, which the public API does not expose).
+    # CorePrivate is not pulled in by the plain Qt6 Core package, hence the extra find_package.
+    find_package(Qt6 REQUIRED COMPONENTS CorePrivate)
+    target_link_libraries(drift PRIVATE Qt6::CorePrivate)
+
     # applicationDirPath() on Android is the APK's lib directory and contains nothing but .so
     # files, so the file-based package roots the desktop build stages next to the binary have
     # nowhere to live. The packages ride inside the binary as Qt resources instead;

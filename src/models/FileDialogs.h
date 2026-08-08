@@ -16,6 +16,7 @@ class FileDialogs : public QObject
 
 public:
     explicit FileDialogs(QObject *parent = nullptr);
+    ~FileDialogs() override;
 
     Q_INVOKABLE QUrl openFile(const QString &title, const QStringList &nameFilters) const;
     Q_INVOKABLE QList<QUrl> openFiles(const QString &title, const QStringList &nameFilters) const;
@@ -37,4 +38,17 @@ public:
     // or an empty URL. Consumed by the first call: the activity keeps its launch intent for the
     // life of the process, so an unconsumed one would reopen the project on every check.
     Q_INVOKABLE QUrl takeLaunchUrl();
+
+signals:
+    // A .drift tapped in a file manager while this process was already running. Nothing polls
+    // for that case — takeLaunchUrl() only runs once, at QML startup — so the warm-start intent
+    // is pushed instead. Never emitted on desktop.
+    void launchUrlReceived(const QUrl &url);
+
+private:
+#ifdef Q_OS_ANDROID
+    class NewIntentBridge;
+    NewIntentBridge *m_newIntentBridge = nullptr;
+    QUrl m_pendingLaunchUrl;
+#endif
 };

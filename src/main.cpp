@@ -159,6 +159,19 @@ int main(int argc, char *argv[])
     drift::sweepDenoisePreviews();
 
 #ifdef Q_OS_ANDROID
+    // Every content:// write is staged through <cache>/staged and unlinked once the copy into the
+    // document finishes, so a file still here is debris from an encode that was killed — the
+    // service is stopWithTask, and swiping the task takes the whole app down mid-export. Nothing
+    // in the directory can belong to a live writer: the app is a single process and this runs
+    // before any of it starts.
+    {
+        QDir staged(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+                    + QStringLiteral("/staged"));
+        const QFileInfoList leftovers = staged.entryInfoList(QDir::Files);
+        for (const QFileInfo &file : leftovers)
+            QFile::remove(file.absoluteFilePath());
+    }
+
     qWarning("app data locations: %s",
              qPrintable(QStandardPaths::standardLocations(QStandardPaths::AppDataLocation)
                             .join(QLatin1String(", "))));
