@@ -40,4 +40,29 @@ QString displayName(const QUrl &url);
 // offered no persistable grant; the URI then simply expires with the process.
 bool takePersistableReadPermission(const QUrl &url);
 
+// The same, for a document the app has to write again later — a project file it will save in
+// place. Persisting read alone is what makes Save fail with "could not write to the location you
+// picked" on the next launch, since the write grant died with the process. True only when the
+// write grant was persisted; false leaves the read grant taken, so the document still opens.
+bool takePersistableReadWritePermission(const QUrl &url);
+
+// Disposes of the document behind a content:// URI, for an export or save that never produced
+// anything: ACTION_CREATE_DOCUMENT has already created the file by the time the picker returns,
+// so abandoning the job silently leaves a 0-byte video in the user's folder. False when neither
+// the delete nor the truncate fallback got anywhere.
+bool deleteDocument(const QUrl &url);
+
 } // namespace AndroidUri
+
+// Android dims and locks on its own idle timer, and a preview or a render that runs for minutes
+// without touch input is exactly the case it gets wrong. FLAG_KEEP_SCREEN_ON says otherwise, but it
+// is one bit on the single activity window with two independent owners — playback and a running
+// job — and whoever released first used to clear it out from under the other, so pausing the
+// preview mid-export let the display sleep. Refcounted here: the flag goes on with the first
+// acquire and comes off only when the last holder lets go. No-ops on desktop.
+namespace drift::android {
+
+void acquireKeepScreenOn();
+void releaseKeepScreenOn();
+
+} // namespace drift::android

@@ -19,6 +19,8 @@
 #include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QtCore/qcoreapplication_platform.h>
+
+#include <atomic>
 #endif
 
 #include <climits>
@@ -43,83 +45,47 @@ namespace {
 
 constexpr const char *kExportServiceClass = "org/cutwire/drift/ExportService";
 
-// Same flag, same reason and same UI-thread requirement as the playback one in PlaybackEngine.cpp:
-// a render that takes minutes gets no touch input, so the display idles out mid-export.
-void setKeepScreenOn(bool on)
-{
-    QNativeInterface::QAndroidApplication::runOnAndroidMainThread([on] {
-        QJniObject activity = QNativeInterface::QAndroidApplication::context();
-        if (!activity.isValid())
-            return;
-        QJniObject window = activity.callObjectMethod("getWindow", "()Landroid/view/Window;");
-        if (!window.isValid())
-            return;
-        // WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-        constexpr jint kFlagKeepScreenOn = 0x00000080;
-        if (on)
-            window.callMethod<void>("addFlags", "(I)V", kFlagKeepScreenOn);
-        else
-            window.callMethod<void>("clearFlags", "(I)V", kFlagKeepScreenOn);
-    });
-}
+std::atomic<int> g_backgroundHolds{0};
+std::atomic<int> g_notifiedPercent{-1};
 
-void callExportService(const char *method)
+void startExportService(const QString &title)
 {
     QJniObject context = QNativeInterface::QAndroidApplication::context();
     if (!context.isValid())
         return;
-    QJniObject::callStaticMethod<void>(kExportServiceClass, method, "(Landroid/content/Context;)V",
-                                       context.object());
-    // An export that cannot raise its notification still has to run: the JNI failure is the
-    // service being unavailable, not the render being wrong.
-    QJniEnvironment().checkAndClearExceptions();
+
+    QJniEnvironment env;
+    jclass clazz = env.findClass(kExportServiceClass);
+    if (!clazz)
+        return;
+
+    // The titled overload arrives with the Java side; until it does, every job borrows the
+    // notification's hardcoded "Exporting" — wrong for a denoise, but it still holds the process in
+    // the foreground. Probing is what makes the fallback work at all: QJniObject clears the
+    // NoSuchMethodError itself and turns the missing method into a silent no-op, so calling and
+    // checking afterwards would report success and start nothing.
+    if (jmethodID titled = env.findStaticMethod(
+            clazz, "start", "(Landroid/content/Context;Ljava/lang/String;)V")) {
+        QJniObject::callStaticMethod<void>(clazz, titled, context.object(),
+                                           QJniObject::fromString(title).object<jstring>());
+    } else {
+        QJniObject::callStaticMethod<void>(clazz, "start", "(Landroid/content/Context;)V",
+                                           context.object());
+    }
+    env.checkAndClearExceptions();
 }
 
-// Held for the length of an encode. Backgrounded, an ordinary process is frozen and then killed,
-// which loses a multi-minute render with nothing to resume from; a foreground service is what
-// keeps it scheduled, and Android grants that only against a visible progress notification.
-class ExportProcessGuard
+void stopExportService()
 {
-public:
-    ExportProcessGuard()
-    {
-        callExportService("start");
-        setKeepScreenOn(true);
-    }
-
-    ~ExportProcessGuard()
-    {
-        setKeepScreenOn(false);
-        callExportService("stop");
-    }
-
-    void setProgress(double fraction)
-    {
-        const int percent = qBound(0, static_cast<int>(fraction * 100.0), 100);
-        if (percent == m_percent)
-            return;
-        m_percent = percent;
-
-        QJniObject context = QNativeInterface::QAndroidApplication::context();
-        if (!context.isValid())
-            return;
-        QJniObject::callStaticMethod<void>(kExportServiceClass, "setPercent",
-                                           "(Landroid/content/Context;I)V", context.object(),
-                                           percent);
-        QJniEnvironment().checkAndClearExceptions();
-    }
-
-private:
-    int m_percent = -1;
-};
-
-#else
-
-struct ExportProcessGuard
-{
-    ExportProcessGuard() = default;
-    void setProgress(double) {}
-};
+    QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (!context.isValid())
+        return;
+    QJniObject::callStaticMethod<void>(kExportServiceClass, "stop", "(Landroid/content/Context;)V",
+                                       context.object());
+    // A job that cannot raise its notification still has to run: the JNI failure is the service
+    // being unavailable, not the render being wrong.
+    QJniEnvironment().checkAndClearExceptions();
+}
 
 #endif
 
@@ -523,7 +489,7 @@ bool runAudioOnlyExport(const drift::Project &project, const ExportSettings &set
     const int64_t totalAudioSamples =
         qMax<int64_t>(0, std::llround(static_cast<double>(durationUs) * sampleRate / 1e6));
 
-    ExportProcessGuard guard;
+    Exporter::BackgroundHold hold(QStringLiteral("Exporting"));
 
     AVFormatContext *fmt = nullptr;
     AVCodecContext *actx = nullptr;
@@ -651,7 +617,7 @@ bool runAudioOnlyExport(const drift::Project &project, const ExportSettings &set
 
         while (audioSamplesGenerated < totalAudioSamples) {
             const double fraction = static_cast<double>(audioSamplesGenerated) / totalAudioSamples;
-            guard.setProgress(fraction);
+            Exporter::BackgroundHold::setPercent(static_cast<int>(fraction * 100.0));
             if (onProgress && totalAudioSamples > 0 && !onProgress(fraction)) {
                 cancelled = true;
                 break;
@@ -765,6 +731,46 @@ bool runToDocument(const drift::Project &project, const ExportSettings &settings
 #endif
 
 } // namespace
+
+Exporter::BackgroundHold::BackgroundHold(const QString &title)
+{
+#ifdef Q_OS_ANDROID
+    if (g_backgroundHolds.fetch_add(1, std::memory_order_acq_rel) == 0) {
+        g_notifiedPercent.store(-1, std::memory_order_relaxed);
+        startExportService(title);
+    }
+    drift::android::acquireKeepScreenOn();
+#else
+    Q_UNUSED(title);
+#endif
+}
+
+Exporter::BackgroundHold::~BackgroundHold()
+{
+#ifdef Q_OS_ANDROID
+    drift::android::releaseKeepScreenOn();
+    if (g_backgroundHolds.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        stopExportService();
+#endif
+}
+
+void Exporter::BackgroundHold::setPercent(int percent)
+{
+#ifdef Q_OS_ANDROID
+    percent = qBound(0, percent, 100);
+    if (g_notifiedPercent.exchange(percent, std::memory_order_relaxed) == percent)
+        return;
+
+    QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (!context.isValid())
+        return;
+    QJniObject::callStaticMethod<void>(kExportServiceClass, "setPercent",
+                                       "(Landroid/content/Context;I)V", context.object(), percent);
+    QJniEnvironment().checkAndClearExceptions();
+#else
+    Q_UNUSED(percent);
+#endif
+}
 
 const QList<ExportScalePreset> &Exporter::scalePresets()
 {
@@ -1135,7 +1141,7 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
     const int64_t totalAudioSamples =
         qMax<int64_t>(0, std::llround(static_cast<double>(durationUs) * sampleRate / 1e6));
 
-    ExportProcessGuard guard;
+    BackgroundHold hold(QStringLiteral("Exporting"));
 
     AVFormatContext *fmt = nullptr;
     AVCodecContext *vctx = nullptr;
@@ -1322,7 +1328,7 @@ bool Exporter::run(const drift::Project &project, const ExportSettings &settings
 
         for (int64_t i = 0; i < totalFrames; ++i) {
             const double fraction = static_cast<double>(i) / totalFrames;
-            guard.setProgress(fraction);
+            BackgroundHold::setPercent(static_cast<int>(fraction * 100.0));
             if (onProgress && !onProgress(fraction)) {
                 cancelled = true;
                 break;
