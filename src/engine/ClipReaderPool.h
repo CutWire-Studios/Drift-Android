@@ -3,6 +3,7 @@
 #include "ClipReader.h"
 #include "core/Time.h"
 
+#include <QElapsedTimer>
 #include <QImage>
 #include <QMutex>
 #include <QObject>
@@ -15,6 +16,7 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <vector>
 
 class ClipReaderWorker;
 
@@ -49,7 +51,16 @@ public:
     Nv12Frame readVideoFrameNv12(const QString &path, drift::TimeUs sourceUs, int maxWidth, int maxHeight);
     int readAudioInterleaved(const QString &path, drift::TimeUs sourceStartUs, int sampleCount,
                              int outputSampleRate, float *interleavedStereoOut);
+    // Opens a worker for every path the current frame reads, and closes the ones that have gone
+    // idle. Without the second half, every path ever decoded — including one-shot reads for
+    // segmentation or face tracking, which never appear on the timeline — kept a thread, an open
+    // demuxer/decoder and its frame caches alive for the rest of the process.
     void retainActivePaths(const QSet<QString> &videoPaths, const QSet<QString> &audioPaths);
+
+    // Drop every worker that is not mid-decode, ignoring the idle gate. For the Android
+    // application-state handler: backgrounding is the one moment where reopening every file later
+    // is cheaper than holding the decoders. Callable from any thread except a worker thread.
+    void releaseAll();
 
 private:
     ClipReaderPool() = default;
@@ -59,10 +70,25 @@ private:
     {
         std::unique_ptr<QThread> thread;
         ClipReaderWorker *worker = nullptr;
+        // Restarted by every ensureWorker(). The release below is gated on it so scrubbing a clip
+        // in and out of the active set frame by frame does not tear the decoder down and reopen it.
+        QElapsedTimer lastUse;
+        // Callers currently inside a blocking decode, holding this entry's raw worker pointer with
+        // the pool mutex released. Never destroy an entry while this is non-zero.
+        int inFlight = 0;
     };
 
     static void stopWorkerEntry(WorkerEntry &entry);
-    ClipReaderWorker *ensureWorker(std::map<QString, std::unique_ptr<WorkerEntry>> &workers, const QString &path);
+    WorkerEntry &ensureWorker(std::map<QString, std::unique_ptr<WorkerEntry>> &workers, const QString &path);
+    // Caller holds m_mutex. Erases every entry outside `keep` that has been untouched for at least
+    // minIdleMs and has no decode in flight, and hands the owning pointers back so the caller can
+    // stop them once the lock is released — stopWorkerEntry joins a thread and must not run under
+    // m_mutex.
+    std::vector<std::unique_ptr<WorkerEntry>> detachIdleLocked(
+        std::map<QString, std::unique_ptr<WorkerEntry>> &workers, const QSet<QString> &keep,
+        qint64 minIdleMs);
+
+    static constexpr qint64 kIdleReleaseMs = 10'000;
 
     QMutex m_mutex;
     std::atomic<drift::TimeUs> m_readAheadUs{0};

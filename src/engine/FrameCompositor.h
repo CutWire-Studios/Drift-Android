@@ -26,6 +26,11 @@ public:
 
     void setProject(const drift::Project *project) { m_project = project; }
 
+    // Drop the decoded-still cache (image clips and stickers, scaled to the render canvas). Pure
+    // derived pixels — a cleared entry costs one re-read of the file. For the Android
+    // application-state handler. Safe from any thread.
+    static void clearStillImageCache();
+
     QImage compositeAt(drift::TimeUs timelineUs) const;
     QImage compositeAt(drift::TimeUs timelineUs, const RenderOptions &options) const;
 

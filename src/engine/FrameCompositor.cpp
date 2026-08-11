@@ -170,46 +170,62 @@ QList<drift::Effect> resolvedClipEffects(const drift::Clip &clip, drift::TimeUs 
     return filtered;
 }
 
+// Keyed on mtime and size as well as path: the same path can hold different
+// pixels over time, and serving a stale decode would silently render the old
+// image.
+struct StillKey
+{
+    QString path;
+    qint64 mtimeMs = 0;
+    qint64 fileSize = 0;
+    int w = 0;
+    int h = 0;
+    bool operator==(const StillKey &other) const
+    {
+        return path == other.path && mtimeMs == other.mtimeMs && fileSize == other.fileSize
+               && w == other.w && h == other.h;
+    }
+};
+struct StillKeyHash
+{
+    size_t operator()(const StillKey &k) const
+    {
+        return qHash(k.path) ^ size_t(k.mtimeMs) ^ (size_t(k.fileSize) << 7)
+               ^ (size_t(k.w) << 1) ^ (size_t(k.h) << 17);
+    }
+};
+
+QMutex g_stillMutex;
+std::unordered_map<StillKey, QImage, StillKeyHash> g_stillCache;
+// Least-recently-used first. Entries are scaled *up* to the render canvas when the source is
+// smaller, so a sticker costs as much as a full frame — 32 of them is ~265 MB of RGBA8888 at
+// 1080p export scale. The count cap alone never noticed that.
+QList<StillKey> g_stillLru;
+qint64 g_stillBytes = 0;
+constexpr size_t kMaxStillEntries = 32;
+#ifdef Q_OS_ANDROID
+// Phones only. A desktop canvas at 4K makes one entry ~33 MB, so any fixed byte cap worth having
+// there would cut the cache to a handful of entries and put per-frame still decoding back — the
+// exact cost this cache exists to avoid. Desktop keeps the count cap it always had; the LRU
+// eviction below is still an improvement on the wholesale clear it replaced.
+constexpr qint64 kMaxStillBytes = 48LL * 1024 * 1024;
+#endif
+
 // Still images never change frame to frame, but decodeClipMediaFrame used to
 // re-read and re-decode the file on every composited frame. Cache the scaled
 // result per (path, size).
 QImage decodedStillImage(const QString &path, int maxWidth, int maxHeight)
 {
-    // Keyed on mtime and size as well as path: the same path can hold different
-    // pixels over time, and serving a stale decode would silently render the old
-    // image.
-    struct Key
-    {
-        QString path;
-        qint64 mtimeMs = 0;
-        qint64 fileSize = 0;
-        int w = 0;
-        int h = 0;
-        bool operator==(const Key &other) const
-        {
-            return path == other.path && mtimeMs == other.mtimeMs && fileSize == other.fileSize
-                   && w == other.w && h == other.h;
-        }
-    };
-    struct KeyHash
-    {
-        size_t operator()(const Key &k) const
-        {
-            return qHash(k.path) ^ size_t(k.mtimeMs) ^ (size_t(k.fileSize) << 7)
-                   ^ (size_t(k.w) << 1) ^ (size_t(k.h) << 17);
-        }
-    };
-
-    static QMutex mutex;
-    static std::unordered_map<Key, QImage, KeyHash> cache;
-
     const QFileInfo info(path);
-    const Key key{path, info.lastModified().toMSecsSinceEpoch(), info.size(), maxWidth, maxHeight};
+    const StillKey key{path, info.lastModified().toMSecsSinceEpoch(), info.size(), maxWidth, maxHeight};
     {
-        QMutexLocker lock(&mutex);
-        const auto it = cache.find(key);
-        if (it != cache.end())
+        QMutexLocker lock(&g_stillMutex);
+        const auto it = g_stillCache.find(key);
+        if (it != g_stillCache.end()) {
+            g_stillLru.removeOne(key);
+            g_stillLru.append(key);
             return it->second;
+        }
     }
 
     QImageReader reader(path);
@@ -219,10 +235,27 @@ QImage decodedStillImage(const QString &path, int maxWidth, int maxHeight)
     image = image.convertToFormat(QImage::Format_RGBA8888)
                 .scaled(maxWidth, maxHeight, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
-    QMutexLocker lock(&mutex);
-    if (cache.size() > 32)
-        cache.clear();
-    cache.emplace(key, image);
+    const qint64 imageBytes = qint64(image.sizeInBytes());
+    QMutexLocker lock(&g_stillMutex);
+    // Two compositors (preview and export) can decode the same key at once; drop the older copy
+    // rather than letting its bytes stay on the total forever.
+    if (g_stillLru.removeOne(key)) {
+        g_stillBytes -= qint64(g_stillCache[key].sizeInBytes());
+        g_stillCache.erase(key);
+    }
+    while (!g_stillLru.isEmpty()
+           && (g_stillCache.size() >= kMaxStillEntries
+#ifdef Q_OS_ANDROID
+               || g_stillBytes + imageBytes > kMaxStillBytes
+#endif
+               )) {
+        const StillKey oldest = g_stillLru.takeFirst();
+        g_stillBytes -= qint64(g_stillCache[oldest].sizeInBytes());
+        g_stillCache.erase(oldest);
+    }
+    g_stillCache.emplace(key, image);
+    g_stillLru.append(key);
+    g_stillBytes += imageBytes;
     return image;
 }
 
@@ -887,6 +920,14 @@ GpuScene buildGpuScene(const drift::Project &project, drift::TimeUs timelineUs, 
 }
 
 } // namespace
+
+void FrameCompositor::clearStillImageCache()
+{
+    QMutexLocker lock(&g_stillMutex);
+    g_stillCache.clear();
+    g_stillLru.clear();
+    g_stillBytes = 0;
+}
 
 QImage FrameCompositor::compositeAt(drift::TimeUs timelineUs) const
 {

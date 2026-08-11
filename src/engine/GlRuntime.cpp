@@ -350,6 +350,23 @@ QOpenGLExtraFunctions *GlRuntime::functions()
     return context ? context->extraFunctions() : nullptr;
 }
 
+void GlRuntime::releaseCaches()
+{
+    {
+        // Do not let this be the call that creates the context: ensureReady() inside exec() would
+        // happily bring GL up just to free nothing.
+        QMutexLocker lock(&m_initMutex);
+        if (!m_ok)
+            return;
+    }
+
+    exec([this] {
+        destroyImageUploadCache();
+        m_targetPool.clear();
+        m_pooledTargets = 0;
+    });
+}
+
 void GlRuntime::shutdown()
 {
     {

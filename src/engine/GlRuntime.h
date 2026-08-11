@@ -133,6 +133,15 @@ public:
     QOpenGLShaderProgram *builtinProgram(const QString &id, const char *vertexSource,
                                          const char *fragmentSource);
 
+    // Drop the recyclable GPU memory — the uploaded-image texture cache and the framebuffer pool —
+    // without touching the context, the compiled programs or the live present ring. Everything
+    // freed here is rebuilt on demand by the next composite. For the Android application-state
+    // handler; a no-op when GL was never brought up.
+    //
+    // Runs the work on the GL thread through exec(), so call it from the GUI thread (or any other
+    // thread) but never from the GL thread itself — exec() blocks on that thread.
+    void releaseCaches();
+
     // Tear down GL objects and stop the GL thread. Called at app exit.
     void shutdown();
 
