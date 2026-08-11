@@ -571,6 +571,7 @@ qt_add_qml_module(drift
         src/qml/AndroidTopBar.qml
         src/qml/AndroidBottomRail.qml
         src/qml/AndroidBottomSheet.qml
+        src/qml/AndroidAddMenu.qml
         src/qml/AndroidEditActions.qml
         src/qml/Theme.qml
         src/qml/Toasts.qml

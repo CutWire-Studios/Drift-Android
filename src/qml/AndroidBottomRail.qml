@@ -3,18 +3,29 @@ import QtQuick.Controls.Basic
 import Drift
 import "components"
 
-// CapCut-style bottom tool rail — library tabs + Edit.
+// CapCut-style bottom tool rail: four destinations either side of a centred Add
+// button.
+//
+// This used to be all eleven asset tabs in a horizontally scrolling strip. Five of
+// them fit a 411dp phone, the other six were behind a scroll with no affordance
+// saying so, and every one of the five "put something new on the timeline" tabs
+// spent a permanent slot on an action taken once or twice per session. The adds
+// collapse into AndroidAddMenu behind the [+]; what stays here is the four things
+// you come back to while editing.
 Item {
     id: root
 
-    // "media" | "sounds" | ... | "settings" | "shortcuts" | "edit" | ""
+    // "" | "edit" | "effects" | "sounds" | "transitions", plus any tab id the
+    // Add menu routes to — an open Media sheet still lights nothing here, which is
+    // correct: it is not one of the four destinations.
     property string activeId: ""
     signal tabRequested(string tabId)
     signal editRequested()
+    signal addRequested()
 
     // Clear the system gesture/nav bar without leaving a dead strip under the rail.
     // The side insets matter in landscape, where a cutout or the gesture pill sits
-    // beside the rail and would otherwise swallow the first and last tabs.
+    // beside the rail and would otherwise swallow the first and last destinations.
     readonly property real bottomInset: SafeArea.margins.bottom
     readonly property real leftInset: SafeArea.margins.left
     readonly property real rightInset: SafeArea.margins.right
@@ -22,24 +33,15 @@ Item {
     height: Theme.androidBottomRailHeight + bottomInset
     width: parent ? parent.width : 0
 
-    // Ids, labels and icons mirror AssetsPanel.qml's tabsModel so the rail and the sheet
-    // header cannot disagree; "edit" is the extra Android entry that opens PropertiesPanel
-    // and is placed second because clip editing is the most-used destination here.
+    // Ids and labels mirror AssetsPanel.qml's tabsModel so the rail and the sheet
+    // header cannot disagree; "edit" is the extra Android entry that opens
+    // PropertiesPanel. Order puts the two clip-shaping destinations left of the
+    // Add button and the two timing/sound ones right of it.
     readonly property var items: [
-        { id: "media", label: qsTr("Media"), icon: Theme.icons.film },
         { id: "edit", label: qsTr("Edit"), icon: Theme.icons.sliders },
-        { id: "text", label: qsTr("Text"), icon: Theme.icons.type },
-        { id: "subtitles", label: qsTr("Subtitles"), icon: Theme.icons.captions },
-        { id: "stickers", label: qsTr("Stickers"), icon: Theme.icons.smile },
-        { id: "shapes", label: qsTr("Shapes"), icon: Theme.icons.shapes },
         { id: "effects", label: qsTr("Effects"), icon: Theme.icons.wand },
-        { id: "templates", label: qsTr("Templates"), icon: Theme.icons.layers },
-        { id: "transitions", label: qsTr("Transitions"), icon: Theme.icons.chevronsRight },
         { id: "sounds", label: qsTr("Audio FX"), icon: Theme.icons.audioLines },
-        // No "shortcuts" entry: every row in that tab is a hardware-key capture field,
-        // and the shortcuts it edits drive Shortcut bindings the touch shell never
-        // instantiates. The tab itself stays for desktop; the rail simply omits it.
-        { id: "settings", label: qsTr("Settings"), icon: Theme.icons.settings }
+        { id: "transitions", label: qsTr("Transitions"), icon: Theme.icons.chevronsRight }
     ]
 
     Rectangle {
@@ -55,75 +57,167 @@ Item {
         z: 1
     }
 
-    Flickable {
-        id: flick
-        // Extra top inset so icons aren't tight under the hairline; bottom uses the
-        // safe-area inset only (no second empty pad under the rail).
+    Item {
+        id: railBody
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        anchors.topMargin: Theme.spacingMd + 1
         anchors.bottomMargin: root.bottomInset
         anchors.leftMargin: root.leftInset
         anchors.rightMargin: root.rightInset
-        contentWidth: railRow.width
-        contentHeight: height
-        flickableDirection: Flickable.HorizontalFlick
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
 
-        Row {
-            id: railRow
-            height: parent.height
-            leftPadding: Theme.spacingSm
-            rightPadding: Theme.spacingSm
-            spacing: 2
+        // Five equal slots, so nothing scrolls off and every target is a fifth of
+        // the rail wide — far past the 48dp floor even on a 360dp phone.
+        readonly property real slotWidth: width / 5
 
-            Repeater {
-                model: root.items
+        component RailButton: AbstractButton {
+            id: railBtn
+            required property var entry
+            property bool selected: false
 
-                delegate: AbstractButton {
-                    id: railBtn
-                    required property var modelData
-                    width: Theme.androidRailItemWidth
-                    height: parent.height
-                    hoverEnabled: true
+            height: railBody.height
+            hoverEnabled: true
 
-                    readonly property bool selected: root.activeId === modelData.id
+            Accessible.role: Accessible.Button
+            Accessible.name: entry.label
+            // Nav state has to reach assistive tech too, not just the tint below.
+            Accessible.checkable: true
+            Accessible.checked: railBtn.selected
 
-                    background: Item { }
+            // Press feedback. On the root rather than the background so the label
+            // dips with the icon, and via scale so packed slots do not reflow.
+            scale: railBtn.down ? Theme.pressScale : 1.0
 
-                    contentItem: Column {
+            Behavior on scale {
+                NumberAnimation { duration: Theme.durationPress; easing.type: Theme.easing }
+            }
+
+            background: Item { }
+
+            contentItem: Item {
+                anchors.fill: parent
+
+                Column {
+                    anchors.centerIn: parent
+                    spacing: 3
+
+                    // Selection pill behind the glyph. The old rail signalled the
+                    // active destination with tint alone — and the tint was
+                    // Theme.primary, which sits at 1.69:1 on the light panel and so
+                    // said nothing at all in light mode.
+                    Rectangle {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 2
+                        width: Theme.iconSizeLg + Theme.spacing2xl
+                        height: Theme.iconSizeLg + Theme.spacingLg
+                        radius: Theme.radiusPill
+                        color: railBtn.selected ? Theme.panelSecondaryBg
+                                                : (railBtn.down ? Theme.panelAccent : "transparent")
 
-                        IconGlyph {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            glyph: railBtn.modelData.icon
-                            iconSize: Theme.iconSizeBase
-                            iconColor: railBtn.selected ? Theme.primary : Theme.mutedForeground
+                        Behavior on color {
+                            ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
                         }
 
-                        Text {
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            text: railBtn.modelData.label
-                            color: railBtn.selected ? Theme.primary : Theme.mutedForeground
-                            font.family: Theme.fontFamily
-                            font.pixelSize: Theme.fontSizeTick
-                            font.weight: railBtn.selected ? Font.Medium : Font.Normal
+                        IconGlyph {
+                            anchors.centerIn: parent
+                            glyph: railBtn.entry.icon
+                            iconSize: Theme.iconSizeLg
+                            iconColor: railBtn.selected ? Theme.accentOnPanel
+                                                        : Theme.mutedForeground
                         }
                     }
 
-                    onClicked: {
-                        if (modelData.id === "edit")
-                            root.editRequested()
-                        else
-                            root.tabRequested(modelData.id)
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: railBtn.entry.label
+                        color: railBtn.selected ? Theme.accentOnPanel : Theme.mutedForeground
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.fontSizeXs
+                        font.weight: railBtn.selected ? Font.Medium : Font.Normal
                     }
                 }
             }
+        }
+
+        RailButton {
+            x: 0
+            width: railBody.slotWidth
+            entry: root.items[0]
+            selected: root.activeId === entry.id
+            onClicked: root.editRequested()
+        }
+
+        RailButton {
+            x: railBody.slotWidth
+            width: railBody.slotWidth
+            entry: root.items[1]
+            selected: root.activeId === entry.id
+            onClicked: root.tabRequested(entry.id)
+        }
+
+        // Centre slot: everything that puts a new clip on the timeline.
+        AbstractButton {
+            id: addButton
+            x: railBody.slotWidth * 2
+            width: railBody.slotWidth
+            height: railBody.height
+            hoverEnabled: true
+
+            Accessible.role: Accessible.Button
+            Accessible.name: qsTr("Add to timeline")
+
+            scale: addButton.down ? Theme.pressScale : 1.0
+
+            Behavior on scale {
+                NumberAnimation { duration: Theme.durationPress; easing.type: Theme.easing }
+            }
+
+            background: Item { }
+
+            contentItem: Item {
+                anchors.fill: parent
+
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: Theme.androidRailFabSize
+                    height: Theme.androidRailFabSize
+                    radius: Theme.radiusLg
+                    // The one filled control in the shell, so "add something" reads
+                    // as the rail's primary action rather than a fifth tab. `primary`
+                    // is a fill here, not a foreground, so it needs no light-mode
+                    // variant — primaryForeground is 9.8:1 on it in both themes.
+                    color: addButton.down ? Qt.darker(Theme.primary, 1.12) : Theme.primary
+
+                    Behavior on color {
+                        ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                    }
+
+                    IconGlyph {
+                        anchors.centerIn: parent
+                        glyph: Theme.icons.plus
+                        iconSize: Theme.iconSizeXl
+                        iconColor: Theme.primaryForeground
+                    }
+                }
+            }
+
+            onClicked: root.addRequested()
+        }
+
+        RailButton {
+            x: railBody.slotWidth * 3
+            width: railBody.slotWidth
+            entry: root.items[2]
+            selected: root.activeId === entry.id
+            onClicked: root.tabRequested(entry.id)
+        }
+
+        RailButton {
+            x: railBody.slotWidth * 4
+            width: railBody.slotWidth
+            entry: root.items[3]
+            selected: root.activeId === entry.id
+            onClicked: root.tabRequested(entry.id)
         }
     }
 }

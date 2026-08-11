@@ -25,6 +25,8 @@ ApplicationWindow {
     property var _openMenus: []
     // The live AndroidEditor instance, so Back can ask it to close a sheet first.
     property var editorPage: null
+    // The live AndroidHome instance, so Back can refuse to leave mid-import.
+    property var homePage: null
 
     function confirmIfDirty(action) {
         if (!EditorState.hasUnsavedChanges) {
@@ -144,6 +146,14 @@ ApplicationWindow {
                 return
             if (window.editorPage && window.editorPage.handleBack())
                 return
+            // A SAF copy is running and AssetLibrary has no cancel entry point, so
+            // closing the window kills the worker part-way through a file. Swallow
+            // Back — but say so, because a Back key that silently does nothing is
+            // its own defect.
+            if (window.homePage && window.homePage.importOwned && AssetLibrary.importing) {
+                Toasts.info(qsTr("Import in progress…"))
+                return
+            }
             window.goBack()
         }
     }
@@ -163,6 +173,13 @@ ApplicationWindow {
                 // stays unanswered, and the next autosave overwrites it. Swallow Back and
                 // leave it up — that is what its NoAutoClose policy already asks for.
                 if (modals[i] === recoveryDialog)
+                    return true
+                // Same reasoning, different cause: these three cancel the job they
+                // are reporting on when they close, and Back is far too easy to
+                // hit for that. The dialog's own Cancel button stays the way out.
+                if (modals[i] === reverseProgressDialog
+                        || modals[i] === subtitleProgressDialog
+                        || modals[i] === packageProgressDialog)
                     return true
                 modals[i].close()
                 return true
@@ -186,7 +203,13 @@ ApplicationWindow {
         while (window._openMenus.length > 0) {
             const menu = window._openMenus.pop()
             if (menu && menu.visible) {
-                menu.close()
+                // A Dialog dismissed with close() emits neither accepted nor
+                // rejected, so the onRejected cleanup its owner relies on never
+                // runs. Menus have no reject(); dialogs do.
+                if (typeof menu.reject === "function")
+                    menu.reject()
+                else
+                    menu.close()
                 return true
             }
         }
@@ -522,11 +545,36 @@ ApplicationWindow {
         id: stack
         anchors.fill: parent
         initialItem: homeComponent
+
+        // Forward slides in from the right and pushes the old page a third of the
+        // way off; Back reverses it, faster. The Basic style's default is a 400ms
+        // OutCubic with the same duration both ways, which is off every motion
+        // token in Theme and reads as drift rather than navigation.
+        pushEnter: Transition {
+            NumberAnimation { property: "x"; from: stack.width; to: 0
+                              duration: Theme.durationSlow; easing.type: Theme.easing }
+        }
+        pushExit: Transition {
+            NumberAnimation { property: "x"; from: 0; to: -stack.width * 0.3
+                              duration: Theme.durationSlow; easing.type: Theme.easing }
+        }
+        popEnter: Transition {
+            NumberAnimation { property: "x"; from: -stack.width * 0.3; to: 0
+                              duration: Theme.durationBase; easing.type: Theme.easing }
+        }
+        popExit: Transition {
+            NumberAnimation { property: "x"; from: 0; to: stack.width
+                              duration: Theme.durationBase; easing.type: Theme.easing }
+        }
+        replaceEnter: pushEnter
+        replaceExit: pushExit
     }
 
     Component {
         id: homeComponent
         AndroidHome {
+            Component.onCompleted: window.homePage = this
+            Component.onDestruction: if (window.homePage === this) window.homePage = null
             onEnterEditor: window.showEditor()
             onOpenProjectRequested: window.openProjectFile()
             onOpenRecentRequested: (path) => window.openRecent(path)
@@ -547,5 +595,5 @@ ApplicationWindow {
         }
     }
 
-    ToastHost { }
+    ToastHost { parent: Overlay.overlay }
 }

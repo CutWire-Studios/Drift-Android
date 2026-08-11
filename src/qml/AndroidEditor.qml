@@ -33,7 +33,21 @@ Item {
         if (!assetsSheet.opened)
             assetsSheet.open()
         if (propertiesSheet.opened)
-            propertiesSheet.close()
+            propertiesSheet.dismiss()
+    }
+
+    // The rail's [+]. Clears whatever sheet is up first: the add menu is a step on
+    // the way to one of them, and stacking it over an open Media sheet would leave
+    // two sheets to dismiss to get back to the timeline.
+    function openAddMenu() {
+        sheetKind = ""
+        rail.activeId = ""
+        if (assetsSheet.opened)
+            assetsSheet.dismiss()
+        if (propertiesSheet.opened)
+            propertiesSheet.dismiss()
+        if (!addMenu.opened)
+            addMenu.open()
     }
 
     function openPropertiesSheet() {
@@ -42,16 +56,18 @@ Item {
         if (!propertiesSheet.opened)
             propertiesSheet.open()
         if (assetsSheet.opened)
-            assetsSheet.close()
+            assetsSheet.dismiss()
     }
 
     function closeSheets() {
         sheetKind = ""
         rail.activeId = ""
+        if (addMenu.opened)
+            addMenu.dismiss()
         if (assetsSheet.opened)
-            assetsSheet.close()
+            assetsSheet.dismiss()
         if (propertiesSheet.opened)
-            propertiesSheet.close()
+            propertiesSheet.dismiss()
     }
 
     // Android Back, delegated from AndroidMain. Returns true when it consumed the press,
@@ -71,6 +87,10 @@ Item {
         }
         if (packageProgressDialog.visible)
             return true // a package render is running; swallow rather than abandon it
+        if (addMenu.opened) {
+            addMenu.dismiss()
+            return true
+        }
         if (assetsSheet.opened || propertiesSheet.opened) {
             root.closeSheets()
             return true
@@ -140,6 +160,7 @@ Item {
             onOpenRequested: root.openProject()
             onNewRequested: root.requestNewProject()
             onLayoutRequested: Window.window.openLayoutChooser()
+            onAssetsTabRequested: (tabId) => root.openAssetsTab(tabId)
         }
 
         SplitView {
@@ -325,7 +346,13 @@ Item {
             visible: !root.previewFullscreen
             onTabRequested: (tabId) => root.openAssetsTab(tabId)
             onEditRequested: root.openPropertiesSheet()
+            onAddRequested: root.openAddMenu()
         }
+    }
+
+    AndroidAddMenu {
+        id: addMenu
+        onPicked: (tabId) => root.openAssetsTab(tabId)
     }
 
     AndroidBottomSheet {
