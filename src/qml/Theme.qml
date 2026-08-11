@@ -38,7 +38,7 @@ QtObject {
         border: "#292929",
         accent: "#242424",
         accentForeground: "#f2f2f2",
-        mutedForeground: "#808080",
+        mutedForeground: "#999999",
         popoverHover: "#212121",
         panelBackground: "#1a1a1a",
         panelForeground: "#d9d9d9",
@@ -56,7 +56,7 @@ QtObject {
         border: "#e8e8e8",
         accent: "#f5f5f5",
         accentForeground: "#050505",
-        mutedForeground: "#7a7a7a",
+        mutedForeground: "#6b6b6b",
         popoverHover: "#f5f5f5",
         panelBackground: "#f9fafb",
         panelForeground: "#212121",
@@ -93,6 +93,10 @@ QtObject {
     readonly property color scrollbarHandle: darkMode ? "#6a6a6a" : panelMuted
     readonly property color scrollbarHandleHover: darkMode ? "#888888" : mutedForeground
     readonly property color scrollbarHandlePressed: darkMode ? "#b8b8b8" : foreground
+    // Bottom-sheet drag pill. panelBorder put it at 1.28:1 against the sheet in both
+    // themes, so the one affordance saying "this sheet moves" was invisible; these
+    // clear the 3:1 non-text floor (3.1:1 dark, 3.0:1 light).
+    readonly property color sheetHandle: darkMode ? "#6a6a6a" : "#919191"
     readonly property color panelSecondaryBg: _palette.panelSecondaryBg
     readonly property color panelSecondaryBorder: _palette.panelSecondaryBorder
     readonly property color panelSecondaryForeground: _palette.panelSecondaryForeground
@@ -100,6 +104,12 @@ QtObject {
     // --- Colors: shared semantic (identical in both themes) -----------------------
     readonly property color primary: "#F8B81C"
     readonly property color primaryForeground: "#221900"
+    // `primary` as a *foreground* on a panel surface. The brand amber is a fill
+    // colour: on the light panel it lands at 1.69:1, so a selected tab tinted with
+    // it was effectively invisible. Dark mode keeps the amber (9.8:1); light mode
+    // uses the darkened brand tone (5.2:1). Only for text/glyphs on panels —
+    // fills, rings and progress arcs still use `primary` in both themes.
+    readonly property color accentOnPanel: darkMode ? primary : "#8a6300"
     readonly property color destructive: "#e91616"
     readonly property color constructive: "#23d160"
     readonly property color warning: "#f97316"
@@ -132,8 +142,8 @@ QtObject {
     readonly property color skeletonHighlight: darkMode ? "#333333" : "#f5f5f5"
 
     // --- Colors: timeline clip types (fixed regardless of app theme) ---------------
-    readonly property color clipText: "#5DBAA0"
-    readonly property color clipSubtitle: "#4A9FD4"
+    readonly property color clipText: "#41826f"
+    readonly property color clipSubtitle: "#397ca5"
     readonly property color clipAudio: "#8F5DBA"
     readonly property color clipGraphic: "#BA5D7A"
     readonly property color clipEffect: "#5d93ba"
@@ -296,8 +306,8 @@ QtObject {
     readonly property real timelineBookmarkRowHeight: 18
     readonly property real trackHeightVideo: 65
     readonly property real trackHeightAudio: 50
-    readonly property real trackHeightText: 25
-    readonly property real trackHeightSubtitle: 25
+    readonly property real trackHeightText: touchUi ? 44 : 25
+    readonly property real trackHeightSubtitle: touchUi ? 44 : 25
     readonly property real trackHeightShape: 50
     readonly property real trackGap: 6
     // Invisible hit area above tracks (no visible UI) for new-track drops when timeline has clips.
@@ -328,19 +338,26 @@ QtObject {
     // --- Layout: Android / touch -----------------------------------------------
     // Used by AndroidMain / AndroidTimeline / AndroidPreview and the CapCut shell.
     // Desktop chrome keeps the metrics above.
-    readonly property real androidIconButtonSize: 40
-    readonly property real androidTimelineToolbarHeight: 48
-    readonly property real androidPreviewTransportHeight: 48
-    readonly property real androidTopBarHeight: 48
-    readonly property real androidBottomRailHeight: 56
-    readonly property real androidEditActionsHeight: 48
-    readonly property real androidSplitterHeight: 16
+    readonly property real androidIconButtonSize: 48
+    readonly property real androidTimelineToolbarHeight: 56
+    readonly property real androidPreviewTransportHeight: 56
+    readonly property real androidTopBarHeight: 56
+    // Four destinations plus the centred Add button. Taller than the old scrolling
+    // strip because the Add button is a 48dp target that has to sit inside it.
+    readonly property real androidBottomRailHeight: 64
+    readonly property real androidEditActionsHeight: 56
+    readonly property real androidSplitterHeight: 32
     readonly property real androidSheetHeightFraction: 0.55
     readonly property real androidSheetExpandedFraction: 0.92
     // Full drag chrome: handle pill + title row.
     readonly property real androidSheetHeaderHeight: 56
     readonly property real androidSheetDismissFraction: 0.38
-    readonly property real androidRailItemWidth: 64
+    // The rail's five slots divide its width, so destinations have no fixed width.
+    // The Add button is the one that does: a docked-FAB-sized target in the centre.
+    readonly property real androidRailFabSize: 48
+    // Add-menu row. A token rather than a literal because the sheet computes its own
+    // height from the row count, and the two must not drift apart.
+    readonly property real androidAddRowHeight: 64
     // Mute/hide icons only — track type labels do not fit a phone. Wide enough for the
     // two toggles to sit a dead band apart without their hit areas reaching the type
     // caption on the left or the corner filmstrip toggle below it.
