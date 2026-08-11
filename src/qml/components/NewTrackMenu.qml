@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Window
 import Drift
 
 // Dropdown for inserting an empty timeline track by type.
@@ -16,11 +17,25 @@ Popup {
     // menu used to be mouse-only despite already handling Escape.
     property int highlightIndex: 0
 
+    // Android's Back is not Escape, so closePolicy never sees it and Back walked out of the
+    // editor with this menu still up. AndroidMain's Back dispatcher closes the topmost
+    // registered menu instead.
+    property var _backHost: null
+
     onOpened: {
         highlightIndex = 0
         // Popup itself is not an Item — Keys.* on the root fails with
         // "Could not attach Keys property". Focus the content column instead.
         contentItem.forceActiveFocus()
+        root._backHost = Theme.touchUi && root.parent ? root.parent.Window.window : null
+        if (root._backHost)
+            root._backHost.pushMenu(root)
+    }
+
+    onClosed: {
+        if (root._backHost)
+            root._backHost.popMenu(root)
+        root._backHost = null
     }
 
     function addHighlighted() {

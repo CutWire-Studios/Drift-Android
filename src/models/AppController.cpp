@@ -23,6 +23,10 @@
 #include "engine/EmojiCatalog.h"
 #include "engine/FontCatalog.h"
 #include "engine/FrameCompositor.h"
+// Engine-internal by its own header comment, and included here only for releaseCaches(): the GPU
+// caches have no other owner outside src/engine to ask. A one-line forwarder on GpuCompositor
+// would restore the boundary.
+#include "engine/GlRuntime.h"
 #include "engine/MediaThumbnail.h"
 #include "engine/AudioFileWriter.h"
 #include "engine/DeepFilterDenoiser.h"
@@ -35,6 +39,7 @@
 #include "engine/ReverseRenderer.h"
 #include "engine/Sam2Segmenter.h"
 #include "engine/StickerCatalog.h"
+#include "engine/TextRaster.h"
 #include "SegmentImageStore.h"
 #include "engine/TransitionCatalog.h"
 #include "engine/WhisperTranscriber.h"
@@ -106,6 +111,23 @@ QString writeTargetPath(const QUrl &url, const QString &suffix = {})
     return url.toLocalFile();
 }
 
+// Whether a failed or cancelled job may dispose of the document it was writing to. Qt's save dialog
+// maps to ACTION_CREATE_DOCUMENT, which usually hands back a new empty file — but DocumentsUI also
+// returns the *existing* document's URI when the user taps a file in the folder to replace it, and
+// destroying that on a cancel at 5% would take a file the job never even reached. Call before the
+// job starts: once commitWriteTarget has opened the destination it has already truncated it.
+bool writeTargetIsDisposable(const QUrl &url)
+{
+    Q_UNUSED(url);
+#ifdef Q_OS_ANDROID
+    if (AndroidUri::isContentUri(url)) {
+        const std::unique_ptr<QFile> existing = AndroidUri::openForRead(url);
+        return existing && existing->size() == 0;
+    }
+#endif
+    return false;
+}
+
 bool commitWriteTarget(const QString &staged, const QUrl &url,
                        const std::function<bool(qint64, qint64)> &progress, QString *error)
 {
@@ -136,6 +158,24 @@ bool commitWriteTarget(const QString &staged, const QUrl &url,
                 return false;
             }
         }
+        // The staged file is the only other copy, so it must not be unlinked until the
+        // destination is known good. A short write is already caught above — chunks are 1 MiB,
+        // past QFile's write-buffer threshold — but the sub-buffer tail is only flushed at
+        // destruction, and a cloud-backed DocumentsProvider commits the upload when the
+        // ParcelFileDescriptor closes. Both of those failures used to be reported as success.
+        if (src.error() != QFile::NoError) {
+            *error = src.errorString();
+            return false;
+        }
+        if (!dst->flush()) {
+            *error = dst->errorString();
+            return false;
+        }
+        dst->close();
+        if (dst->error() != QFile::NoError) {
+            *error = dst->errorString();
+            return false;
+        }
         src.close();
         QFile::remove(staged);
     }
@@ -143,13 +183,23 @@ bool commitWriteTarget(const QString &staged, const QUrl &url,
     return true;
 }
 
-void discardWriteTarget(const QString &staged, const QUrl &url)
+// `deleteDestination` disposes of the document the output was headed for, not just the staging
+// copy: ACTION_CREATE_DOCUMENT has already created the file by the time the picker returns, so an
+// export that fails or is cancelled otherwise leaves a 0-byte "video" in the user's folder. Only
+// ever pass true for a document this same operation created through the save picker — on the
+// Save-in-place path the URL is the user's existing project, and destroying that because a write
+// failed would take the copy they still have with it.
+void discardWriteTarget(const QString &staged, const QUrl &url, bool deleteDestination = false)
 {
     Q_UNUSED(staged);
     Q_UNUSED(url);
+    Q_UNUSED(deleteDestination);
 #ifdef Q_OS_ANDROID
-    if (AndroidUri::isContentUri(url))
+    if (AndroidUri::isContentUri(url)) {
         QFile::remove(staged);
+        if (deleteDestination)
+            AndroidUri::deleteDocument(url);
+    }
 #endif
 }
 
@@ -171,7 +221,11 @@ QString projectLocation(const QUrl &url)
 {
 #ifdef Q_OS_ANDROID
     if (AndroidUri::isContentUri(url)) {
-        AndroidUri::takePersistableReadPermission(url);
+        // Read and write: this is the document Save-in-place writes back to, and persisting the
+        // read grant alone is what made the next launch's Save fail with "could not write to the
+        // location you picked". A false return still leaves the read grant taken, so the project
+        // opens either way.
+        AndroidUri::takePersistableReadWritePermission(url);
         return url.toString(QUrl::FullyEncoded);
     }
 #endif
@@ -440,30 +494,105 @@ AppController::AppController(AssetLibrary *assetLibrary, QObject *parent)
     sweepExtractionDirs();
 }
 
+namespace {
+
+// Every string in a project document, without deserializing it. Used to work out what the recovery
+// snapshot still points at: collecting all strings rather than the path-shaped ones deliberately
+// errs wide, because every entry here only spares a file from being swept.
+void collectJsonStrings(const QJsonValue &value, QSet<QString> *out)
+{
+    if (value.isString()) {
+        out->insert(value.toString());
+    } else if (value.isArray()) {
+        const QJsonArray array = value.toArray();
+        for (const QJsonValue &item : array)
+            collectJsonStrings(item, out);
+    } else if (value.isObject()) {
+        const QJsonObject object = value.toObject();
+        for (auto it = object.constBegin(); it != object.constEnd(); ++it)
+            collectJsonStrings(it.value(), out);
+    }
+}
+
+} // namespace
+
 // Every packaged project ever opened leaves its media unpacked under <AppData>/projects/<id>. Drop
-// the ones no project in the recents list can still be pointing at.
+// the ones no project in the recents list can still be pointing at, and on Android the derived
+// artifacts and SAF import copies nothing points at either.
 void AppController::sweepExtractionDirs()
 {
     const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (base.isEmpty())
         return;
-    QDir root(QDir(base).filePath(QStringLiteral("projects")));
-    if (!root.exists())
-        return;
 
-    QSet<QString> live;
+    // The recovery snapshot is the only record of a session that was never saved, and it is a
+    // project document like any other: its id names an extraction dir that appears in no manifest
+    // — freeze frames are written straight into it — and its paths name derived artifacts nothing
+    // else refers to. Read it before anything is pruned; the constructor sweeps before
+    // restoreAutosave() has had a chance to put those paths into m_project.
+    QJsonObject recovery;
+    {
+        QFile file(recoveryFilePath());
+        if (file.open(QIODevice::ReadOnly))
+            recovery = QJsonDocument::fromJson(file.readAll()).object();
+    }
+
+    QSet<QString> live;      // extraction dirs to keep, by project id
+    QSet<QString> liveFiles; // files outside any bundle that a known project still points at
     for (const QVariant &entry : recentProjects()) {
         const QString path = entry.toMap().value(QStringLiteral("path")).toString();
         QString error;
-        if (const auto info = drift::bundle::readManifest(path, &error))
-            live.insert(info->projectId);
+        const auto info = drift::bundle::readManifest(path, &error);
+        if (!info)
+            continue;
+        live.insert(info->projectId);
+        for (const drift::bundle::MediaEntry &media : info->media)
+            liveFiles.insert(media.originalPath);
+    }
+    const QString recoveryId = recovery.value(QStringLiteral("id")).toString();
+    if (!recoveryId.isEmpty())
+        live.insert(recoveryId);
+    live.insert(m_project.id());
+    collectJsonStrings(recovery, &liveFiles);
+
+    QDir root(QDir(base).filePath(QStringLiteral("projects")));
+    if (root.exists()) {
+        const QFileInfoList dirs = root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QFileInfo &dir : dirs) {
+            if (!live.contains(dir.fileName()))
+                QDir(dir.absoluteFilePath()).removeRecursively();
+        }
     }
 
-    const QFileInfoList dirs = root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const QFileInfo &dir : dirs) {
-        if (!live.contains(dir.fileName()))
-            QDir(dir.absoluteFilePath()).removeRecursively();
+#ifdef Q_OS_ANDROID
+    // Mattes, face tracks and denoised audio are written under uuid names with no owner recorded
+    // anywhere, so an undo or an abandoned project strands them for good. They are always
+    // *embedded* when a project is saved (bundle::collectMedia), which is what makes reclaiming
+    // them safe: the copy here is the last one for exactly two kinds of project — an unsaved
+    // session, which the recovery snapshot above accounts for, and one saved but not yet reopened,
+    // whose manifest still names this path. For anything else, opening the bundle re-extracts it.
+    const QString derivedDirs[] = {drift::matteCacheDir(), drift::faceTrackCacheDir(),
+                                   drift::denoiseCacheDir()};
+    for (const QString &dirPath : derivedDirs) {
+        if (dirPath.isEmpty())
+            continue;
+        const QFileInfoList files = QDir(dirPath).entryInfoList(QDir::Files);
+        for (const QFileInfo &file : files) {
+            if (!liveFiles.contains(file.absoluteFilePath()))
+                QFile::remove(file.absoluteFilePath());
+        }
     }
+
+    // <AppData>/imports is deliberately NOT swept. It holds the app's only copy of every SAF
+    // document ever imported and a saved project points straight at those bytes, so a wrong
+    // liveness answer destroys footage outright. The only liveness set available here is the
+    // recents list, which is capped at ten entries and which the user can prune by hand — a
+    // project that has simply aged off it is indistinguishable from a deleted one. Nor does
+    // AssetLibrary::restoreMissingSources() make it safe: it can only re-copy while the original
+    // content:// document is still there, which is exactly not the case for the user who imported
+    // from a download and then cleared it. Reclaiming this space needs an ownership record written
+    // at import time, not an inference from an MRU list.
+#endif
 }
 
 namespace {
@@ -1754,11 +1883,16 @@ bool AppController::exportAssetImage(int assetIndex, const QUrl &url)
     const QString suffix = QFileInfo(destPath).suffix().toLower();
     const bool jpeg = suffix == QLatin1String("jpg") || suffix == QLatin1String("jpeg");
 
+    const bool disposable = writeTargetIsDisposable(url);
+
     QString error;
     const auto deliver = [&](bool written) {
         if (written && commitWriteTarget(destPath, url, {}, &error))
             return true;
-        discardWriteTarget(destPath, url);
+        // A document the picker created a moment ago is empty, so nothing is lost by removing it —
+        // and leaving it behind would put a 0-byte image in the user's gallery. One the user picked
+        // to overwrite is theirs, and a failure here never got far enough to replace it.
+        discardWriteTarget(destPath, url, disposable);
         return false;
     };
 
@@ -3516,7 +3650,11 @@ void AppController::generateSubtitlesForClip(int trackIndex, int clipIndex, cons
 
     (void)QtConcurrent::run([this, path, srcIn, srcOut, timelineStart, timelineDuration, speed,
                              reverse, languageCode]() {
+        // Minutes of Whisper on a phone, and a backgrounded process is frozen and then killed with
+        // nothing to resume from — the same reason the encode holds one.
+        Exporter::BackgroundHold hold(QStringLiteral("Generating subtitles"));
         auto setProgress = [this](double fraction, const QString &status) {
+            Exporter::BackgroundHold::setPercent(static_cast<int>(fraction * 100.0));
             QMetaObject::invokeMethod(
                 this,
                 [this, fraction, status]() {
@@ -4387,7 +4525,11 @@ void AppController::segmentClip(int trackIndex, int clipIndex, const QVariantLis
 
     (void)QtConcurrent::run([this, path, srcIn, srcOut, fps, canvasW, canvasH, normalized, mode,
                              clipId]() {
+        // SAM2 over every frame of the clip: minutes on a phone, and losing it to the freezer
+        // means starting over.
+        Exporter::BackgroundHold hold(QStringLiteral("Cutting out subject"));
         auto setProgress = [this](double fraction, const QString &status) {
+            Exporter::BackgroundHold::setPercent(static_cast<int>(fraction * 100.0));
             QMetaObject::invokeMethod(
                 this,
                 [this, fraction, status]() {
@@ -4625,7 +4767,9 @@ void AppController::detectFacesForClip(int trackIndex, int clipIndex)
     const QString clipId = clip.id;
 
     (void)QtConcurrent::run([this, path, srcIn, srcOut, fps, canvasW, canvasH, clipId]() {
+        Exporter::BackgroundHold hold(QStringLiteral("Tracking faces"));
         auto setProgress = [this](double fraction, const QString &status) {
+            Exporter::BackgroundHold::setPercent(static_cast<int>(fraction * 100.0));
             QMetaObject::invokeMethod(
                 this,
                 [this, fraction, status]() {
@@ -4888,72 +5032,135 @@ bool AppController::renderDenoisedAudio(const QString &path, drift::TimeUs srcIn
     if (totalFrames <= 0)
         return fail(QStringLiteral("Clip is too short to process"));
 
-    // Decode the raw source window. Speed and reverse are deliberately not applied: the derived
-    // clip inherits them, so the render has to stay in the source's own time base.
-    setProgress(span01(0.05), QStringLiteral("Reading audio…"));
-    std::vector<float> interleaved(size_t(totalFrames) * 2, 0.0f);
-    int64_t have = 0;
-    const int chunkFrames = rate * 10;
-    while (have < totalFrames) {
-        if (m_denoiseCancel.loadRelaxed())
-            return fail(QStringLiteral("Noise removal cancelled"));
-        const drift::TimeUs at = srcIn + drift::TimeUs((have * drift::kUsPerSecond) / rate);
-        const int want = int(std::min<int64_t>(chunkFrames, totalFrames - have));
-        const int got = ClipReaderPool::instance().readAudioInterleaved(
-            path, at, want, rate, interleaved.data() + size_t(have) * 2);
-        if (got <= 0)
-            break;
-        have += got;
-        setProgress(span01(0.05 + 0.20 * double(have) / double(totalFrames)),
-                    QStringLiteral("Reading audio…"));
-    }
-    if (have <= 0)
-        return fail(QStringLiteral("No audio decoded"));
-    interleaved.resize(size_t(have) * 2);
+#ifdef Q_OS_ANDROID
+    // How much of the clip is in memory at once. Every stage of the render is a live float buffer
+    // — the decoded stereo window, the mono channel, the denoiser's own pad/synth pair and the
+    // result it returns — around 1.1 MB per second of audio all told, and all of it native, so
+    // largeHeap does nothing for it. A ten-minute clip is ~700 MB on top of the GL textures, the
+    // decoders and the ORT arena, which on a phone is an OOM kill; so the render walks the clip in
+    // windows and streams each one straight out to the writer.
+    const int64_t windowFrames = int64_t(rate) * 60;
+    // Decoded and denoised in front of every window after the first, then dropped.
+    // DeepFilterDenoiser already splits its own work into 20 s windows and replays a 3 s run-up
+    // across each boundary for this exact reason (kWarmupFrames there), so four seconds gives a
+    // boundary here the same run-up with a second to spare. What a fresh denoise() call cannot
+    // inherit is the feature-normalisation state, which restarts cold at each window — the same
+    // treatment the opening seconds of any clip already get, so the residual risk is a level step
+    // at a boundary rather than a different render.
+    const int64_t headRoll = int64_t(rate) * 4;
+    // The model pads the end of whatever it is handed; without a tail roll the last samples of a
+    // window would be analysed as though the clip stopped there.
+    const int64_t tailRoll = rate;
+#else
+    // Desktop has the memory, and a single call is the only way to be sample-identical to what it
+    // rendered before.
+    const int64_t windowFrames = totalFrames;
+    const int64_t headRoll = 0;
+    const int64_t tailRoll = 0;
+#endif
 
-    // The A/B source for the preview window, written before the model runs so a cancel still
-    // leaves nothing half-made.
-    if (!originalPath.isEmpty()) {
-        drift::AudioFileWriter orig;
-        QString error;
-        if (!orig.open(originalPath, rate, 2, &error))
-            return fail(error);
-        if (!orig.writeFrames(interleaved.data(), int(have), &error) || !orig.finish(&error)) {
-            orig.abort();
-            return fail(error);
-        }
-    }
-
-    // The model is mono, so each channel goes through separately and the stereo image is kept.
-    std::vector<float> mono(size_t(have), 0.0f);
-    for (int ch = 0; ch < 2; ++ch) {
-        for (int64_t i = 0; i < have; ++i)
-            mono[size_t(i)] = interleaved[size_t(i) * 2 + ch];
-
-        const double base = 0.25 + 0.35 * ch;
-        const std::vector<float> clean = dn.denoise(mono, [&](double f) {
-            setProgress(span01(base + 0.35 * f),
-                        ch == 0 ? QStringLiteral("Removing noise (left)…")
-                                : QStringLiteral("Removing noise (right)…"));
-            return m_denoiseCancel.loadRelaxed() == 0;
-        });
-        if (clean.empty()) {
-            return fail(m_denoiseCancel.loadRelaxed() ? QStringLiteral("Noise removal cancelled")
-                                                      : dn.lastError());
-        }
-        for (int64_t i = 0; i < have; ++i)
-            interleaved[size_t(i) * 2 + ch] = clean[size_t(i)];
-    }
-
-    setProgress(span01(0.95), QStringLiteral("Writing audio…"));
     drift::AudioFileWriter writer;
+    drift::AudioFileWriter original;
     QString error;
     if (!writer.open(outPath, rate, 2, &error))
         return fail(error);
-    if (!writer.writeFrames(interleaved.data(), int(have), &error) || !writer.finish(&error)) {
+    // The A/B source for the preview, taken from the same decode as the render so the two files
+    // line up sample for sample.
+    if (!originalPath.isEmpty() && !original.open(originalPath, rate, 2, &error)) {
         writer.abort();
         return fail(error);
     }
+    // Both are written as ".part" until finish(), so a cancel leaves nothing half-made.
+    const auto abandon = [&](const QString &message) {
+        writer.abort();
+        original.abort();
+        return fail(message);
+    };
+
+    const int chunkFrames = rate * 10;
+    int64_t kept = 0;
+    for (int64_t winStart = 0; winStart < totalFrames; winStart += windowFrames) {
+        const int64_t winEnd = std::min(winStart + windowFrames, totalFrames);
+        const int64_t from = std::max<int64_t>(0, winStart - headRoll);
+        const int64_t to = std::min(totalFrames, winEnd + tailRoll);
+        const int64_t want = to - from;
+
+        // A fraction within this window, mapped onto the window's share of the whole clip — so a
+        // render that fits in one window reports exactly the numbers it always did.
+        const auto step = [&](double f, const QString &status) {
+            const double a = double(winStart) / double(totalFrames);
+            const double b = double(winEnd) / double(totalFrames);
+            setProgress(span01(a + (b - a) * f), status);
+        };
+
+        // Decode the raw source window. Speed and reverse are deliberately not applied: the
+        // derived clip inherits them, so the render has to stay in the source's own time base.
+        step(0.05, QStringLiteral("Reading audio…"));
+        std::vector<float> interleaved(size_t(want) * 2, 0.0f);
+        int64_t have = 0;
+        while (have < want) {
+            if (m_denoiseCancel.loadRelaxed())
+                return abandon(QStringLiteral("Noise removal cancelled"));
+            const drift::TimeUs at =
+                srcIn + drift::TimeUs(((from + have) * drift::kUsPerSecond) / rate);
+            const int ask = int(std::min<int64_t>(chunkFrames, want - have));
+            const int got = ClipReaderPool::instance().readAudioInterleaved(
+                path, at, ask, rate, interleaved.data() + size_t(have) * 2);
+            if (got <= 0)
+                break;
+            have += got;
+            step(0.05 + 0.20 * double(have) / double(want), QStringLiteral("Reading audio…"));
+        }
+
+        // The part of the window that is output rather than run-up, clipped to what the source
+        // actually held: a clip whose media runs out early ends the render here.
+        const int64_t keepFrom = winStart - from;
+        const int64_t keepLen = std::min(have, winEnd - from) - keepFrom;
+        if (keepLen <= 0)
+            break;
+        interleaved.resize(size_t(have) * 2);
+
+        if (!originalPath.isEmpty()
+            && !original.writeFrames(interleaved.data() + size_t(keepFrom) * 2, int(keepLen),
+                                     &error)) {
+            return abandon(error);
+        }
+
+        // The model is mono, so each channel goes through separately and the stereo image is kept.
+        std::vector<float> mono(size_t(have), 0.0f);
+        for (int ch = 0; ch < 2; ++ch) {
+            for (int64_t i = 0; i < have; ++i)
+                mono[size_t(i)] = interleaved[size_t(i) * 2 + ch];
+
+            const double base = 0.25 + 0.35 * ch;
+            const std::vector<float> clean = dn.denoise(mono, [&](double f) {
+                step(base + 0.35 * f, ch == 0 ? QStringLiteral("Removing noise (left)…")
+                                              : QStringLiteral("Removing noise (right)…"));
+                return m_denoiseCancel.loadRelaxed() == 0;
+            });
+            if (clean.empty()) {
+                return abandon(m_denoiseCancel.loadRelaxed()
+                                   ? QStringLiteral("Noise removal cancelled")
+                                   : dn.lastError());
+            }
+            for (int64_t i = 0; i < have; ++i)
+                interleaved[size_t(i) * 2 + ch] = clean[size_t(i)];
+        }
+
+        step(0.95, QStringLiteral("Writing audio…"));
+        if (!writer.writeFrames(interleaved.data() + size_t(keepFrom) * 2, int(keepLen), &error))
+            return abandon(error);
+        kept += keepLen;
+        if (have < want)
+            break;
+    }
+
+    if (kept <= 0)
+        return abandon(QStringLiteral("No audio decoded"));
+    if (!writer.finish(&error))
+        return abandon(error);
+    if (!originalPath.isEmpty() && !original.finish(&error))
+        return abandon(error);
 
     setProgress(span01(1.0), QString());
     return true;
@@ -5096,6 +5303,9 @@ void AppController::applyDenoise(int trackIndex, int clipIndex)
     }
 
     (void)QtConcurrent::run([this, path, srcIn, span, outPath, clipId]() {
+        // The whole clip through DeepFilterNet, twice over — one pass per channel. Unlike the
+        // 8 s preview this is long enough to outlive a screen that idles out.
+        Exporter::BackgroundHold hold(QStringLiteral("Removing noise"));
         QString error;
         const bool ok = renderDenoisedAudio(path, srcIn, span, outPath, QString(), 0.0, 1.0, &error);
         QMetaObject::invokeMethod(
@@ -6635,7 +6845,9 @@ void AppController::startReverseRender(const QString &sourcePath, drift::TimeUs 
     // Playback deliberately keeps running: renderReversed opens its own demuxer rather than
     // driving the shared decode pool, so the clip stays watchable (on the slow path) meanwhile.
     (void)QtConcurrent::run([this, sourcePath, coverInUs, coverOutUs]() {
+        Exporter::BackgroundHold hold(QStringLiteral("Reversing clip"));
         auto setProgress = [this](double fraction, const QString &status) {
+            Exporter::BackgroundHold::setPercent(static_cast<int>(fraction * 100.0));
             QMetaObject::invokeMethod(
                 this,
                 [this, fraction, status]() {
@@ -10209,11 +10421,111 @@ void AppController::saveProject(const QUrl &url)
 
     m_project.setModifiedAt(QDateTime::currentDateTimeUtc());
 
+    // Built up front on both paths: the worker the Android branch may hand this to must not be
+    // reading the project while the timeline is free to change under it.
     const drift::bundle::WriteRequest request = buildWriteRequest(/*embedSource=*/false);
+
+#ifdef Q_OS_ANDROID
+    // A project that arrived as a package keeps its media inside it (see buildWriteRequest), so a
+    // plain Save of one streams every embedded source through the bundle writer and then a second
+    // time into the SAF document — gigabytes, and until now on the GUI thread with no progress and
+    // no way out. That is packageProject's exact shape, so Save borrows it wholesale, packaging
+    // flag and Cancel included.
+    //
+    // Only for that case: a project whose media is referenced rather than embedded writes a JSON
+    // manifest and nothing else, and putting *every* Save behind a modal progress dialog — and
+    // behind a result that no longer arrives before the call returns — would be a bad trade for
+    // the common one. Desktop always writes straight to the picked path.
+    // Source media only. collectMedia embeds mattes, face tracks and denoised audio regardless of
+    // embedSource, and those are kilobytes to a few MB — letting one masked clip divert an ordinary
+    // Save onto the worker path would put a modal progress dialog over a write that takes no time.
+    const bool streamsMedia = std::any_of(request.media.cbegin(), request.media.cend(),
+                                          [](const drift::bundle::MediaEntry &entry) {
+                                              return entry.embedded
+                                                  && entry.role == drift::bundle::MediaRole::Source;
+                                          });
+    if (streamsMedia) {
+        m_packageCancel = 0;
+        m_packaging = true;
+        m_packageProgress = 0.0;
+        emit packagingChanged();
+        emit packageProgressChanged();
+
+        (void)QtConcurrent::run([this, path, url, request]() {
+            Exporter::BackgroundHold hold(QStringLiteral("Saving project"));
+            QString error;
+            const auto progress = [this](qint64 done, qint64 total) {
+                if (m_packageCancel.loadRelaxed())
+                    return false;
+                const double fraction = total > 0 ? double(done) / double(total) : 0.0;
+                Exporter::BackgroundHold::setPercent(static_cast<int>(fraction * 100.0));
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, fraction]() {
+                        m_packageProgress = fraction;
+                        emit packageProgressChanged();
+                    },
+                    Qt::QueuedConnection);
+                return true;
+            };
+            const bool written = drift::bundle::write(path, request, progress, &error);
+            bool ok = written;
+            if (ok) {
+                // Reports progress but never returns false. commitWriteTarget opens the
+                // destination WriteOnly|Truncate, so the user's existing project is gone the
+                // moment the copy starts; honouring Cancel here would leave that document
+                // truncated and then delete the staged bundle that was about to replace it.
+                // Cancel therefore only reaches the bundle writer above, which is still working
+                // against the staging file and can be abandoned safely.
+                const auto reportOnly = [&progress](qint64 done, qint64 total) {
+                    (void)progress(done, total);
+                    return true;
+                };
+                ok = commitWriteTarget(path, url, reportOnly, &error);
+            }
+            // Never deletes the destination document: on the Save-in-place path this URL is
+            // the user's existing project, and a failed write is no reason to take it away.
+            if (!ok)
+                discardWriteTarget(path, url);
+            QMetaObject::invokeMethod(
+                this,
+                [this, ok, written, error, url, request]() {
+                    m_packaging = false;
+                    emit packagingChanged();
+                    if (!ok) {
+                        // Only a failed commit says anything about the document: a bundle
+                        // writer failure is about the staging file. A commit most likely lost
+                        // its write grant across a restart, so drop the association and let
+                        // the next Save ask for a location.
+                        if (written)
+                            setCurrentProjectPath(QString());
+                        setLastMessage(error, QStringLiteral("error"));
+                        emit projectSaved(false);
+                        return;
+                    }
+                    rememberEmbeddedSources(request.media);
+                    m_packageProgress = 1.0;
+                    emit packageProgressChanged();
+                    const QString location = projectLocation(url);
+                    setCurrentProjectPath(location);
+                    addRecentProject(location);
+                    setDirty(false);
+                    deleteRecoveryFile();
+                    emit projectMetadataChanged();
+                    setLastMessage(QStringLiteral("Project saved"), QStringLiteral("success"));
+                    emit projectSaved(true);
+                },
+                Qt::QueuedConnection);
+        });
+        return;
+    }
+#endif
+
     QString error;
     if (!drift::bundle::write(path, request, {}, &error)) {
         discardWriteTarget(path, url);
         setLastMessage(error, QStringLiteral("error"));
+        emit projectSaved(false);
         return;
     }
     if (!commitWriteTarget(path, url, {}, &error)) {
@@ -10222,6 +10534,7 @@ void AppController::saveProject(const QUrl &url)
         // survive the restart — so drop the association and let the next Save ask for a location.
         setCurrentProjectPath(QString());
         setLastMessage(error, QStringLiteral("error"));
+        emit projectSaved(false);
         return;
     }
     rememberEmbeddedSources(request.media);
@@ -10233,6 +10546,7 @@ void AppController::saveProject(const QUrl &url)
     deleteRecoveryFile();
     emit projectMetadataChanged();
     setLastMessage(QStringLiteral("Project saved"), QStringLiteral("success"));
+    emit projectSaved(true);
 }
 
 void AppController::packageProject(const QUrl &url)
@@ -10255,13 +10569,16 @@ void AppController::packageProject(const QUrl &url)
     // The whole request is built here, on the GUI thread: the worker copies gigabytes and must not
     // be reading the project while the timeline is free to change under it.
     const drift::bundle::WriteRequest request = buildWriteRequest(/*embedSource=*/true);
+    const bool disposable = writeTargetIsDisposable(url);
 
-    (void)QtConcurrent::run([this, path, url, request]() {
+    (void)QtConcurrent::run([this, path, url, request, disposable]() {
+        Exporter::BackgroundHold hold(QStringLiteral("Saving shareable copy"));
         QString error;
         const auto progress = [this](qint64 done, qint64 total) {
             if (m_packageCancel.loadRelaxed())
                 return false;
             const double fraction = total > 0 ? double(done) / double(total) : 0.0;
+            Exporter::BackgroundHold::setPercent(static_cast<int>(fraction * 100.0));
             QMetaObject::invokeMethod(
                 this,
                 [this, fraction]() {
@@ -10276,8 +10593,11 @@ void AppController::packageProject(const QUrl &url)
         // so the finished pack is streamed into it here — the bar runs a second time for that.
         if (ok)
             ok = commitWriteTarget(path, url, progress, &error);
+        // An empty document is one the save picker created for this job, so a cancel disposes of it
+        // rather than leaving an empty .drift that opens as a corrupt project. One the user picked
+        // to replace keeps whatever it already held.
         if (!ok)
-            discardWriteTarget(path, url);
+            discardWriteTarget(path, url, disposable);
         QMetaObject::invokeMethod(
             this,
             [this, ok, error, url, request]() {
@@ -10582,6 +10902,17 @@ void AppController::flushRecoverySnapshot()
         writeRecoveryFile();
 }
 
+void AppController::releaseTransientCaches()
+{
+    ClipReaderPool::instance().releaseAll();
+    FrameCompositor::clearStillImageCache();
+    clearTextRasterCaches();
+    // Uploaded textures and the FBO pool, without tearing the context down. Runs on the GL thread
+    // and blocks, which is what makes it safe from here; it returns without creating a context if
+    // GL was never brought up at all.
+    drift::gl::runtime().releaseCaches();
+}
+
 void AppController::writeRecoveryFile()
 {
     const QString path = recoveryFilePath();
@@ -10865,7 +11196,7 @@ void AppController::cancelExport()
 bool AppController::canShareExport() const
 {
 #ifdef Q_OS_ANDROID
-    return !m_lastExportUrl.isEmpty();
+    return !m_lastExportUrl.isEmpty() && !m_sharingExport;
 #else
     return false;
 #endif
@@ -10874,18 +11205,38 @@ bool AppController::canShareExport() const
 void AppController::shareLastExport()
 {
 #ifdef Q_OS_ANDROID
-    if (m_lastExportUrl.isEmpty())
+    if (m_lastExportUrl.isEmpty() || m_sharingExport)
         return;
 
-    QString error;
-    const QUrl published = Exporter::publishToGallery(m_lastExportUrl, m_lastExportName, &error);
-    if (published.isEmpty()) {
-        setLastMessage(error, QStringLiteral("error"));
-        return;
-    }
-    if (!FileDialogs().shareFile(published))
-        setLastMessage(QStringLiteral("Nothing on this device can share that file"),
-                       QStringLiteral("error"));
+    // publishToGallery streams every byte of the export into a MediaStore row, reading it back out
+    // of the SAF document the user picked — which can be a cloud provider, so the copy is bounded
+    // by the network. Inline, as this used to be, that is an ANR on anything longer than a clip.
+    // Only the copy moves: shareFile starts an Activity and has to stay on the GUI thread.
+    m_sharingExport = true;
+    emit canShareExportChanged();
+    setLastMessage(QStringLiteral("Getting your video ready to share…"));
+
+    const QUrl source = m_lastExportUrl;
+    const QString name = m_lastExportName;
+    (void)QtConcurrent::run([this, source, name]() {
+        Exporter::BackgroundHold hold(QStringLiteral("Preparing to share"));
+        QString error;
+        const QUrl published = Exporter::publishToGallery(source, name, &error);
+        QMetaObject::invokeMethod(
+            this,
+            [this, published, error]() {
+                m_sharingExport = false;
+                emit canShareExportChanged();
+                if (published.isEmpty()) {
+                    setLastMessage(error, QStringLiteral("error"));
+                    return;
+                }
+                if (!FileDialogs().shareFile(published))
+                    setLastMessage(QStringLiteral("Nothing on this device can share that file"),
+                                   QStringLiteral("error"));
+            },
+            Qt::QueuedConnection);
+    });
 #endif
 }
 
@@ -10945,7 +11296,14 @@ void AppController::exportWithSettings(const QUrl &outputUrl, const QVariantMap 
     // Snapshot the project so edits during export can't race the encoder.
     const drift::Project snapshot = m_project;
 
-    (void)QtConcurrent::run([this, snapshot, exportSettings, outputPath, outputUrl]() {
+    const bool disposable = writeTargetIsDisposable(outputUrl);
+
+    (void)QtConcurrent::run([this, snapshot, exportSettings, outputPath, outputUrl, disposable]() {
+        // Spans the encode *and* the copy into the user's document. Exporter::run takes its own
+        // hold, but that one ends when run() returns — and the commit below is the phase that
+        // would otherwise lose a multi-minute render to a screen that idled out mid-copy. The
+        // holds are refcounted, so the inner one nests without restarting the service.
+        Exporter::BackgroundHold hold(QStringLiteral("Exporting"));
         QString error;
         const auto report = [this](double fraction) {
             QMetaObject::invokeMethod(
@@ -10965,12 +11323,17 @@ void AppController::exportWithSettings(const QUrl &outputUrl, const QVariantMap 
             ok = commitWriteTarget(
                 outputPath, outputUrl,
                 [&report](qint64 done, qint64 total) {
-                    return report(total > 0 ? double(done) / double(total) : 0.0);
+                    const double fraction = total > 0 ? double(done) / double(total) : 0.0;
+                    Exporter::BackgroundHold::setPercent(static_cast<int>(fraction * 100.0));
+                    return report(fraction);
                 },
                 &error);
         }
+        // An empty document is one this export created through the save picker: without disposing
+        // of it a cancel at 5% leaves a 0-byte file the user's gallery shows as a video. A document
+        // that already had bytes is one the user chose to replace, and a cancel never reached it.
         if (!ok)
-            discardWriteTarget(outputPath, outputUrl);
+            discardWriteTarget(outputPath, outputUrl, disposable);
 
         QMetaObject::invokeMethod(
             this,

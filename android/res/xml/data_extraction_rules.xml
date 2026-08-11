@@ -10,6 +10,15 @@
         <exclude domain="file" path="addons" />
         <exclude domain="file" path="cache" />
         <exclude domain="file" path="emoji" />
+        <!-- The two directories that actually blow the 25 MB quota, and the reason a backup with
+             any imported media in it failed wholesale. `imports` is a byte-for-byte copy of every
+             media file picked through SAF (AssetLibrary::importsDir) and `projects` holds media
+             unpacked out of .drift bundles (AppController::sweepExtractionDirs deletes it once no
+             recent project needs it). Neither is authoritative: the .drift file is a SAF document
+             outside app data, and restoreMissingSources() repoints a project whose copies went
+             missing. -->
+        <exclude domain="file" path="imports" />
+        <exclude domain="file" path="projects" />
         <exclude domain="external" path="." />
     </cloud-backup>
     <device-transfer>
@@ -18,5 +27,10 @@
         <exclude domain="file" path="facetracks" />
         <exclude domain="file" path="denoised" />
         <exclude domain="file" path="cache" />
+        <!-- `projects` is regenerated from the bundle on the next load and swept at startup, so it
+             is pure duplication over the wire. `imports` deliberately stays in the transfer even
+             though it is the bulkier of the two: it is not regenerable on the new device, because
+             the persisted content:// grants a re-import would need do not travel with the data. -->
+        <exclude domain="file" path="projects" />
     </device-transfer>
 </data-extraction-rules>

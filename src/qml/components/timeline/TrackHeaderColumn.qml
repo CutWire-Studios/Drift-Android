@@ -287,7 +287,11 @@ Item {
                 anchors.rightMargin: root.compact ? 4 : 12
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.verticalCenterOffset: index < root.tracks.length - 1 ? -Theme.trackGap / 2 : 0
-                spacing: root.compact ? 4 : 8
+                // Each toggle's hit area overhangs its glyph by 4 either side, so a 4px
+                // gap left the mute and hide targets touching: half the visible gap fired
+                // the wrong one, and both silently drop the track from render and export.
+                // 12 leaves a 4px dead band between them.
+                spacing: root.touchMode ? 12 : (root.compact ? 4 : 8)
 
                 IconGlyph {
                     visible: root.tracks[index].type === "video"
@@ -381,7 +385,7 @@ Item {
 
             // Compact stand-in for the glyph and the name band: sits in the gap
             // between the grip and the mute/hide pair, which is the only free
-            // horizontal space a 72px header has.
+            // horizontal space the compact header has.
             Text {
                 visible: root.compact
                 anchors.left: parent.left

@@ -420,9 +420,22 @@ Item {
             // Width the full five-button row needs, plus the margins either side of it.
             readonly property real fullTransportWidth:
                 5 * Theme.androidIconButtonSize + 4 * Theme.spacingXs + 2 * Theme.spacingMd
+            // Same for the three buttons that never fold away.
+            readonly property real coreTransportWidth:
+                3 * Theme.androidIconButtonSize + 2 * Theme.spacingXs + 2 * Theme.spacingMd
+            // The view buttons are pinned right while the transport is centred, so the
+            // row has to leave that much clear on *both* sides to stay off them.
+            readonly property real viewButtonsClearance:
+                2 * (2 * Theme.androidIconButtonSize + Theme.spacingXs + Theme.spacingMd)
+            // Fullscreen and the view/playback options exist nowhere else in the phone
+            // shell, so they claim their space before the ±1s skips do — a clearance
+            // test that ran the other way round hid them on every 360-400px phone.
+            readonly property bool showViewButtons:
+                width >= coreTransportWidth + viewButtonsClearance
             // The ±1s skips are the first thing to go: stepping and play/pause cannot be
             // reached any other way, and jumping has the timeline scrubber as a fallback.
-            readonly property bool showSkips: width >= fullTransportWidth
+            readonly property bool showSkips:
+                width >= fullTransportWidth + (showViewButtons ? viewButtonsClearance : 0)
 
             // Transport first, timecode second: on a phone the centre of the strip is the
             // easiest place to hit, and the readout only has to stay legible.
@@ -521,9 +534,7 @@ Item {
                 anchors.rightMargin: Theme.spacingMd
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Theme.spacingXs
-                // Only while they clear the centred transport row.
-                visible: transport.width - (transportRow.x + transportRow.width)
-                         >= width + Theme.spacingMd * 2
+                visible: transport.showViewButtons
 
                 IconButton {
                     buttonSize: Theme.androidIconButtonSize

@@ -17,6 +17,12 @@ Item {
 
     readonly property string tool: panel ? panel.timelineTool : ""
 
+    // The window is edge-to-edge and this strip runs the full width, so in landscape
+    // the system nav bar sat straight on top of the right-pinned zoom/fit buttons —
+    // and fit is the one zoom a pinch cannot stand in for.
+    readonly property real leftInset: SafeArea.margins.left
+    readonly property real rightInset: SafeArea.margins.right
+
     function setTool(id) {
         if (!panel)
             return
@@ -59,6 +65,7 @@ Item {
         anchors.right: zoomRow.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
+        anchors.leftMargin: root.leftInset
         anchors.rightMargin: Theme.spacingSm
         contentWidth: actionRow.width
         contentHeight: height
@@ -221,7 +228,7 @@ Item {
     Row {
         id: zoomRow
         anchors.right: parent.right
-        anchors.rightMargin: Theme.spacingSm
+        anchors.rightMargin: Theme.spacingSm + root.rightInset
         anchors.verticalCenter: parent.verticalCenter
         spacing: Theme.spacingXs
 

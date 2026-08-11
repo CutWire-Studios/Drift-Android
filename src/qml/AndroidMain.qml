@@ -15,6 +15,14 @@ ApplicationWindow {
     property bool inEditor: false
     property bool forceClose: false
     property var _pendingAfterUnsaved: null
+    // A .drift launch intent parked until the recovery prompt has been answered. Loading a
+    // project deletes the autosave snapshot, so opening the launched file first would throw
+    // away the very work the prompt is asking about.
+    property string _pendingLaunchUrl: ""
+    // Open menus, newest last. A Popup is not an Item and the window overlay only exposes
+    // opaque popup items, so there is nothing to enumerate — each themed menu registers
+    // itself here instead, and Back closes the top one.
+    property var _openMenus: []
     // The live AndroidEditor instance, so Back can ask it to close a sheet first.
     property var editorPage: null
 
@@ -130,6 +138,8 @@ ApplicationWindow {
                 window.closeTopToolWindow()
                 return
             }
+            if (window.closeTopMenu())
+                return
             if (window.closeTopModal())
                 return
             if (window.editorPage && window.editorPage.handleBack())
@@ -148,7 +158,35 @@ ApplicationWindow {
                         subtitleProgressDialog]
         for (var i = 0; i < modals.length; ++i) {
             if (modals[i] && modals[i].visible) {
+                // The recovery prompt is the one modal with no dismissal: close() skips
+                // accepted()/rejected(), so neither Restore nor Discard runs, the snapshot
+                // stays unanswered, and the next autosave overwrites it. Swallow Back and
+                // leave it up — that is what its NoAutoClose policy already asks for.
+                if (modals[i] === recoveryDialog)
+                    return true
                 modals[i].close()
+                return true
+            }
+        }
+        return false
+    }
+
+    // Registration points for ThemedContextMenu / NewTrackMenu; see _openMenus above.
+    function pushMenu(menu) {
+        window._openMenus.push(menu)
+    }
+
+    function popMenu(menu) {
+        const index = window._openMenus.indexOf(menu)
+        if (index >= 0)
+            window._openMenus.splice(index, 1)
+    }
+
+    function closeTopMenu() {
+        while (window._openMenus.length > 0) {
+            const menu = window._openMenus.pop()
+            if (menu && menu.visible) {
+                menu.close()
                 return true
             }
         }
@@ -168,12 +206,38 @@ ApplicationWindow {
 
     RecoveryDialog {
         id: recoveryDialog
-        onAccepted: Qt.callLater(window.showEditor)
+        // Restore leaves the recovered timeline unsaved, so a parked launch goes through
+        // confirmIfDirty and asks before replacing it; New session has already cleared the
+        // snapshot, so it opens straight away.
+        //
+        // The editor is shown either way. Cancelling that prompt leaves the recovered work as the
+        // live project, and staying on the home screen would hide it behind a Recent Projects list
+        // that does not list it. openPendingLaunch queues its own showEditor, which no-ops here.
+        onAccepted: {
+            Qt.callLater(window.showEditor)
+            window.openPendingLaunch()
+        }
+        onRejected: window.openPendingLaunch()
+    }
+
+    function openPendingLaunch() {
+        if (window._pendingLaunchUrl === "")
+            return false
+        const url = window._pendingLaunchUrl
+        window._pendingLaunchUrl = ""
+        window.confirmIfDirty(function () {
+            EditorState.loadProject(url)
+            Qt.callLater(window.showEditor)
+        })
+        return true
     }
 
     UnsavedChangesDialog {
         id: unsavedDialog
         onSaveChosen: {
+            // False also means "still running" now: an embedded-media save finishes on a
+            // worker, and onProjectSaved below runs the queued action when it lands. Either
+            // way the dialog stays up and the action stays queued.
             if (!window.saveProject())
                 return
             const action = window._pendingAfterUnsaved
@@ -291,6 +355,13 @@ ApplicationWindow {
         // Empty on desktop, where the intent does not exist.
         const launched = FileDialogs.takeLaunchUrl()
         if (launched !== "") {
+            // Unless the previous session left a snapshot: loading the launched project
+            // deletes it unasked, so park the URL and let the recovery prompt run first.
+            if (EditorState.recoveryAvailable && !EditorState.reopenLastProject) {
+                window._pendingLaunchUrl = launched
+                recoveryOpenTimer.start()
+                return
+            }
             window.confirmIfDirty(function () {
                 EditorState.loadProject(launched)
                 Qt.callLater(window.showEditor)
@@ -333,6 +404,22 @@ ApplicationWindow {
             else
                 Toasts.error(qsTr("Export failed. Check the save location and free space."))
         }
+        // Saving a project whose media is embedded runs on a worker, so saveProject() returns
+        // before the result exists and the action queued behind the unsaved-changes dialog
+        // cannot ride on its return value. The synchronous path emits this too, while
+        // _pendingAfterUnsaved is still set, so the action still runs exactly once.
+        function onProjectSaved(ok) {
+            // unsavedDialog.visible is the guard that keeps this tied to a save the dialog asked
+            // for. Back dismisses that dialog with close(), which emits neither accepted nor
+            // rejected, so the parked action survives — and without this an ordinary Save minutes
+            // later would fire it and navigate away from under the user.
+            if (!ok || !unsavedDialog.visible || !window._pendingAfterUnsaved)
+                return
+            const action = window._pendingAfterUnsaved
+            window._pendingAfterUnsaved = null
+            unsavedDialog.close()
+            action()
+        }
         function onPackageFinished(ok, message) {
             if (ok)
                 Toasts.success(message)
@@ -366,6 +453,22 @@ ApplicationWindow {
         }
     }
 
+    // Tapping a .drift while we are already running arrives through onNewIntent, which
+    // Component.onCompleted above is long past. Same handling as the cold start.
+    Connections {
+        target: FileDialogs
+        function onLaunchUrlReceived(url) {
+            if (recoveryDialog.visible) {
+                window._pendingLaunchUrl = url
+                return
+            }
+            window.confirmIfDirty(function () {
+                EditorState.loadProject(url)
+                Qt.callLater(window.showEditor)
+            })
+        }
+    }
+
     // Backgrounding the app leaves the audio sink and the composite timer running, which
     // keeps decoding video nobody can see and holds the audio focus. Android will kill the
     // process for it eventually; pausing is the honest response to losing the foreground.
@@ -376,9 +479,23 @@ ApplicationWindow {
                 return
             if (EditorState.playing)
                 EditorState.playback.pause()
+            // The two audition players are separate transports with their own audio sinks and
+            // decode timers; pausing only the main one left them playing to nobody.
+            EditorState.pauseSpeedCurvePreview()
+            denoiseWindow.stopPlayback()
             // Losing the foreground is the last moment guaranteed to run: the OS can reclaim the
             // process from here without another callback, and aboutToQuit does not fire when it does.
             EditorState.flushRecoverySnapshot()
+            // Decoder buffers, GL targets and image caches are all rebuildable; holding them
+            // while backgrounded is what gets the process killed instead of resumed. Only for a
+            // real backgrounding though: Android reports Inactive for every SAF picker, share
+            // sheet and permission dialog, and tearing all of that down on a tap of Import would
+            // cost a full rebuild on the way back. A job still running needs its decoders.
+            if (Qt.application.state === Qt.ApplicationSuspended
+                    || Qt.application.state === Qt.ApplicationHidden) {
+                if (!EditorState.exportInProgress && !EditorState.packaging)
+                    EditorState.releaseTransientCaches()
+            }
         }
     }
 

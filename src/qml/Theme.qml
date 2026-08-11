@@ -341,8 +341,10 @@ QtObject {
     readonly property real androidSheetHeaderHeight: 56
     readonly property real androidSheetDismissFraction: 0.38
     readonly property real androidRailItemWidth: 64
-    // Mute/hide icons only — track type labels do not fit a phone.
-    readonly property real androidTrackLabelsWidth: 72
+    // Mute/hide icons only — track type labels do not fit a phone. Wide enough for the
+    // two toggles to sit a dead band apart without their hit areas reaching the type
+    // caption on the left or the corner filmstrip toggle below it.
+    readonly property real androidTrackLabelsWidth: 88
     readonly property real androidClipTrimHandleWidth: 20
     readonly property real androidClipEdgeMargin: 22
     readonly property real androidTrimHotspotExtra: 14

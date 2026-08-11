@@ -12,6 +12,13 @@ import "components/timeline"
 Item {
     id: root
 
+    // The window is edge-to-edge, and in landscape the system nav bar lands on one
+    // side of this pane — over the track headers on one rotation and over the
+    // scrollbar on the other. Read off root: insetting the content Column would move
+    // it clear of the unsafe area and zero the very margins that put it there.
+    readonly property real leftInset: SafeArea.margins.left
+    readonly property real rightInset: SafeArea.margins.right
+
     property real zoom: 1.0
     property string timelineTool: ""
     property real cutHoverSeconds: -1
@@ -502,6 +509,8 @@ Item {
 
     Column {
         anchors.fill: parent
+        anchors.leftMargin: root.leftInset
+        anchors.rightMargin: root.rightInset
 
         // Lane bar: the keyframe lane's collapse toggle, and — while multi-select is
         // armed — the controls that gesture has no other home for.
@@ -592,8 +601,16 @@ Item {
             contentX: flick.contentX
             contentWidth: flick.contentWidth
             // Tangent grips are only armed above 140px, so on a phone the lane opens
-            // tall enough to shape a curve rather than at the desktop's 88px overview.
-            laneHeight: Math.round(Math.max(140, Math.min(220, root.height * 0.5)))
+            // tall enough to shape a curve rather than at the desktop's 88px overview —
+            // but a flat 140px floor outranked the 50%-of-pane budget and left the track
+            // area at zero (negative, with the subtitle lane also open) on a short pane.
+            // Below the grip threshold the lane shrinks instead of eating the tracks.
+            laneHeight: Math.round(Math.max(keyframeLane.minLaneHeight,
+                                            Math.min(220, root.height * 0.5,
+                                                     root.height - laneBar.height
+                                                     - subtitleLane.height
+                                                     - root.seekHeaderHeight
+                                                     - Theme.trackHeightAudio)))
         }
 
         SubtitleCueLane {
@@ -607,7 +624,8 @@ Item {
 
         Row {
             width: parent.width
-            height: parent.height - laneBar.height - keyframeLane.height - subtitleLane.height
+            height: Math.max(0, parent.height - laneBar.height - keyframeLane.height
+                                - subtitleLane.height)
 
             Column {
                 width: root.labelsWidth

@@ -177,98 +177,112 @@ Item {
             radius: Theme.radiusMd
         }
 
-        contentItem: Column {
-            spacing: 2
-            width: parent.width
+        // Eight always-visible 44px rows are taller than a phone in landscape, and Qt
+        // only ever slides a popup up to keep its bottom on screen — the overflow is
+        // clipped off the top, taking Save (which the phone shell offers nowhere else)
+        // with it. Scroll the rows instead, under the height clamp in onAboutToShow.
+        contentItem: Flickable {
+            id: menuFlick
+            implicitHeight: menuColumn.implicitHeight
+            contentWidth: width
+            contentHeight: menuColumn.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
 
-            component MenuRow: Rectangle {
-                id: menuRow
-                property alias text: menuLabel.text
-                property alias glyph: menuIcon.glyph
-                signal triggered()
-                width: parent ? parent.width : 0
-                height: visible ? Math.max(44, Theme.controlHeight) : 0
-                radius: Theme.radiusSm
-                color: menuArea.containsMouse ? Theme.accent : "transparent"
+            Column {
+                id: menuColumn
+                spacing: 2
+                width: menuFlick.width
 
-                Row {
-                    anchors.left: parent.left
-                    anchors.leftMargin: Theme.spacingLg
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: Theme.spacingLg
+                component MenuRow: Rectangle {
+                    id: menuRow
+                    property alias text: menuLabel.text
+                    property alias glyph: menuIcon.glyph
+                    signal triggered()
+                    width: parent ? parent.width : 0
+                    height: visible ? Math.max(44, Theme.controlHeight) : 0
+                    radius: Theme.radiusSm
+                    color: menuArea.containsMouse ? Theme.accent : "transparent"
 
-                    IconGlyph {
-                        id: menuIcon
-                        iconSize: Theme.iconSizeMd
-                        iconColor: Theme.foreground
+                    Row {
+                        anchors.left: parent.left
+                        anchors.leftMargin: Theme.spacingLg
                         anchors.verticalCenter: parent.verticalCenter
+                        spacing: Theme.spacingLg
+
+                        IconGlyph {
+                            id: menuIcon
+                            iconSize: Theme.iconSizeMd
+                            iconColor: Theme.foreground
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Text {
+                            id: menuLabel
+                            color: Theme.foreground
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.fontSizeSm
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
                     }
 
-                    Text {
-                        id: menuLabel
-                        color: Theme.foreground
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.fontSizeSm
-                        anchors.verticalCenter: parent.verticalCenter
+                    MouseArea {
+                        id: menuArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            overflowMenu.close()
+                            menuRow.triggered()
+                        }
                     }
                 }
 
-                MouseArea {
-                    id: menuArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onClicked: {
-                        overflowMenu.close()
-                        menuRow.triggered()
-                    }
+                MenuRow {
+                    text: qsTr("Save")
+                    glyph: Theme.icons.save
+                    onTriggered: root.saveRequested()
                 }
-            }
-
-            MenuRow {
-                text: qsTr("Save")
-                glyph: Theme.icons.save
-                onTriggered: root.saveRequested()
-            }
-            MenuRow {
-                text: qsTr("Shareable copy")
-                glyph: Theme.icons.package
-                onTriggered: root.packageRequested()
-            }
-            MenuRow {
-                text: qsTr("Open project")
-                glyph: Theme.icons.folder
-                onTriggered: root.openRequested()
-            }
-            MenuRow {
-                text: qsTr("New project")
-                glyph: Theme.icons.plus
-                onTriggered: root.newRequested()
-            }
-            MenuRow {
-                text: qsTr("Choose layout")
-                glyph: Theme.icons.ratio
-                onTriggered: root.layoutRequested()
-            }
-            MenuRow {
-                text: qsTr("Project properties")
-                glyph: Theme.icons.info
-                onTriggered: Window.window.openProjectProperties()
-            }
-            MenuRow {
-                text: Theme.darkMode ? qsTr("Light mode") : qsTr("Dark mode")
-                glyph: Theme.darkMode ? Theme.icons.sun : Theme.icons.moon
-                onTriggered: Theme.toggleDarkMode()
-            }
-            MenuRow {
-                text: qsTr("Extras")
-                glyph: Theme.icons.package
-                onTriggered: Window.window.openExtras()
-            }
-            MenuRow {
-                text: qsTr("Update available")
-                glyph: Theme.icons.download
-                visible: Updates.updateAvailable
-                onTriggered: Window.window.openUpdateDialog()
+                MenuRow {
+                    text: qsTr("Shareable copy")
+                    glyph: Theme.icons.package
+                    onTriggered: root.packageRequested()
+                }
+                MenuRow {
+                    text: qsTr("Open project")
+                    glyph: Theme.icons.folder
+                    onTriggered: root.openRequested()
+                }
+                MenuRow {
+                    text: qsTr("New project")
+                    glyph: Theme.icons.plus
+                    onTriggered: root.newRequested()
+                }
+                MenuRow {
+                    text: qsTr("Choose layout")
+                    glyph: Theme.icons.ratio
+                    onTriggered: root.layoutRequested()
+                }
+                MenuRow {
+                    text: qsTr("Project properties")
+                    glyph: Theme.icons.info
+                    onTriggered: Window.window.openProjectProperties()
+                }
+                MenuRow {
+                    text: Theme.darkMode ? qsTr("Light mode") : qsTr("Dark mode")
+                    glyph: Theme.darkMode ? Theme.icons.sun : Theme.icons.moon
+                    onTriggered: Theme.toggleDarkMode()
+                }
+                MenuRow {
+                    text: qsTr("Extras")
+                    glyph: Theme.icons.package
+                    onTriggered: Window.window.openExtras()
+                }
+                MenuRow {
+                    text: qsTr("Update available")
+                    glyph: Theme.icons.download
+                    visible: Updates.updateAvailable
+                    onTriggered: Window.window.openUpdateDialog()
+                }
             }
         }
 
@@ -279,6 +293,13 @@ Item {
         onAboutToShow: {
             x = Math.max(Theme.spacingSm, barBody.width - width - Theme.spacingSm)
             y = barBody.height + 4
+            const overlayHeight = Overlay.overlay ? Overlay.overlay.height : 0
+            if (overlayHeight > 0) {
+                const top = barBody.mapToItem(null, 0, y).y
+                height = Math.max(Theme.controlHeight,
+                                  Math.min(implicitHeight,
+                                           overlayHeight - top - Theme.spacingXl))
+            }
         }
     }
 }

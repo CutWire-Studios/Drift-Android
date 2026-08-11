@@ -4,12 +4,22 @@
     android:installLocation="auto"
     android:versionCode="-- %%INSERT_VERSION_CODE%% --"
     android:versionName="-- %%INSERT_VERSION_NAME%% --">
-    <!-- %%INSERT_PERMISSIONS -->
     <!-- %%INSERT_FEATURES -->
-    <!-- Explicit network permissions for HTTPS (update check, addon index). Qt also inserts
-         INTERNET via %%INSERT_PERMISSIONS%%; listing them here keeps the requirement visible. -->
+    <!-- androiddeployqt substitutes a permissions marker comment wherever it finds one, and this
+         file deliberately has none (which is also why the marker's name is not spelled verbatim
+         anywhere below — the tool matches it as a plain substring). Left in, it injected
+         BLUETOOTH, CAMERA, RECORD_AUDIO and WRITE_EXTERNAL_STORAGE out of Qt6::Multimedia's
+         dependency metadata: there is no QCamera, QAudioSource or QMediaRecorder in src/, and
+         everything read or written arrives as a SAF content:// URI, so none of them had a call
+         site. CAMERA and RECORD_AUDIO also imply required hardware features, which had Play
+         filtering the app off camera-less and mic-less devices. Everything the app does need is
+         declared here; re-check the generated android-build/AndroidManifest.xml after a Qt bump. -->
+    <!-- Explicit network permissions for HTTPS (update check, addon index). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- The one injected permission worth keeping: QAudioSink (PlaybackEngine, ClipPreviewPlayer)
+         is the app's only QtMultimedia user, and it is the output side of it. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- A video export runs for minutes in the app process; backgrounded, that process is frozen
          and then killed. ExportService holds it in the foreground for the length of the render,
          which costs the service permission plus its media-processing type (API 34+) and the
@@ -19,12 +29,19 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Media import uses the Storage Access Framework (QFileDialog → ACTION_OPEN_DOCUMENT).
          Do not add READ_MEDIA_* / READ_EXTERNAL_STORAGE for import — access is granted per
-         content:// URI when the user picks a file. Qt may still inject legacy storage
-         permissions via %%INSERT_PERMISSIONS%%; they are unused by the import path. -->
+         content:// URI when the user picks a file. -->
     <!-- The compositor creates an ES 3.0 context (GlRuntime::initGlObjects) and every shader is
          translated to #version 300 es. There is no ES 2.0 fallback path, so declaring this as
          required is honest: on an ES2-only device the preview would fail to initialise. -->
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+    <!-- Nothing here uses a camera, a microphone or Bluetooth, and no permission that would imply
+         them survives above. Declaring them not-required anyway is the belt-and-braces half: an
+         explicit uses-feature overrides the implied-and-required one, so if a future Qt module
+         drags CAMERA or RECORD_AUDIO back in, Play still will not filter the app off devices
+         that lack the hardware. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <supports-screens
         android:anyDensity="true"
         android:largeScreens="true"

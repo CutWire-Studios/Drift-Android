@@ -24,6 +24,18 @@ public class ExportService extends Service
     private static final String CHANNEL_ID = "export";
     private static final int NOTIFICATION_ID = 4711;
 
+    // The service now holds any long job, not just an export, so the notification says which one.
+    // volatile because start() runs on the job's thread while onStartCommand and setPercent read it
+    // from the main thread.
+    private static volatile String sTitle = "Exporting";
+
+    public static void start(Context context, String title)
+    {
+        if (title != null && !title.isEmpty())
+            sTitle = title;
+        start(context);
+    }
+
     // Called from the export thread, hence the hop to the UI thread for the permission prompt;
     // the rest of the Context API here is thread-safe.
     public static void start(Context context)
@@ -36,10 +48,18 @@ public class ExportService extends Service
         context.startForegroundService(new Intent(context, ExportService.class));
     }
 
+    // False once the service is gone — a refused startForeground, the FGS timeout, or a normal stop.
+    // The job it was protecting keeps running and keeps reporting, and notify() does not need a live
+    // service, so without this every later percent would re-post an ongoing notification that
+    // nothing is left to take down.
+    private static volatile boolean sForeground = false;
+
     // Updates the same notification the service is holding, rather than restarting the service
     // once per percent.
     public static void setPercent(Context context, int percent)
     {
+        if (!sForeground)
+            return;
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         if (manager != null)
             manager.notify(NOTIFICATION_ID, buildNotification(context, percent));
@@ -47,20 +67,65 @@ public class ExportService extends Service
 
     public static void stop(Context context)
     {
+        sForeground = false;
         context.stopService(new Intent(context, ExportService.class));
+        // stopService takes the notification down with the service, but not one posted by setPercent
+        // after a start that was refused.
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        if (manager != null)
+            manager.cancel(NOTIFICATION_ID);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId)
     {
         Notification notification = buildNotification(this, 0);
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIFICATION_ID, notification,
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING);
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
+        // API 34+ can refuse the start outright — the mediaProcessing budget is exhausted, or the
+        // app was not in a state allowed to promote a service — and it refuses by throwing on the
+        // main thread, which is a crash rather than a failed export. Exporter::run does not depend
+        // on the service; degrade to an unprotected render, which is what a pre-34 device does
+        // anyway, instead of taking the process down mid-encode.
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, notification,
+                                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+            sForeground = true;
+        } catch (RuntimeException e) {
+            giveUp();
+            return START_NOT_STICKY;
         }
         return START_NOT_STICKY;
+    }
+
+    // The notification has to go explicitly: stopSelf leaves behind one posted by a startForeground
+    // that never took, and an ongoing notification for a job with no service is unswipeable.
+    private void giveUp()
+    {
+        sForeground = false;
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null)
+            manager.cancel(NOTIFICATION_ID);
+        stopSelf();
+    }
+
+    // A mediaProcessing service gets a cumulative 6 h per 24 h from API 35 on. Past that the
+    // platform calls this and kills the app if the service is still up a few seconds later, so
+    // stopping is the only correct answer — the export itself keeps running unprotected, exactly
+    // as it does when startForeground is refused above. API 35 dispatches the one-argument form
+    // and API 36 the typed one; both are overridden because neither device calls the other's.
+    @Override
+    public void onTimeout(int startId)
+    {
+        giveUp();
+    }
+
+    @Override
+    public void onTimeout(int startId, int fgsType)
+    {
+        giveUp();
     }
 
     @Override
@@ -90,7 +155,7 @@ public class ExportService extends Service
                                         PendingIntent.FLAG_IMMUTABLE
                                             | PendingIntent.FLAG_UPDATE_CURRENT);
         return new Notification.Builder(context, CHANNEL_ID)
-                   .setContentTitle("Exporting")
+                   .setContentTitle(sTitle)
                    .setContentText(percent + "%")
                    .setSmallIcon(android.R.drawable.stat_sys_upload)
                    .setProgress(100, percent, false)

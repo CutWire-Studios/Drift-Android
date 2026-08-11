@@ -49,6 +49,12 @@ Window {
         EditorState.previewDenoise(track, clip, 0)
     }
 
+    // For the app-state handler in AndroidMain: an audition left running in the background
+    // keeps an audio sink and a decoder alive behind a window nobody can see.
+    function stopPlayback() {
+        player.stop()
+    }
+
     onClosing: {
         player.stop()
         if (EditorState.denoising)

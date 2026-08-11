@@ -12,5 +12,13 @@
     <exclude domain="file" path="addons" />
     <exclude domain="file" path="cache" />
     <exclude domain="file" path="emoji" />
+    <!-- The two directories that actually blow the quota. `imports` is a byte-for-byte copy of
+         every media file ever picked through SAF (AssetLibrary::importsDir) and `projects` holds
+         media unpacked out of .drift bundles (AppController::sweepExtractionDirs, which already
+         deletes it when no recent project needs it). Neither is authoritative: the .drift file
+         lives in a user-chosen SAF location outside app data, and restoreMissingSources()
+         repoints a project whose copies are gone. -->
+    <exclude domain="file" path="imports" />
+    <exclude domain="file" path="projects" />
     <exclude domain="external" path="." />
 </full-backup-content>

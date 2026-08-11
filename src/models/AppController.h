@@ -682,6 +682,12 @@ public:
     // the OS reclaims a backgrounded process — and backgrounding is how a phone app normally ends.
     // The shell calls this on the way out so the floor is the last edit, not the last 15s tick.
     Q_INVOKABLE void flushRecoverySnapshot();
+    // Drops every cache that exists only to make the next composite faster — decoder workers,
+    // still images, rasterised text, uploaded textures and the FBO pool. All of it is rebuilt on
+    // demand, and a backgrounded app that hangs on to it is the one the OS picks to kill first.
+    // Only for the leaving-foreground handler: calling it while active throws away exactly what
+    // the current composite is about to reuse.
+    Q_INVOKABLE void releaseTransientCaches();
     Q_INVOKABLE QVariantList exportPresets() const; // legacy scale ids/labels
     Q_INVOKABLE QVariantList exportScaleOptions() const;
     // Frame rate choices; the "project" entry is labelled with the current project fps.
@@ -780,6 +786,11 @@ signals:
     void packagingChanged();
     void packageProgressChanged();
     void packageFinished(bool ok, const QString &message);
+    // The result of a saveProject() call. On Android a project that carries its media inside it is
+    // written on a worker, so the save is not finished when saveProject() returns and callers that
+    // used to read hasUnsavedChanges straight afterwards have to wait for this instead. Emitted on
+    // every platform and on both outcomes, so a handler needs no platform test.
+    void projectSaved(bool ok);
     // Addons the freshly opened project needs but that are not installed. Each entry is
     // id / name / version / kinds, for MissingAddonsDialog.
     void missingAddons(const QVariantList &addons);
@@ -903,7 +914,9 @@ protected:
     // Repoint every path field the extraction moved. Clips duplicate their asset's path, so this
     // matches on the value rather than walking by id.
     void remapProjectPaths(const QHash<QString, QString> &remap);
-    // Drops <AppData>/projects/<id> directories no project in the recents list still refers to.
+    // Drops <AppData>/projects/<id> directories no project in the recents list or the recovery
+    // snapshot still refers to, and on Android the unreferenced derived artifacts and SAF import
+    // copies with them. Startup only — it assumes no job is mid-write.
     void sweepExtractionDirs();
     // Effects and transitions render as no-ops when their package is absent, which is silent and
     // looks like the project is simply wrong. Called after a load to say so instead.
@@ -945,6 +958,10 @@ protected:
     QAtomicInt m_exportCancel = 0;
     QUrl m_lastExportUrl;
     QString m_lastExportName;
+    // Android: the publish-to-gallery copy behind Share is on a worker, so canShareExport reports
+    // false while it runs — that both hides the button (the dialog binds its visibility to it) and
+    // stops a second tap from starting the copy again.
+    bool m_sharingExport = false;
     bool m_subtitleGenerating = false;
     QString m_replacingAssetId;
     // Android: content:// URI the replacement media was copied out of, carried across the probe
