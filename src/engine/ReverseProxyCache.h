@@ -32,11 +32,21 @@ public:
     // Reads the on-disk index, dropping entries whose proxy or source is gone or whose source has
     // changed since the render.
     void load();
-    // Startup GC: removes stray .part files, then prunes the directory to maxBytes, oldest first.
+    // GC: removes stray .part files, then prunes the directory to maxBytes, oldest first.
     // Deleting a proxy that is still referenced is safe; the clip falls back to live decode.
-    void sweep(qint64 maxBytes);
+    // Runs at startup and again from insert(), so a session that reverses several clips cannot
+    // outgrow the budget until the next cold start.
+    // protectPath is never pruned, so a proxy larger than the whole budget still survives the
+    // sweep its own insertion triggers.
+    void sweep(qint64 maxBytes, const QString &protectPath = {});
 
+#ifdef Q_OS_ANDROID
+    // A phone's internal storage is shared with every other app and the user has no file manager
+    // route to these proxies, so the budget is a small fraction of the desktop one.
+    static constexpr qint64 kDefaultMaxBytes = 1LL * 1024 * 1024 * 1024;
+#else
     static constexpr qint64 kDefaultMaxBytes = 8LL * 1024 * 1024 * 1024;
+#endif
 
 private:
     ReverseProxyCache() = default;
@@ -73,7 +83,8 @@ VideoRead resolveVideoRead(const Clip &clip, TimeUs timelineUs);
 // workers, where tearing down the proxy's worker would reopen the file every frame.
 QString videoReadPath(const Clip &clip);
 
-// <AppDataLocation>/reversed, created on demand. Mirrors matteCacheDir().
+// <AppDataLocation>/reversed, created on demand. Mirrors matteCacheDir(). On Android it is
+// <CacheLocation>/reversed instead — see the definition.
 QString reverseCacheDir();
 // A fresh, unused absolute path inside reverseCacheDir(). Never reuse a path: a ClipReader worker
 // may already hold the old one open and would keep serving frames from the stale file.

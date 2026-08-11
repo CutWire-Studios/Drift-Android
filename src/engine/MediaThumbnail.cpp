@@ -1,5 +1,6 @@
 #include "MediaThumbnail.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -75,6 +76,19 @@ QString cacheStripPathFor(const QString &sourcePath)
 bool isValidCacheFile(const QString &path)
 {
     return QFile::exists(path) && QFileInfo(path).size() > 128;
+}
+
+// The size check above is the only validation a cache hit gets, so a JPEG that was half written
+// when the process died would read back as a good tile forever. Write beside the target and rename
+// — the same .part-then-rename discipline ReverseRenderer, MatteWriter and the recovery file use.
+// Android kills backgrounded apps mid-write as a matter of routine.
+bool saveJpegAtomically(const QImage &image, const QString &outPath)
+{
+    const QString partPath = outPath + QStringLiteral(".part");
+    if (!image.save(partPath, "JPG", 85))
+        return false;
+    QFile::remove(outPath); // rename refuses to clobber
+    return QFile::rename(partPath, outPath);
 }
 
 QString tileGlob()
@@ -188,7 +202,7 @@ bool decodeFirstVideoFrame(AVFormatContext *fmt, int videoStreamIndex, AVCodecCo
                                   height, &sws))
             break;
         ++packetsRead;
-        saved = image.save(outPath, "JPG", 85);
+        saved = saveJpegAtomically(image, outPath);
     }
 
     sws_freeContext(sws);
@@ -272,7 +286,7 @@ QString MediaThumbnail::generate(const QString &sourcePath, const QString &kind)
             image = image.scaled(kThumbnailMaxEdge, kThumbnailMaxEdge,
                                  Qt::KeepAspectRatio, Qt::SmoothTransformation);
         }
-        if (!image.save(outPath, "JPG", 85))
+        if (!saveJpegAtomically(image, outPath))
             return {};
         return outPath;
     }
@@ -345,7 +359,7 @@ QString MediaThumbnail::generateFilmstrip(const QString &sourcePath, const QStri
     avcodec_free_context(&codecCtx);
     avformat_close_input(&fmt);
 
-    if (!anyFrame || !strip.save(outPath, "JPG", 85))
+    if (!anyFrame || !saveJpegAtomically(strip, outPath))
         return {};
 
     return outPath;
@@ -422,7 +436,7 @@ QList<qint64> MediaThumbnail::TileDecoder::generateTiles(const QString &sourcePa
         if (!seekAndDecodeFrame(m_fmt, m_videoStreamIndex, m_codecCtx, timeUs, frame,
                                 kFilmstripFrameWidth, kFilmstripFrameHeight, &m_sws))
             continue;
-        if (frame.save(tilePath(absolutePath, level, index), "JPG", 85))
+        if (saveJpegAtomically(frame, tilePath(absolutePath, level, index)))
             produced.append(index);
     }
 
@@ -432,6 +446,17 @@ QList<qint64> MediaThumbnail::TileDecoder::generateTiles(const QString &sourcePa
 void MediaThumbnail::pruneTileCache(qint64 maxBytes)
 {
     QDir dir(cacheDir());
+    // A .part left behind by a kill mid-write is dead weight — the rename never happened, so
+    // nothing will ever read it. Age-gated because this directory is shared: filmstrip and poster
+    // jobs stage their own .part files here from AssetLibrary's thread pool, and this prune runs on
+    // the tile decoder's thread, so a fresh one is far more likely to be a write in progress than
+    // debris. Nothing legitimately takes a minute between writing a JPEG and renaming it.
+    const QDateTime cutoff = QDateTime::currentDateTime().addSecs(-60);
+    for (const QFileInfo &partial : dir.entryInfoList({QStringLiteral("*.part")}, QDir::Files)) {
+        if (partial.lastModified() < cutoff)
+            QFile::remove(partial.absoluteFilePath());
+    }
+
     // Tiles are written once and never rewritten, so modification time is insertion order.
     QFileInfoList tiles = dir.entryInfoList({tileGlob()}, QDir::Files, QDir::Time | QDir::Reversed);
 
@@ -472,7 +497,7 @@ QString MediaThumbnail::generateAtTime(const QString &sourcePath, double sourceS
     QImage frame;
     const bool ok = seekAndDecodeFrame(fmt, videoStreamIndex, codecCtx, timeUs, frame, 320, 180,
                                        &sws)
-                    && frame.save(outPath, "JPG", 85);
+                    && saveJpegAtomically(frame, outPath);
 
     sws_freeContext(sws);
     avcodec_free_context(&codecCtx);

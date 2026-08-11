@@ -15,6 +15,11 @@ struct TextRasterResult
     QRectF rect;  // destination rect in canvas px: the layout rect grown by that same bleed
 };
 
+// Drop both raster caches. For the Android application-state handler: the rasters are pure derived
+// pixels, so releasing them on the way to the background costs one re-raster per visible caption.
+// Safe from any thread.
+void clearTextRasterCaches();
+
 // Rasterize (or return a cached copy of) the styled text. layoutRect is the clip's layout rect in
 // canvas pixels; renderScale maps project pixels to canvas pixels. activeWordIndex is the word the
 // playhead is currently on, and only matters for the Karaoke accent rule (-1 = none).

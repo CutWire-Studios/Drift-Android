@@ -21,9 +21,20 @@ namespace {
 
 QMutex g_cacheMutex;
 QHash<quint64, QImage> g_cache;
+// Least-recently-used first. Entries are caption-box-sized ARGB32 at the render canvas, and both
+// the preview-scale and the export-scale copy of a cue live here at once, so a count cap alone let
+// the cache reach hundreds of MB on a phone. Budget the bytes and evict one entry at a time —
+// the old cap cleared the whole cache when it tripped, re-rastering every visible caption.
+QList<quint64> g_cacheLru;
+qint64 g_cacheBytes = 0;
 // Karaoke re-rasterizes as the spoken word advances, so a single cue can occupy one entry per
 // word — the cache has to be roomy enough that scrubbing a caption track does not thrash it.
 constexpr int kMaxCacheEntries = 256;
+#ifdef Q_OS_ANDROID
+constexpr qint64 kMaxCacheBytes = 32LL * 1024 * 1024;
+#else
+constexpr qint64 kMaxCacheBytes = 256LL * 1024 * 1024;
+#endif
 
 quint64 highlightHash(const drift::TextHighlight &h)
 {
@@ -679,6 +690,8 @@ TextRasterResult rasterizeText(const drift::Clip &clip, const QString &text, con
         QMutexLocker lock(&g_cacheMutex);
         const auto it = g_cache.constFind(key);
         if (it != g_cache.constEnd()) {
+            g_cacheLru.removeOne(key);
+            g_cacheLru.append(key);
             result.image = it.value();
             return result;
         }
@@ -713,10 +726,18 @@ TextRasterResult rasterizeText(const drift::Clip &clip, const QString &text, con
     p.end();
 
     {
+        const qint64 imageBytes = qint64(image.sizeInBytes());
         QMutexLocker lock(&g_cacheMutex);
-        if (g_cache.size() >= kMaxCacheEntries)
-            g_cache.clear();
+        // Two threads (preview and export) can raster the same key at once. Drop the older copy
+        // rather than letting its bytes stay on the total forever.
+        if (g_cacheLru.removeOne(key))
+            g_cacheBytes -= qint64(g_cache.take(key).sizeInBytes());
+        while (!g_cacheLru.isEmpty()
+               && (g_cache.size() >= kMaxCacheEntries || g_cacheBytes + imageBytes > kMaxCacheBytes))
+            g_cacheBytes -= qint64(g_cache.take(g_cacheLru.takeFirst()).sizeInBytes());
         g_cache.insert(key, image);
+        g_cacheLru.append(key);
+        g_cacheBytes += imageBytes;
     }
 
     result.image = image;
@@ -973,4 +994,16 @@ TextAnimSample sampleTextSpanAnimation(const drift::Clip &clip, drift::TimeUs ti
 
     sample.opacity = qBound(0.0, sample.opacity, 1.0);
     return sample;
+}
+
+void clearTextRasterCaches()
+{
+    {
+        QMutexLocker lock(&g_cacheMutex);
+        g_cache.clear();
+        g_cacheLru.clear();
+        g_cacheBytes = 0;
+    }
+    QMutexLocker lock(&g_spanCacheMutex);
+    g_spanCache.clear();
 }

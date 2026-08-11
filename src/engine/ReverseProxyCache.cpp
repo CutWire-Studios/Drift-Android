@@ -73,20 +73,27 @@ void ReverseProxyCache::insert(const QString &sourcePath, TimeUs coverInUs, Time
     entry.sourceMtimeMs = info.lastModified().toMSecsSinceEpoch();
     entry.sourceSize = info.size();
 
-    QMutexLocker lock(&m_mutex);
-    QList<Entry> &list = m_entries[info.absoluteFilePath()];
-    // A new render supersedes any older one it fully covers — keeping both would leave a large
-    // file on disk that lookup can never prefer.
-    for (int i = list.size() - 1; i >= 0; --i) {
-        const Entry &old = list.at(i);
-        if (old.sourceMtimeMs != entry.sourceMtimeMs || old.sourceSize != entry.sourceSize
-            || (entry.coverInUs <= old.coverInUs && entry.coverOutUs >= old.coverOutUs)) {
-            QFile::remove(old.proxyPath);
-            list.removeAt(i);
+    {
+        QMutexLocker lock(&m_mutex);
+        QList<Entry> &list = m_entries[info.absoluteFilePath()];
+        // A new render supersedes any older one it fully covers — keeping both would leave a large
+        // file on disk that lookup can never prefer.
+        for (int i = list.size() - 1; i >= 0; --i) {
+            const Entry &old = list.at(i);
+            if (old.sourceMtimeMs != entry.sourceMtimeMs || old.sourceSize != entry.sourceSize
+                || (entry.coverInUs <= old.coverInUs && entry.coverOutUs >= old.coverOutUs)) {
+                QFile::remove(old.proxyPath);
+                list.removeAt(i);
+            }
         }
+        list.prepend(entry);
+        saveLocked();
     }
-    list.prepend(entry);
-    saveLocked();
+
+    // Re-check the budget at the one moment the directory's total actually changes. sweep() takes
+    // the mutex itself, and prunes oldest-first; the proxy just written is passed as protected
+    // because a single render can exceed the whole budget on its own.
+    sweep(kDefaultMaxBytes, proxyPath);
 }
 
 void ReverseProxyCache::saveLocked() const
@@ -156,11 +163,14 @@ void ReverseProxyCache::load()
     saveLocked();
 }
 
-void ReverseProxyCache::sweep(qint64 maxBytes)
+void ReverseProxyCache::sweep(qint64 maxBytes, const QString &protectPath)
 {
     const QString dirPath = reverseCacheDir();
     if (dirPath.isEmpty())
         return;
+
+    const QString protect =
+        protectPath.isEmpty() ? QString() : QFileInfo(protectPath).absoluteFilePath();
 
     QDir dir(dirPath);
     for (const QFileInfo &partial :
@@ -180,6 +190,11 @@ void ReverseProxyCache::sweep(qint64 maxBytes)
     for (const QFileInfo &proxy : proxies) {
         if (total <= maxBytes)
             break;
+        // The proxy that triggered this sweep survives even when it alone busts the budget:
+        // deleting it would drop the render the caller is about to hand back, and every later
+        // toggle of reverse on that clip would re-run the same doomed encode.
+        if (!protect.isEmpty() && proxy.absoluteFilePath() == protect)
+            continue;
         const qint64 size = proxy.size();
         if (QFile::remove(proxy.absoluteFilePath())) {
             removed.insert(proxy.absoluteFilePath());
@@ -234,12 +249,37 @@ QString videoReadPath(const Clip &clip)
 
 QString reverseCacheDir()
 {
+#ifdef Q_OS_ANDROID
+    // CacheLocation, not AppDataLocation: on Android AppDataLocation is the app's files dir, which
+    // Settings reports as app data and which the platform's storage reclaim never touches — so the
+    // user had no way to get these bytes back short of clearing the whole app. Proxies are exactly
+    // what CacheLocation is for: a miss is not an error, lookup() just falls back to live decode.
+    //
+    // Memoized so the one-time legacy cleanup below runs once per process rather than per call.
+    static const QString dir = [] {
+        const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        if (base.isEmpty())
+            return QString();
+        const QString path = QDir(base).filePath(QStringLiteral("reversed"));
+        QDir().mkpath(path);
+        // Proxies written by an older build sit in the files dir along with the index that names
+        // them by absolute path. Moving the files would leave every one of those paths dangling —
+        // orphans that only the byte budget would ever reclaim — so drop the tree instead. The
+        // cost is re-rendering an already-reversed clip; nothing here is project content.
+        const QString legacy = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (!legacy.isEmpty())
+            QDir(QDir(legacy).filePath(QStringLiteral("reversed"))).removeRecursively();
+        return path;
+    }();
+    return dir;
+#else
     const QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     if (base.isEmpty())
         return {};
     const QString dir = QDir(base).filePath(QStringLiteral("reversed"));
     QDir().mkpath(dir);
     return dir;
+#endif
 }
 
 QString newReversePath()

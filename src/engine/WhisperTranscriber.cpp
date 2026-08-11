@@ -293,9 +293,12 @@ struct WhisperTranscriber::Impl
                     bool firstStep, float temperature);
 
     // Decode one 30s encoder window; retries with rising temperature when the transcript
-    // looks collapsed (high compression ratio / repeated words).
+    // looks collapsed (high compression ratio / repeated words). `status` returns false to
+    // request cancel; `cancelled` is then set and the return value is meaningless (an empty
+    // vector otherwise means silence, which the caller happily accepts).
     std::vector<int> decodeWindow(Ort::Value &encHidden, const std::vector<int64_t> &prompt,
-                                  const std::function<void(const QString &)> &status);
+                                  const std::function<bool(const QString &)> &status,
+                                  bool &cancelled);
 };
 
 int WhisperTranscriber::Impl::sampleToken(const float *logits, const std::vector<int> &generated,
@@ -416,7 +419,7 @@ int WhisperTranscriber::Impl::sampleToken(const float *logits, const std::vector
 
 std::vector<int> WhisperTranscriber::Impl::decodeWindow(
     Ort::Value &encHidden, const std::vector<int64_t> &prompt,
-    const std::function<void(const QString &)> &status)
+    const std::function<bool(const QString &)> &status, bool &cancelled)
 {
     static const float kTemperatures[] = {0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f};
 
@@ -424,7 +427,10 @@ std::vector<int> WhisperTranscriber::Impl::decodeWindow(
     int bestClosed = -1;
     for (const float temperature : kTemperatures) {
         if (temperature > 0.0f && status) {
-            status(QStringLiteral("Difficult audio — trying another pass…"));
+            if (!status(QStringLiteral("Difficult audio — trying another pass…"))) {
+                cancelled = true;
+                return {};
+            }
         }
         std::unordered_map<std::string, Ort::Value> pastKV;
         std::vector<int> generated;
@@ -462,6 +468,15 @@ std::vector<int> WhisperTranscriber::Impl::decodeWindow(
         for (int step = 0; step < kMaxDecodeTokens; ++step) {
             if (nextToken == kEosToken)
                 break;
+
+            // Cancel only reaches us through `status`, and one window is up to six passes of
+            // 224 autoregressive steps — tens of seconds on a phone with nothing else to
+            // interrupt it. Every eighth step keeps the latency down without one queued
+            // progress event per token.
+            if (status && step % 8 == 0 && !status(QString())) {
+                cancelled = true;
+                return {};
+            }
 
             if (nextToken >= kTimestampBegin) {
                 // After a segment-end timestamp (text then ts), next start must be strictly later.
@@ -876,8 +891,14 @@ WhisperResult WhisperTranscriber::transcribe(
         std::vector<int64_t> prompt{kSotToken, languageToken, kTranscribeToken};
 
         const double windowFrac = static_cast<double>(cursor) / total;
+        bool windowCancelled = false;
         const std::vector<int> generated = d->decodeWindow(
-            encHidden, prompt, [&](const QString &msg) { report(windowFrac, msg); });
+            encHidden, prompt, [&](const QString &msg) { return report(windowFrac, msg); },
+            windowCancelled);
+        if (windowCancelled) {
+            result.cancelled = true;
+            return result;
+        }
 
         // --- segment the generated tokens by timestamp pairs ---
         double lastSegmentEnd = -1.0;
