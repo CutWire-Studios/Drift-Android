@@ -146,10 +146,20 @@ void CompositorService::requestComposite(drift::TimeUs timeUs, FrameCompositor::
 {
     options.previewScale = qBound(0.1, options.previewScale, 1.0);
     options = effectiveOptions(options);
+
+    // The pending scale is published as whole percent, and the catch-up dispatch in
+    // onWorkerFrameReady reads it back as percent/100. Dispatching the unrounded value here
+    // would leave the two permanently unequal (0.16667 vs 0.17), so every finished frame would
+    // re-dispatch at a slightly different canvas size — the preview would flip between, say,
+    // 120x213 and 122x218 on every frame, rebuilding the presentation ring's FBOs each time and
+    // handing the scene graph freshly allocated (black) textures. Round-trip through the same
+    // integer here so both paths ask for one size.
+    const int scalePercent =
+        qBound(10, static_cast<int>(std::lround(options.previewScale * 100.0)), 100);
+    options.previewScale = scalePercent / 100.0;
+
     m_pendingTimeUs.store(timeUs, std::memory_order_release);
-    m_pendingPreviewScalePercent.store(
-        qBound(10, static_cast<int>(std::lround(options.previewScale * 100.0)), 100),
-        std::memory_order_release);
+    m_pendingPreviewScalePercent.store(scalePercent, std::memory_order_release);
     m_pendingMaxTimeEchoHistoryFrames.store(options.maxTimeEchoHistoryFrames, std::memory_order_release);
     m_pendingReadAheadUs.store(options.readAheadUs, std::memory_order_release);
     if (m_requestPending.exchange(true, std::memory_order_acq_rel))

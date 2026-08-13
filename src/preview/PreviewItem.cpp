@@ -108,8 +108,19 @@ QSGNode *PreviewItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
             // Wraps the compositor's framebuffer texture — no copy, no upload. The GL
             // object stays owned by the engine's presentation ring, so the scene graph
             // must not take ownership of it; setOwnsTexture only frees this wrapper.
+            //
+            // TextureHasAlphaChannel is required, not cosmetic. Without it the wrapper
+            // reports no alpha, QSGSimpleTextureNode picks QSGOpaqueTextureMaterial, and
+            // on Android/ANGLE (Samsung Xclipse, GLES over Vulkan) that material draws an
+            // externally created texture as solid black — verified with a solid-red test
+            // texture built in the scene graph's own context, which also came out black
+            // until this flag was added. The canvas is opaque (cleared at alpha 1), so
+            // declaring the channel only selects the blending material; it does not change
+            // the pixels. The QImage branch above does not need it because
+            // createTextureFromImage infers alpha from the image format.
             texture = QNativeInterface::QSGOpenGLTexture::fromNative(
-                static_cast<GLuint>(m_textureId), window(), m_textureSize);
+                static_cast<GLuint>(m_textureId), window(), m_textureSize,
+                QQuickWindow::TextureHasAlphaChannel);
         }
         if (!texture) {
             qWarning("PreviewItem: failed to create scene-graph texture (image=%dx%d id=%d)",
