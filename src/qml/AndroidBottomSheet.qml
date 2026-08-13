@@ -65,6 +65,22 @@ Popup {
         heightAnimation.start()
     }
 
+    // Slide out, then hide. Popup.close() takes the panel off screen in the frame it
+    // is called, so every dismissal — close button, scrim tap, Back, switching
+    // sheets — used to blink rather than move, which read as a glitch on the one
+    // surface the phone shell opens most. Every in-app path goes through here;
+    // closePolicy still calls close() directly, and the exit transition below keeps
+    // even that from snapping.
+    function dismiss() {
+        if (!opened) {
+            close()
+            return
+        }
+        closeAnimation.stop()
+        closeAnimation.from = root.panelHeight
+        closeAnimation.start()
+    }
+
     function beginDrag(globalY) {
         heightAnimation.stop()
         root._dragging = true
@@ -90,10 +106,10 @@ Popup {
         const flungUp = velocityY < -1600
 
         if (clearlyBelowCollapsed)
-            return root.close()
+            return root.dismiss()
         // Downward fling only dismisses when already at/under the collapsed size.
         if (flungDown && nearCollapsed && finalHeight < collapsedHeight * 0.95)
-            return root.close()
+            return root.dismiss()
 
         if (flungUp || finalHeight >= mid)
             return expand()
@@ -105,7 +121,12 @@ Popup {
         expanded = false
         _dragging = false
         heightAnimation.stop()
-        panelHeight = collapsedHeight
+        closeAnimation.stop()
+        // From zero, not straight to the resting height: the sheet has to be seen to
+        // come up from the rail that opened it, or it just materialises over the
+        // timeline with no hint of where it came from or how to put it back.
+        panelHeight = 0
+        animateTo(collapsedHeight)
     }
 
     onHeightChanged: {
@@ -114,12 +135,45 @@ Popup {
         panelHeight = expanded ? expandedHeight : collapsedHeight
     }
 
+    // panelHeight is written imperatively, so a sheet whose resting height is derived
+    // from its own content (AndroidAddMenu) would keep whatever height it was given
+    // before that content existed. Re-snap when the target moves under us.
+    onCollapsedHeightChanged: {
+        if (!opened || _dragging || expanded || closeAnimation.running)
+            return
+        animateTo(collapsedHeight)
+    }
+
     NumberAnimation {
         id: heightAnimation
         target: root
         property: "panelHeight"
         duration: Theme.durationBase + 40
         easing.type: Theme.easing
+    }
+
+    // Exit is shorter than the entrance: arriving is an announcement, leaving is an
+    // acknowledgement, and a dismissal that takes as long as the reveal reads as lag.
+    NumberAnimation {
+        id: closeAnimation
+        target: root
+        property: "panelHeight"
+        to: 0
+        duration: Math.round((Theme.durationBase + 40) * 0.65)
+        easing.type: Theme.easing
+        onFinished: root.close()
+    }
+
+    // Backstop for the paths that reach close() without dismiss() — closePolicy's
+    // Escape, and anything Qt closes on our behalf.
+    exit: Transition {
+        NumberAnimation {
+            property: "opacity"
+            from: 1.0
+            to: 0.0
+            duration: Theme.durationFast
+            easing.type: Theme.easing
+        }
     }
 
     // Shared vertical-drag tracker used by the header and empty body chrome.
@@ -183,7 +237,7 @@ Popup {
         }
         MouseArea {
             anchors.fill: parent
-            onClicked: root.close()
+            onClicked: root.dismiss()
         }
     }
 
@@ -196,7 +250,7 @@ Popup {
             anchors.right: parent.right
             anchors.top: parent.top
             anchors.bottom: panel.top
-            onClicked: root.close()
+            onClicked: root.dismiss()
         }
 
         Rectangle {
@@ -240,12 +294,15 @@ Popup {
                     width: 44
                     height: 5
                     radius: 2.5
-                    color: Theme.panelBorder
+                    color: Theme.sheetHandle
                 }
 
                 Text {
                     anchors.left: parent.left
-                    anchors.leftMargin: Theme.pagePadding
+                    // Landscape cutout: the header spans the panel edge to edge, so
+                    // without this the title ran under the notch on one rotation and
+                    // the Close button under the nav bar on the other.
+                    anchors.leftMargin: Theme.pagePadding + root.safeLeft
                     anchors.right: closeBtn.left
                     anchors.rightMargin: Theme.spacingMd
                     anchors.bottom: parent.bottom
@@ -261,7 +318,7 @@ Popup {
                 IconButton {
                     id: closeBtn
                     anchors.right: parent.right
-                    anchors.rightMargin: Theme.spacingSm
+                    anchors.rightMargin: Theme.spacingSm + root.safeRight
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 4
                     buttonSize: Theme.androidIconButtonSize
@@ -269,7 +326,7 @@ Popup {
                     glyph: Theme.icons.x
                     variant: "text"
                     tooltip: qsTr("Close")
-                    onClicked: root.close()
+                    onClicked: root.dismiss()
                 }
 
                 Rectangle {
@@ -283,7 +340,7 @@ Popup {
                 // Whole header is the primary drag affordance (except close).
                 SheetDragArea {
                     anchors.fill: parent
-                    anchors.rightMargin: closeBtn.width + Theme.spacingSm
+                    anchors.rightMargin: closeBtn.width + Theme.spacingSm + root.safeRight
                     stealTouches: true
                 }
             }

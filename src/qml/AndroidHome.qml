@@ -168,7 +168,7 @@ Item {
                             anchors.fill: parent
                             buttonSize: Theme.androidIconButtonSize
                             iconSize: Theme.iconSizeLg
-                            glyph: Theme.icons.sliders
+                            glyph: Theme.icons.ellipsis
                             variant: "text"
                             tooltip: qsTr("More")
                             onClicked: homeMenu.popup()
@@ -198,13 +198,13 @@ Item {
                             ThemedMenuItem {
                                 text: qsTr("Extras")
                                 icon.name: Theme.icons.package
-                                onTriggered: Window.window.openExtras()
+                                onTriggered: root.Window.window.openExtras()
                             }
                             ThemedMenuItem {
                                 text: qsTr("Update available")
                                 icon.name: Theme.icons.download
                                 visible: Updates.updateAvailable
-                                onTriggered: Window.window.openUpdateDialog()
+                                onTriggered: root.Window.window.openUpdateDialog()
                             }
                         }
                     }

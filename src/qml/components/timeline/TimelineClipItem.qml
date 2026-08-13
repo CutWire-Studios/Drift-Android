@@ -111,8 +111,11 @@ Item {
     readonly property real trimHandleWidth: touchMode
                                             ? Theme.androidClipTrimHandleWidth
                                             : Theme.clipTrimHandleWidth
+    // Clamped against the clip's own width: a minimum-width (56dp) clip inset by a
+    // fixed 22dp each side left a 12dp movable core, and the edge bands are dead
+    // until the clip is selected — so short clips could not be tapped at all.
     readonly property real edgeMargin: touchMode
-                                       ? Theme.androidClipEdgeMargin
+                                       ? Math.min(Theme.androidClipEdgeMargin, width / 4)
                                        : 14
     readonly property real trimHotspotExtra: touchMode
                                              ? Theme.androidTrimHotspotExtra
@@ -408,8 +411,12 @@ Item {
                     width: parent.width
                     visible: clipItem.hasAnyEffects
                     text: clipItem.effectsLabelText
-                    color: Theme.panelSecondaryForeground
+                    // Amber-on-clip was 1.6-2.1:1. White at 0.85 clears 7:1 on every
+                    // clip fill; weight keeps it distinct from the name line above.
+                    color: Theme.onMedia
+                    opacity: 0.85
                     font.pixelSize: Theme.fontSizeTiny
+                    font.weight: Font.DemiBold
                     font.family: Theme.fontFamily
                     elide: Text.ElideRight
                 }

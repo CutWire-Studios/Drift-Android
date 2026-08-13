@@ -13,6 +13,8 @@ import Drift
 // The footer is custom for the same reason UnsavedChangesDialog's is: confirming has to leave the
 // dialog open so it can become the progress readout, and Dialog.accept() closes.
 ThemedDialog {
+    // Back must not reach this one: closing it abandons work already running.
+    backDismissable: false
     id: root
 
     // The clip the confirm step is about. Once the render starts it no longer depends on the

@@ -16,6 +16,9 @@ Item {
     signal openRequested()
     signal newRequested()
     signal layoutRequested()
+    // Destinations that lost their bottom-rail slot when the rail dropped to four
+    // plus [+]. Both open the assets sheet on the named tab, exactly as the rail did.
+    signal assetsTabRequested(string tabId)
 
     // Status bar / camera cutout. Without it the Back, Undo and Export buttons sat
     // underneath the system bar on every edge-to-edge device.
@@ -64,7 +67,12 @@ Item {
 
             Text {
                 anchors.verticalCenter: parent.verticalCenter
-                width: Math.min(140, implicitWidth)
+                // Clamped against what the two Rows actually leave, not a fixed 140:
+                // at 48dp targets the right-hand cluster is ~200dp of a 360dp bar and
+                // a long project name pushed straight through it.
+                width: Math.min(140, implicitWidth,
+                                Math.max(0, barBody.width - actionsRow.width
+                                            - Theme.androidIconButtonSize - Theme.spacingXl))
                 text: EditorState.projectName.length > 0
                       ? EditorState.projectName
                       : qsTr("Untitled")
@@ -85,6 +93,7 @@ Item {
         }
 
         Row {
+            id: actionsRow
             anchors.right: parent.right
             anchors.rightMargin: Theme.spacingSm
             anchors.verticalCenter: parent.verticalCenter
@@ -148,7 +157,9 @@ Item {
                 id: moreBtn
                 buttonSize: Theme.androidIconButtonSize
                 iconSize: Theme.iconSizeLg
-                glyph: Theme.icons.sliders
+                // Not `sliders`: that glyph already means the preview's view
+                // settings and the rail's Edit destination on this same screen.
+                glyph: Theme.icons.ellipsis
                 variant: "text"
                 tooltip: qsTr("More")
                 active: overflowMenu.visible
@@ -194,6 +205,9 @@ Item {
                 spacing: 2
                 width: menuFlick.width
 
+                // NB: handlers here run after overflowMenu.close(), so anything that
+                // needs the window must reach it through an item that stays in the
+                // scene (`root`), never through this row's own Window attachment.
                 component MenuRow: Rectangle {
                     id: menuRow
                     property alias text: menuLabel.text
@@ -202,7 +216,8 @@ Item {
                     width: parent ? parent.width : 0
                     height: visible ? Math.max(44, Theme.controlHeight) : 0
                     radius: Theme.radiusSm
-                    color: menuArea.containsMouse ? Theme.accent : "transparent"
+                    color: menuArea.pressed || menuArea.containsMouse
+                           ? Theme.accent : "transparent"
 
                     Row {
                         anchors.left: parent.left
@@ -265,7 +280,17 @@ Item {
                 MenuRow {
                     text: qsTr("Project properties")
                     glyph: Theme.icons.info
-                    onTriggered: Window.window.openProjectProperties()
+                    onTriggered: root.Window.window.openProjectProperties()
+                }
+                MenuRow {
+                    text: qsTr("Effect templates")
+                    glyph: Theme.icons.layers
+                    onTriggered: root.assetsTabRequested("templates")
+                }
+                MenuRow {
+                    text: qsTr("Settings")
+                    glyph: Theme.icons.settings
+                    onTriggered: root.assetsTabRequested("settings")
                 }
                 MenuRow {
                     text: Theme.darkMode ? qsTr("Light mode") : qsTr("Dark mode")
@@ -275,13 +300,13 @@ Item {
                 MenuRow {
                     text: qsTr("Extras")
                     glyph: Theme.icons.package
-                    onTriggered: Window.window.openExtras()
+                    onTriggered: root.Window.window.openExtras()
                 }
                 MenuRow {
                     text: qsTr("Update available")
                     glyph: Theme.icons.download
                     visible: Updates.updateAvailable
-                    onTriggered: Window.window.openUpdateDialog()
+                    onTriggered: root.Window.window.openUpdateDialog()
                 }
             }
         }
@@ -290,16 +315,18 @@ Item {
         // position from it put the menu near the left edge instead of under the button.
         // The button is the last item on the right, so the bar's own right edge is the
         // anchor — and it already accounts for the landscape cutout inset.
-        onAboutToShow: {
-            x = Math.max(Theme.spacingSm, barBody.width - width - Theme.spacingSm)
-            y = barBody.height + 4
-            const overlayHeight = Overlay.overlay ? Overlay.overlay.height : 0
-            if (overlayHeight > 0) {
-                const top = barBody.mapToItem(null, 0, y).y
-                height = Math.max(Theme.controlHeight,
-                                  Math.min(implicitHeight,
-                                           overlayHeight - top - Theme.spacingXl))
-            }
-        }
+        //
+        // All three are bindings, not assignments made in onAboutToShow. A Popup builds
+        // its contentItem lazily on first open, so a height measured there saw a column
+        // that did not have its rows yet and pinned the menu to roughly seven of them —
+        // Settings and everything under it were clipped off the bottom with only the
+        // Flickable to find them by.
+        x: Math.max(Theme.spacingSm, barBody.width - width - Theme.spacingSm)
+        y: barBody.height + 4
+        readonly property real menuTop: root.topInset + barBody.height + 4
+        height: Math.max(Theme.controlHeight,
+                         Math.min(implicitHeight,
+                                  (Overlay.overlay ? Overlay.overlay.height : implicitHeight)
+                                  - menuTop - Theme.spacingXl))
     }
 }

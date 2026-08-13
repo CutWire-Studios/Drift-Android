@@ -78,7 +78,9 @@ Item {
             height: parent.height
             leftPadding: Theme.spacingSm
             rightPadding: Theme.spacingSm
-            spacing: Theme.spacingXs
+            // 2dp put Delete a hair from Separate-audio. The row lives in a
+            // horizontal Flickable, so the extra width costs nothing but scroll.
+            spacing: Theme.spacingLg
 
             ActionButton {
                 glyph: Theme.icons.mousePointer
@@ -230,7 +232,7 @@ Item {
         anchors.right: parent.right
         anchors.rightMargin: Theme.spacingSm + root.rightInset
         anchors.verticalCenter: parent.verticalCenter
-        spacing: Theme.spacingXs
+        spacing: Theme.spacingLg
 
         ActionButton {
             glyph: Theme.icons.zoomOut

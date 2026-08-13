@@ -5,6 +5,8 @@ import Drift
 // Packaging copies every byte of source media into the bundle, so it is modal: the timeline must
 // not change under the writer.
 ThemedDialog {
+    // Back must not reach this one: closing it abandons work already running.
+    backDismissable: false
     id: root
 
     title: qsTr("Preparing shareable copy")

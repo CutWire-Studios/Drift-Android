@@ -62,8 +62,11 @@ Item {
         // clear of the unsafe area and zero the very margins that put it there.
         anchors.topMargin: root.fullscreen ? root.SafeArea.margins.top : 0
         anchors.bottomMargin: root.fullscreen ? root.SafeArea.margins.bottom : 0
-        anchors.leftMargin: root.fullscreen ? root.SafeArea.margins.left : 0
-        anchors.rightMargin: root.fullscreen ? root.SafeArea.margins.right : 0
+        // The side insets are not a fullscreen-only concern: in landscape the nav
+        // bar and the cutout sit beside the preview pane in the split too, and
+        // zeroing them there clipped the canvas and its transform handles.
+        anchors.leftMargin: root.SafeArea.margins.left
+        anchors.rightMargin: root.SafeArea.margins.right
 
         Item {
             id: viewportOuter

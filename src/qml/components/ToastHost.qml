@@ -11,6 +11,12 @@ Item {
     anchors.fill: parent
     z: 1000
 
+    // The gesture pill, the landscape cutout, and — on the phone — the bottom rail
+    // all live where the toasts were being pinned, so an import result or an export
+    // failure landed under the nav bar or on top of the rail.
+    readonly property real bottomInset: root.SafeArea.margins.bottom
+    readonly property real sideInset: root.SafeArea.margins.left + root.SafeArea.margins.right
+
     function _accent(severity) {
         switch (severity) {
         case "error": return Theme.destructive
@@ -32,9 +38,10 @@ Item {
     Column {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: Theme.spacing3xl
+        anchors.bottomMargin: Theme.spacing3xl + root.bottomInset
+                              + (Theme.touchUi ? Theme.androidBottomRailHeight : 0)
         spacing: Theme.spacingLg
-        width: Math.min(460, root.width - Theme.spacing3xl * 2)
+        width: Math.min(460, root.width - Theme.spacing3xl * 2 - root.sideInset)
 
         Repeater {
             model: Toasts.model
@@ -118,10 +125,16 @@ Item {
 
                 // timeout 0 means "stays until dismissed" (errors).
                 Timer {
+                    id: dwellTimer
                     running: toast.timeout > 0 && !toast.exiting
                     interval: toast.timeout
                     onTriggered: Toasts.dismiss(toast.toastId)
                 }
+
+                // A repeat folds into the existing row rather than pushing a new one,
+                // so without this the second occurrence inherits whatever was left of
+                // the first one's dwell — sometimes a few milliseconds.
+                onRepeatsChanged: if (toast.timeout > 0 && !toast.exiting) dwellTimer.restart()
 
                 // Exit is the reverse of the `add:` transition below, so a
                 // dismissal reads as the arrival played backwards. It runs as an

@@ -5,6 +5,8 @@ import Drift
 // Live progress for background Whisper subtitle generation. Opens when generation
 // starts and closes when it ends; the reject button cancels the run.
 ThemedDialog {
+    // Back must not reach this one: closing it abandons work already running.
+    backDismissable: false
     id: root
 
     title: qsTr("Generating subtitles")

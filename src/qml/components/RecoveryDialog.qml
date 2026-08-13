@@ -6,6 +6,8 @@ import Drift
 // exists (crash or normal close with unsaved work). Restore reloads it; New
 // session starts fresh and clears the snapshot.
 ThemedDialog {
+    // Back must not reach this one: closing it abandons work already running.
+    backDismissable: false
     id: root
 
     title: qsTr("Unsaved work from last session")

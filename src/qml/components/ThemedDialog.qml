@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Window
 import Drift
 
 // Themed modal dialog chrome. Put page content in `contentItem`; use footer buttons
@@ -18,6 +19,10 @@ Dialog {
     property real preferredWidth: Theme.dialogWidthMd
     // Set false for dialogs where Enter must not commit (destructive confirms).
     property bool acceptOnReturn: true
+    // Set false for dialogs the system Back key must not dismiss: the recovery
+    // prompt, which has no neutral answer, and the progress dialogs, where closing
+    // cancels the work behind them.
+    property bool backDismissable: true
 
     modal: true
     anchors.centerIn: Overlay.overlay
@@ -32,15 +37,26 @@ Dialog {
     // out, its buttons went off-screen with no way to scroll to them — Cancel was
     // reachable only by Escape. Clamping shrinks the content area instead, so the
     // title and the footer buttons always stay on screen.
+    // The clamp was against the raw window, which on an edge-to-edge phone includes
+    // the status bar and the gesture area. A centred dialog that used the full
+    // height therefore put its title under the notch and its footer under the nav
+    // bar. Doubled because the dialog is centred: it eats the larger inset at both
+    // ends symmetrically.
+    readonly property real safeV: Overlay.overlay
+        ? 2 * Math.max(Overlay.overlay.SafeArea.margins.top,
+                       Overlay.overlay.SafeArea.margins.bottom)
+        : 0
+
     height: Math.min(implicitHeight,
-                     (Overlay.overlay ? Overlay.overlay.height : implicitHeight) - Theme.dialogMargin)
+                     (Overlay.overlay ? Overlay.overlay.height : implicitHeight)
+                     - Theme.dialogMargin - safeV)
 
     // Room a contentItem may occupy before the dialog would be clamped. Content
     // that can grow without bound (long option lists, disclosure sections) should
     // put itself in a Flickable capped at this, so it scrolls rather than crops.
     readonly property real availableContentHeight: {
         const overlayHeight = Overlay.overlay ? Overlay.overlay.height : 720
-        return Math.max(120, overlayHeight - Theme.dialogMargin
+        return Math.max(120, overlayHeight - Theme.dialogMargin - root.safeV
                              - dialogHeader.implicitHeight - dialogFooter.implicitHeight
                              - topPadding - bottomPadding)
     }
@@ -59,11 +75,38 @@ Dialog {
 
     // Give the dialog focus on open so the key handlers above are live and the
     // default action is visibly selected.
+    // Android's Back key is not Escape, so closePolicy never saw it. Registering
+    // here is what makes Back dismiss the dialog on top instead of walking out of
+    // the editor and leaving it on screen — the same contract ThemedContextMenu
+    // already uses. No-op on desktop, which defines no pushMenu.
+    property var _backHost: null
+
     onOpened: {
         if (showAccept)
             acceptButton.forceActiveFocus()
         else
             root.forceActiveFocus()
+    }
+
+    // Via Connections, not `onOpened:`/`onClosed:` handlers. A derived dialog that
+    // declares its own handler for the same signal replaces the one written here —
+    // AddonManagerDialog and AddonStartupDialog both do — which silently unhooked
+    // the registration and left exactly those dialogs undismissable by Back.
+    Connections {
+        target: root
+
+        function onOpened() {
+            root._backHost = (Theme.touchUi && root.backDismissable && root.parent)
+                             ? root.parent.Window.window : null
+            if (root._backHost && root._backHost.pushMenu)
+                root._backHost.pushMenu(root)
+        }
+
+        function onClosed() {
+            if (root._backHost && root._backHost.popMenu)
+                root._backHost.popMenu(root)
+            root._backHost = null
+        }
     }
 
     enter: Transition {

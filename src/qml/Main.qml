@@ -578,5 +578,5 @@ ApplicationWindow {
     }
 
     // Notification host — above all panels, so any message lands in one place.
-    ToastHost { }
+    ToastHost { parent: Overlay.overlay }
 }
