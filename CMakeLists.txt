@@ -551,6 +551,9 @@ qt_add_resources(drift "drift_app_icon"
 set_source_files_properties(src/qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE true)
 # App-wide notification queue; the visual host is components/ToastHost.qml.
 set_source_files_properties(src/qml/Toasts.qml PROPERTIES QT_QML_SINGLETON_TYPE true)
+# In-flight lift-and-drop state for the phone asset sheet; the ghost is drawn by
+# AndroidBottomSheet and the drop is performed by AndroidTimeline.
+set_source_files_properties(src/qml/TouchDrag.qml PROPERTIES QT_QML_SINGLETON_TYPE true)
 
 # Lucide icons: SVG sources in resources/icons/ (from lucide-icons-1.25.0), PNGs for QML.
 file(GLOB DRIFT_LUCIDE_ICONS RELATIVE "${CMAKE_SOURCE_DIR}" CONFIGURE_DEPENDS
@@ -575,6 +578,7 @@ qt_add_qml_module(drift
         src/qml/AndroidEditActions.qml
         src/qml/Theme.qml
         src/qml/Toasts.qml
+        src/qml/TouchDrag.qml
         src/qml/EditorHeader.qml
         src/qml/AssetsPanel.qml
         src/qml/PreviewPanel.qml
@@ -614,6 +618,7 @@ qt_add_qml_module(drift
         src/qml/components/timeline/TimelineToolbar.qml
         src/qml/components/timeline/TrackHeaderColumn.qml
         src/qml/components/timeline/TimelineClipItem.qml
+        src/qml/components/TouchLiftArea.qml
         src/qml/components/IconGlyph.qml
         src/qml/components/IconButton.qml
         src/qml/components/PanelFrame.qml
