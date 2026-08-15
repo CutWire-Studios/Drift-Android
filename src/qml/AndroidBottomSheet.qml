@@ -48,6 +48,47 @@ Popup {
     property real panelHeight: 0
     property bool _dragging: false
 
+    // A card lifted out of this sheet keeps the touch grab of the item that
+    // started the gesture, so the sheet must not close while the drag is live —
+    // closing takes that item off screen and the drag dies with it. It slides out
+    // of the way instead, and closes for real when the finger lifts. Latched: the
+    // panel moves as it goes, so re-testing the pointer against it would flap.
+    property bool steppedAside: false
+    property real _asideFade: steppedAside ? 0 : 1
+
+    Behavior on _asideFade {
+        NumberAnimation { duration: Theme.durationBase; easing.type: Theme.easing }
+    }
+
+    Connections {
+        target: TouchDrag
+
+        function onSceneYChanged() {
+            if (!root.opened || root.steppedAside || !TouchDrag.active)
+                return
+            if (TouchDrag.sceneY >= panel.mapToItem(null, 0, 0).y - Theme.spacingLg)
+                return
+            root.steppedAside = true
+            TouchDrag.clearOfSource = true
+        }
+
+        function onActiveChanged() {
+            if (TouchDrag.active || !root.opened || !root.steppedAside)
+                return
+            // callLater, not close(): the drag ended inside the released handler of
+            // an item this popup owns, and tearing it down under its own event is
+            // the one way to lose the drop.
+            Qt.callLater(root.close)
+        }
+    }
+
+    // Unlatched only once the popup is gone, so the panel does not slide back up
+    // through the exit transition on its way out.
+    Connections {
+        target: root
+        function onClosed() { root.steppedAside = false }
+    }
+
     function expand() {
         expanded = true
         animateTo(expandedHeight)
@@ -120,6 +161,7 @@ Popup {
     onAboutToShow: {
         expanded = false
         _dragging = false
+        steppedAside = false
         heightAnimation.stop()
         closeAnimation.stop()
         // From zero, not straight to the resting height: the sheet has to be seen to
@@ -233,7 +275,7 @@ Popup {
                 return 0
             const span = Math.max(1, root.expandedHeight - root.dismissHeight)
             const t = (root.panelHeight - root.dismissHeight) / span
-            return 0.35 + 0.65 * Math.max(0, Math.min(1, t))
+            return (0.35 + 0.65 * Math.max(0, Math.min(1, t))) * root._asideFade
         }
         MouseArea {
             anchors.fill: parent
@@ -261,6 +303,13 @@ Popup {
             height: root.panelHeight
             color: Theme.panelBackground
             radius: Theme.radiusMd
+
+            // Translated rather than resized or hidden while a lifted card is in
+            // flight: `height` feeds the drag maths and `visible: false` would drop
+            // the grab the gesture is riding on.
+            transform: Translate {
+                y: (1 - root._asideFade) * (root.panelHeight + root.safeBottom)
+            }
 
             // Catch presses on empty (non-scrolling) sheet chrome and drag the sheet.
             // Flickables / buttons sit above this and keep their own gestures.
@@ -357,6 +406,77 @@ Popup {
                 anchors.leftMargin: root.safeLeft
                 anchors.rightMargin: root.safeRight
                 clip: true
+            }
+        }
+
+        // The lifted card, following the finger. It lives out here rather than in
+        // the panel so it survives the panel stepping aside — that is the whole
+        // point of the gesture: the sheet leaves, the item you picked up does not.
+        Item {
+            id: dragGhost
+            readonly property real ghostSize: Math.round(Theme.assetCardWidth * 0.62)
+            visible: root.opened && TouchDrag.active
+            z: 100
+            width: ghostSize
+            height: ghostSize
+            // Lifted clear of the fingertip, or the thing being placed is under the
+            // hand placing it.
+            x: sheetRoot.mapFromItem(null, TouchDrag.sceneX, TouchDrag.sceneY).x - width / 2
+            y: sheetRoot.mapFromItem(null, TouchDrag.sceneX, TouchDrag.sceneY).y
+               - height - Theme.spacingLg
+            scale: visible ? 1 : 0.8
+
+            Behavior on scale {
+                NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+            }
+
+            Rectangle {
+                anchors.fill: parent
+                radius: Theme.radiusSm
+                color: Theme.panelAccent
+                clip: true
+                border.width: TouchDrag.overTarget ? 2 : Theme.borderWidth
+                border.color: TouchDrag.overTarget ? Theme.primary : Theme.panelBorder
+                opacity: 0.94
+
+                Behavior on border.width {
+                    NumberAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                }
+                Behavior on border.color {
+                    ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                }
+
+                Image {
+                    id: ghostImage
+                    anchors.fill: parent
+                    visible: TouchDrag.thumbnail.length > 0 && status === Image.Ready
+                    source: TouchDrag.thumbnail.length > 0
+                            ? EditorState.imageUrl(TouchDrag.thumbnail) : ""
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true
+                }
+
+                IconGlyph {
+                    anchors.centerIn: parent
+                    visible: !ghostImage.visible && TouchDrag.glyph.length > 0
+                    glyph: TouchDrag.glyph
+                    iconSize: Theme.iconSizeXl
+                    iconColor: Theme.panelForeground
+                }
+
+                Text {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.margins: Theme.spacingXs
+                    visible: !ghostImage.visible && TouchDrag.label.length > 0
+                    text: TouchDrag.label
+                    color: Theme.panelForeground
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSizeXs
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                }
             }
         }
     }

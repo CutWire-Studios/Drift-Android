@@ -368,6 +368,10 @@ Item {
             id: assetsPanel
             anchors.fill: parent
             sheetMode: true
+            // Text, subtitles, stickers and shapes land at the playhead the moment
+            // they are tapped, so the sheet has done its job and is now covering
+            // the result.
+            onAddCompleted: root.closeSheets()
         }
     }
 

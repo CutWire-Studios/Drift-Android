@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Window
 import Drift
 import "components"
 import "components/timeline"
@@ -323,6 +324,7 @@ Item {
     property real dropStartSeconds: 0
     property real dropDurationSeconds: 0
     property bool dropCreatesNewTrack: false
+    property int dropNewTrackIndex: 0
     property int effectDropTrackIndex: -1
     property int effectDropClipIndex: -1
 
@@ -404,6 +406,333 @@ Item {
         if (rSnapped)
             return { "start": rEdge - duration, "guide": rEdge }
         return { "start": desiredStart, "guide": -1 }
+    }
+
+    // --- Lift-and-drop landing resolution -------------------------------------
+    // Mirrors TimelinePanel's drop maths, driven by TouchDrag instead of a
+    // platform DropArea: on a phone the library is a modal sheet over this panel,
+    // so there is no drag the compositor can route here.
+
+    function clearEffectDropHighlight() {
+        effectDropTrackIndex = -1
+        effectDropClipIndex = -1
+    }
+
+    function updateEffectDropHighlight(trackIndex, xPixels) {
+        const clipIndex = clipIndexAtPosition(trackIndex, xPixels)
+        effectDropTrackIndex = clipIndex >= 0 ? trackIndex : -1
+        effectDropClipIndex = clipIndex
+    }
+
+    function assetDurationSeconds(assetIndex) {
+        const asset = AssetLibrary.assetAt(assetIndex)
+        if (!asset)
+            return 5.0
+        if (asset.kind === "image" || !(asset.durationSeconds > 0))
+            return 5.0
+        return asset.durationSeconds
+    }
+
+    function timelineHasClips() {
+        for (var i = 0; i < tracks.length; i++) {
+            if (tracks[i].clips.length > 0)
+                return true
+        }
+        return false
+    }
+
+    function firstCompatibleTrackIndex(assetIndex) {
+        for (var i = 0; i < tracks.length; i++) {
+            if (EditorState.trackAcceptsAsset(i, assetIndex))
+                return i
+        }
+        return -1
+    }
+
+    // Depth of the "insert a new track here" band on a track row.
+    function newTrackEdge(index) {
+        return Math.min(Theme.newTrackHitSlop, trackHeight(index) / 4)
+    }
+
+    // Resolve a track-column y into a drop target. Returns
+    // { newTrack: false, track: i } to land on an existing track, or
+    // { newTrack: true, insertIndex: n } to create one at that boundary — the
+    // top/bottom band of a row means "new track above/below it", which is what
+    // makes a lane under the last track reachable at all.
+    function assetDropTargetAtY(assetIndex, y) {
+        const count = tracks.length
+        if (count === 0)
+            return { "newTrack": true, "insertIndex": 0 }
+
+        var cursor = 0
+        for (var i = 0; i < count; i++) {
+            const h = trackHeight(i)
+            const rowEnd = cursor + h
+            if (y < rowEnd + Theme.trackGap / 2) {
+                if (!EditorState.trackAcceptsAsset(i, assetIndex))
+                    return { "newTrack": true,
+                             "insertIndex": y < cursor + h / 2 ? i : i + 1 }
+                const edge = newTrackEdge(i)
+                if (i === 0 && y < cursor + edge)
+                    return { "newTrack": true, "insertIndex": 0 }
+                if (y >= rowEnd - edge)
+                    return { "newTrack": true, "insertIndex": i + 1 }
+                return { "newTrack": false, "track": i }
+            }
+            cursor = rowEnd + Theme.trackGap
+        }
+        return { "newTrack": true, "insertIndex": count }
+    }
+
+    // Y of the boundary a new track would be inserted at, in track-column
+    // coordinates — where the ghost lane is drawn.
+    function newTrackBoundaryY(insertIndex) {
+        var cursor = 0
+        for (var i = 0; i < insertIndex && i < tracks.length; i++)
+            cursor += trackHeight(i) + Theme.trackGap
+        return Math.max(0, cursor - Theme.trackGap / 2)
+    }
+
+    function updateAssetDropPreview(assetIndex, dropX, dropY) {
+        const duration = assetDurationSeconds(assetIndex)
+        const desired = Math.max(0, dropX / pxPerSecond)
+
+        // Mirrors performAssetDrop: an empty project fills its existing track
+        // wherever you aim, rather than stacking a second one on top.
+        if (!timelineHasClips()) {
+            const firstIdx = firstCompatibleTrackIndex(assetIndex)
+            if (firstIdx >= 0) {
+                dropCreatesNewTrack = false
+                showLandingPreview(firstIdx, desired, duration)
+                return
+            }
+        }
+
+        const target = assetDropTargetAtY(assetIndex, dropY)
+        if (!target.newTrack) {
+            dropCreatesNewTrack = false
+            showLandingPreview(target.track, desired, duration)
+            return
+        }
+
+        const snapped = snapClipStart(desired, duration)
+        dropCreatesNewTrack = true
+        dropNewTrackIndex = target.insertIndex
+        dropTrackIndex = -1
+        dropStartSeconds = snapped.start
+        dropDurationSeconds = duration
+        snapGuideSeconds = snapped.guide
+    }
+
+    function performAssetDrop(assetIndex, dropX, dropY) {
+        if (assetIndex < 0)
+            return
+        const atSeconds = Math.max(0, dropX / pxPerSecond)
+
+        function runAdd() {
+            if (!timelineHasClips()) {
+                const firstIdx = firstCompatibleTrackIndex(assetIndex)
+                if (firstIdx >= 0) {
+                    EditorState.addClipFromAssetAt(assetIndex, firstIdx, atSeconds)
+                    return
+                }
+            }
+            const target = assetDropTargetAtY(assetIndex, dropY)
+            if (target.newTrack)
+                EditorState.addClipFromAssetOnNewTrackAt(assetIndex, target.insertIndex, atSeconds)
+            else
+                EditorState.addClipFromAssetAt(assetIndex, target.track, atSeconds)
+        }
+
+        if (typeof Window !== "undefined" && Window.window && Window.window.configureAndAddAsset)
+            Window.window.configureAndAddAsset(assetIndex, runAdd)
+        else
+            runAdd()
+    }
+
+    // Outgoing (earlier) clip of the boundary a transition dropped at this x
+    // would bridge.
+    function transitionLeftClipAtPosition(trackIndex, xPixels) {
+        if (trackIndex < 0 || trackIndex >= tracks.length)
+            return -1
+        const track = tracks[trackIndex]
+        if (track.type !== "video" && track.type !== "shape" && track.type !== "text")
+            return -1
+        const seconds = xPixels / pxPerSecond
+        const clips = track.clips
+        let best = -1
+        let bestDist = 1e9
+        for (let i = 0; i < clips.length; i++) {
+            const left = clips[i]
+            for (let j = 0; j < clips.length; j++) {
+                if (i === j)
+                    continue
+                const right = clips[j]
+                if (right.start < left.start)
+                    continue
+                const leftEnd = left.start + left.duration
+                const gap = right.start - leftEnd
+                if (gap > 0.001)
+                    continue
+                let regionStart
+                let regionEnd
+                if (right.start < leftEnd) {
+                    regionStart = right.start
+                    regionEnd = leftEnd
+                } else {
+                    regionStart = leftEnd - 0.25
+                    regionEnd = leftEnd + 0.25
+                }
+                if (seconds >= regionStart && seconds <= regionEnd) {
+                    const mid = (regionStart + regionEnd) / 2
+                    const dist = Math.abs(seconds - mid)
+                    if (dist < bestDist) {
+                        bestDist = dist
+                        best = i
+                    }
+                }
+            }
+        }
+        return best
+    }
+
+    // --- TouchDrag drop target ------------------------------------------------
+
+    Component.onCompleted: TouchDrag.dropTarget = root
+    Component.onDestruction: if (TouchDrag.dropTarget === root) TouchDrag.dropTarget = null
+
+    // Scene point → { inside, x (content px), y (track-column px), viewX, viewY }.
+    // The seek strip is pinned to the top of the viewport, so anything under it is
+    // ruler, not track, however far the tracks have been scrolled.
+    function touchDropPoint(sceneX, sceneY) {
+        const p = flick.mapFromItem(null, sceneX, sceneY)
+        const inside = p.x >= 0 && p.x <= flick.width
+                       && p.y >= root.seekHeaderHeight && p.y <= flick.height
+        return { "inside": inside,
+                 "x": p.x + flick.contentX,
+                 "y": p.y + flick.contentY - root.seekHeaderHeight,
+                 "viewX": p.x,
+                 "viewY": p.y }
+    }
+
+    function clearTouchDrop() {
+        clearLandingPreview()
+        clearEffectDropHighlight()
+        dropEdgeScroll.stop()
+    }
+
+    // Returns true while the finger is somewhere this panel would accept, so the
+    // ghost can show it is about to land rather than about to be thrown away.
+    function updateTouchDrop(kind, payload, sceneX, sceneY) {
+        const pt = touchDropPoint(sceneX, sceneY)
+        if (!pt.inside) {
+            clearTouchDrop()
+            return false
+        }
+
+        dropEdgeScroll.viewX = pt.viewX
+        dropEdgeScroll.viewY = pt.viewY
+        dropEdgeScroll.start()
+
+        if (kind === "media") {
+            clearEffectDropHighlight()
+            updateAssetDropPreview(payload, pt.x, pt.y)
+            return true
+        }
+
+        clearLandingPreview()
+        const trackIdx = trackIndexAtY(pt.y)
+        if (trackIdx < 0) {
+            clearEffectDropHighlight()
+            return false
+        }
+        if (kind === "transition") {
+            const leftClip = transitionLeftClipAtPosition(trackIdx, Math.max(0, pt.x))
+            effectDropTrackIndex = leftClip >= 0 ? trackIdx : -1
+            effectDropClipIndex = leftClip
+            return leftClip >= 0
+        }
+        updateEffectDropHighlight(trackIdx, Math.max(0, pt.x))
+        return effectDropClipIndex >= 0
+    }
+
+    function performTouchDrop(kind, payload, sceneX, sceneY) {
+        const pt = touchDropPoint(sceneX, sceneY)
+        clearTouchDrop()
+        if (!pt.inside)
+            return
+
+        if (kind === "media") {
+            performAssetDrop(payload, pt.x, pt.y)
+            return
+        }
+
+        const trackIdx = trackIndexAtY(pt.y)
+        const clipX = Math.max(0, pt.x)
+
+        if (kind === "transition") {
+            const leftClip = trackIdx >= 0
+                             ? transitionLeftClipAtPosition(trackIdx, clipX) : -1
+            if (leftClip < 0) {
+                Toasts.info(qsTr("Drop a transition where two clips meet."))
+                return
+            }
+            EditorState.addTransition(trackIdx, leftClip, payload, 0.5)
+            return
+        }
+
+        const clipIdx = trackIdx >= 0 ? clipIndexAtPosition(trackIdx, clipX) : -1
+        if (clipIdx < 0) {
+            Toasts.info(qsTr("Drop that onto a clip to apply it."))
+            return
+        }
+        if (kind === "effect")
+            EditorState.addEffect(trackIdx, clipIdx, payload)
+        else if (kind === "audioEffect")
+            EditorState.addAudioEffect(trackIdx, clipIdx, payload)
+        else if (kind === "template")
+            EditorState.applyEffectTemplate(trackIdx, clipIdx, payload)
+        EditorState.selectClip(trackIdx, clipIdx)
+    }
+
+    // The pane is a couple of track rows tall and a few seconds wide, so without
+    // this a lifted card could only ever be dropped on a track and a time that
+    // already happened to be on screen.
+    Timer {
+        id: dropEdgeScroll
+        interval: 16
+        repeat: true
+        running: false
+        property real viewX: 0
+        property real viewY: 0
+        readonly property real band: 48
+        readonly property real speed: 12
+
+        onTriggered: {
+            if (!TouchDrag.active) {
+                stop()
+                return
+            }
+            var dx = 0
+            var dy = 0
+            if (viewX < band)
+                dx = -speed * (1 - viewX / band)
+            else if (viewX > flick.width - band)
+                dx = speed * (1 - (flick.width - viewX) / band)
+            if (viewY < root.seekHeaderHeight + band)
+                dy = -speed * (1 - (viewY - root.seekHeaderHeight) / band)
+            else if (viewY > flick.height - band)
+                dy = speed * (1 - (flick.height - viewY) / band)
+            if (dx === 0 && dy === 0)
+                return
+            const applied = root.dragEdgeScroll(dx, dy)
+            if (applied.x === 0 && applied.y === 0)
+                return
+            // Re-resolve against the view that just moved, or the landing outline
+            // would stay pinned to the content the finger has scrolled away from.
+            root.updateTouchDrop(TouchDrag.kind, TouchDrag.payload,
+                                 TouchDrag.sceneX, TouchDrag.sceneY)
+        }
     }
 
     function trackOffsetY(index) {
@@ -1190,6 +1519,69 @@ Item {
                         border.width: 2
                         border.color: Theme.primary
                         z: 5
+                    }
+
+                    // New-track indicator: a ghost lane straddling the boundary the
+                    // track would be inserted at, drawn at real track height so it
+                    // reads as a track rather than a hairline. Aiming at the top or
+                    // bottom band of a row is the only way to say "put this on its
+                    // own track" without a keyboard.
+                    Item {
+                        id: newTrackIndicator
+                        visible: root.dropCreatesNewTrack
+                        readonly property real laneHeight:
+                            root.trackBaseHeight(EditorState.trackTypeForAsset(
+                                                     EditorState.draggingAssetIndex))
+                        x: 0
+                        y: root.seekHeaderHeight
+                           + root.newTrackBoundaryY(root.dropNewTrackIndex)
+                           - laneHeight / 2
+                        width: parent.width
+                        height: laneHeight
+                        z: 7
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Theme.radiusSm
+                            color: Qt.rgba(Theme.panelBackground.r, Theme.panelBackground.g,
+                                           Theme.panelBackground.b, 0.92)
+                            border.width: Theme.borderWidth
+                            border.color: Theme.primary
+                        }
+
+                        // The boundary itself, so which gap the lane is going into
+                        // is unambiguous.
+                        Rectangle {
+                            width: parent.width
+                            height: 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: Theme.primary
+                        }
+
+                        // Where in time the clip would land, inside the lane it would
+                        // land on — the outline on an existing row is suppressed while
+                        // this is up.
+                        Rectangle {
+                            x: root.dropStartSeconds * root.pxPerSecond
+                            width: root.dropDurationSeconds * root.pxPerSecond
+                            height: parent.height
+                            radius: Theme.radiusSm
+                            color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.18)
+                            border.width: 2
+                            border.color: Theme.primary
+                        }
+
+                        // Pinned to the viewport: the lane spans the whole timeline,
+                        // and a label at its centre is usually off screen.
+                        Text {
+                            x: flick.contentX + Theme.spacingLg
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: qsTr("New track")
+                            color: Theme.primary
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.fontSizeXs
+                            font.weight: Font.Medium
+                        }
                     }
 
                     Rectangle {

@@ -352,6 +352,10 @@ QtObject {
     // Full drag chrome: handle pill + title row.
     readonly property real androidSheetHeaderHeight: 56
     readonly property real androidSheetDismissFraction: 0.38
+    // Hold before an asset card lifts out of the sheet for a drag. Shorter than the
+    // 800ms platform long-press: the tap it competes with only opens a menu, and a
+    // gesture that has to be held for most of a second reads as an unresponsive app.
+    readonly property int touchLiftInterval: 320
     // The rail's five slots divide its width, so destinations have no fixed width.
     // The Add button is the one that does: a docked-FAB-sized target in the centre.
     readonly property real androidRailFabSize: 48
