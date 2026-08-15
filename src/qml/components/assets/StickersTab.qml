@@ -9,6 +9,10 @@ import "."
 Item {
     id: root
 
+    // A clip landed on the timeline. The phone shell closes the sheet on this —
+    // the thing you came for is behind it.
+    signal added()
+
     readonly property string favoritesId: "__favorites__"
     property var categories: EditorState.builtinStickerCategories()
     property var allStickers: EditorState.builtinStickers()
@@ -193,7 +197,10 @@ Item {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: EditorState.addStickerClip(modelData.id, -1)
+                                    onClicked: {
+                                        EditorState.addStickerClip(modelData.id, -1)
+                                        root.added()
+                                    }
                                 }
 
                                 AssetFavoriteButton {

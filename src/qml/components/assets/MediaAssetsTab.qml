@@ -91,10 +91,30 @@ Item {
         hint: qsTr("Try a different name.")
     }
 
+    // Tapping a card opens its menu on touch; the timeline is reached by holding
+    // it. Without this the gesture is invisible and the tab reads as broken.
+    Text {
+        id: touchHint
+        anchors.top: search.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Theme.pagePadding
+        anchors.rightMargin: Theme.pagePadding
+        anchors.topMargin: visible ? Theme.spacingSm : 0
+        visible: Theme.touchUi && AssetLibrary.count > 0
+        height: visible ? implicitHeight : 0
+        wrapMode: Text.WordWrap
+        horizontalAlignment: Text.AlignHCenter
+        text: qsTr("Touch and hold a clip, then drag it onto the timeline.")
+        color: Theme.mutedForeground
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.fontSizeXs
+    }
+
     Flickable {
         id: flick
         visible: AssetLibrary.count > 0 && root.matchCount > 0
-        anchors.top: search.bottom
+        anchors.top: touchHint.bottom
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
@@ -117,6 +137,7 @@ Item {
             Repeater {
                 model: AssetLibrary
                 delegate: Column {
+                    id: mediaCard
                     width: visible ? Theme.assetCardWidth : 0
                     spacing: 4
                     visible: root.assetMatches(name, kind)
@@ -289,7 +310,7 @@ Item {
                         TapHandler {
                             // Unguarded, the tap competes with the drag for the
                             // grab and fires an add on release after a drag.
-                            enabled: !assetDrag.active
+                            enabled: !Theme.touchUi && !assetDrag.active
                             onTapped: root.addRequested(assetIndex)
                         }
                         DragHandler {
@@ -297,6 +318,9 @@ Item {
                             // Without target: null the handler moves the card itself,
                             // clobbering the Grid positioner's x/y.
                             target: null
+                            // Touch lifts through TouchDrag below instead: a platform
+                            // drag has no touch gesture and cannot leave the sheet.
+                            enabled: !Theme.touchUi
                             acceptedButtons: Qt.LeftButton
                             onActiveChanged: {
                                 if (active) {
@@ -314,12 +338,20 @@ Item {
                             onTapped: cardMenu.popup()
                         }
 
-                        // Rename, replace, export and remove were right-click only, which
-                        // is no route at all on a phone. Long-press is the touch equivalent.
-                        TapHandler {
-                            acceptedButtons: Qt.LeftButton
-                            enabled: Theme.touchUi
-                            onLongPressed: cardMenu.popup()
+                        // Touch: hold to lift the card out of the sheet and onto the
+                        // timeline, tap for the menu that right-click gives desktop.
+                        // Tapping used to add at the playhead, which put clips on a
+                        // track and a time nobody chose.
+                        TouchLiftArea {
+                            enabled: Theme.touchUi && !gridBusy.busy
+                            dragKind: "media"
+                            payload: mediaCard.assetIndex
+                            label: mediaCard.name
+                            thumbnail: mediaCard.thumbnailPath
+                            glyph: mediaCard.kind === "audio" ? Theme.icons.music
+                                 : mediaCard.kind === "image" ? Theme.icons.image
+                                 : Theme.icons.film
+                            onLiftTapped: cardMenu.popup()
                         }
 
                         ThemedContextMenu {
@@ -494,27 +526,30 @@ Item {
                         hoverEnabled: true
                         // Adding to the timeline mid-swap would bind a clip to media that is
                         // about to change under it; the right-click menu goes with it.
-                        enabled: !replaceBusy
+                        // Touch goes through TouchLiftArea below instead.
+                        enabled: !replaceBusy && !Theme.touchUi
                         cursorShape: Qt.PointingHandCursor
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        pressAndHoldInterval: 450
-                        // Long-press stands in for the right click the phone does not have.
-                        property bool heldMenu: false
-                        onPressed: heldMenu = false
-                        onPressAndHold: (mouse) => {
-                            if (!Theme.touchUi || mouse.button !== Qt.LeftButton)
-                                return
-                            heldMenu = true
-                            rowMenu.popup()
-                        }
                         onClicked: (mouse) => {
-                            if (heldMenu)
-                                return
                             if (mouse.button === Qt.RightButton)
                                 rowMenu.popup()
                             else
                                 root.addRequested(assetIndex)
                         }
+                    }
+
+                    // Touch takes the row the same way as a grid card: hold to lift
+                    // it onto the timeline, tap for the menu.
+                    TouchLiftArea {
+                        enabled: Theme.touchUi && !listRow.replaceBusy
+                        dragKind: "media"
+                        payload: listRow.assetIndex
+                        label: listRow.name
+                        thumbnail: listRow.thumbnailPath
+                        glyph: listRow.kind === "audio" ? Theme.icons.music
+                             : listRow.kind === "image" ? Theme.icons.image
+                             : Theme.icons.film
+                        onLiftTapped: rowMenu.popup()
                     }
 
                     ThemedContextMenu {

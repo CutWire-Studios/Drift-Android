@@ -12,6 +12,11 @@ PanelFrame {
     // When true (Android bottom sheet), hide the side tab rail — the phone
     // bottom rail already picks the active library tab.
     property bool sheetMode: false
+
+    // One of the click-to-add tabs (text, subtitles, stickers, shapes) put a clip
+    // on the timeline. The phone shell closes the sheet on this; desktop, where
+    // the panel is docked, simply leaves it unconnected.
+    signal addCompleted()
     border.width: sheetMode ? 0 : 1
     radius: sheetMode ? 0 : Theme.radiusSm
     color: sheetMode ? "transparent" : Theme.panelBackground
@@ -553,6 +558,7 @@ PanelFrame {
                 x: Math.max(-Theme.tabRailWidth, assetsContent.width - width - 8)
                 y: Theme.panelHeaderHeight + 4
                 onAddonManagerRequested: root.Window.window.openAddonManager("stickers")
+                onAdded: root.addCompleted()
             }
 
             TextAssetsTab {
@@ -560,6 +566,7 @@ PanelFrame {
                 width: parent.width
                 opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
+                onAdded: root.addCompleted()
             }
 
             SubtitlesTab {
@@ -567,6 +574,7 @@ PanelFrame {
                 width: parent.width
                 opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
+                onAdded: root.addCompleted()
             }
 
             SoundsTab {
@@ -581,6 +589,7 @@ PanelFrame {
                 width: parent.width
                 opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
+                onAdded: root.addCompleted()
             }
 
             ShapesTab {
@@ -588,6 +597,7 @@ PanelFrame {
                 width: parent.width
                 opacity: root.tabOpacity
                 height: parent.height - Theme.panelHeaderHeight
+                onAdded: root.addCompleted()
             }
 
             SettingsTab {
@@ -676,7 +686,9 @@ PanelFrame {
                         horizontalAlignment: Text.AlignHCenter
                         maximumLineCount: 3
                         elide: Text.ElideRight
-                        text: qsTr("Drag onto where two clips overlap. They fade into each other by default.")
+                        text: Theme.touchUi
+                              ? qsTr("Touch and hold a transition, then drag it onto where two clips meet.")
+                              : qsTr("Drag onto where two clips overlap. They fade into each other by default.")
                         color: Theme.mutedForeground
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.fontSizeXs
@@ -843,24 +855,20 @@ PanelFrame {
                                     DragHandler {
                                         id: transitionDrag
                                         target: null
+                                        // Touch lifts through TouchDrag instead: a platform
+                                        // drag has no touch gesture and cannot leave the sheet.
+                                        enabled: !Theme.touchUi
                                         acceptedButtons: Qt.LeftButton
                                     }
 
-                                    // Touch has no way to run the drag above: the browser is a
-                                    // modal sheet over the timeline, so there is nothing to drop
-                                    // onto. Tap applies to the selected clip's own boundary
-                                    // instead — addTransition finds the partner clip itself.
-                                    TapHandler {
-                                        enabled: Theme.touchUi
-                                        onTapped: {
-                                            if (EditorState.selectedTrack < 0 || EditorState.selectedClip < 0) {
-                                                Toasts.info(qsTr("Select a clip first, then tap a transition."))
-                                                return
-                                            }
-                                            EditorState.addTransition(EditorState.selectedTrack,
-                                                                      EditorState.selectedClip,
-                                                                      transitionCard.modelData.kind, 0.5)
-                                        }
+                                    // Hold to carry the transition onto the join between two
+                                    // clips. This used to be a tap that applied to whatever was
+                                    // selected, which gave no say over which boundary it landed on.
+                                    TouchLiftArea {
+                                        dragKind: "transition"
+                                        payload: transitionCard.modelData.kind
+                                        label: transitionCard.modelData.label
+                                        glyph: Theme.icons.chevronsRight
                                     }
 
                                     AssetFavoriteButton {

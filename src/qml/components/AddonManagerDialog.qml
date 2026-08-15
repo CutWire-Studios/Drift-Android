@@ -133,32 +133,45 @@ ThemedDialog {
     contentItem: Item {
         implicitHeight: 460
 
-        Row {
+        // Eight chips are far wider than a phone-sized dialog, so the row scrolls inside the
+        // dialog instead of running out past its right edge. Same pattern as AssetCategoryChips.
+        Flickable {
             id: filters
-            spacing: 6
             anchors.top: parent.top
             anchors.left: parent.left
+            anchors.right: parent.right
+            height: filterRow.height
+            contentWidth: filterRow.width
+            flickableDirection: Flickable.HorizontalFlick
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentWidth > width
 
-            Repeater {
-                model: [
-                    { id: "all", label: qsTr("All"), kinds: [] },
-                    { id: "effects", label: qsTr("Effects"), kinds: ["effects"] },
-                    { id: "transitions", label: qsTr("Transitions"), kinds: ["transitions"] },
-                    { id: "audio-effects", label: qsTr("Audio FX"), kinds: ["audio-effects"] },
-                    { id: "fonts", label: qsTr("Fonts"), kinds: ["fonts"] },
-                    { id: "stickers", label: qsTr("Stickers"), kinds: ["stickers"] },
-                    { id: "whisper-model", label: qsTr("AI tools"),
-                      kinds: ["whisper-model", "denoise-model", "sam2-model", "face-model"] },
-                    { id: "onnxruntime", label: qsTr("AI engine"),
-                      kinds: ["onnxruntime", "onnxruntime-ep"] }
-                ]
+            Row {
+                id: filterRow
+                spacing: 6
 
-                ThemedChip {
-                    text: modelData.label
-                    selected: root.kindFilter === modelData.id
-                    onClicked: {
-                        root.kindFilter = modelData.id
-                        root.kindFilterKinds = modelData.kinds
+                Repeater {
+                    model: [
+                        { id: "all", label: qsTr("All"), kinds: [] },
+                        { id: "effects", label: qsTr("Effects"), kinds: ["effects"] },
+                        { id: "transitions", label: qsTr("Transitions"), kinds: ["transitions"] },
+                        { id: "audio-effects", label: qsTr("Audio FX"), kinds: ["audio-effects"] },
+                        { id: "fonts", label: qsTr("Fonts"), kinds: ["fonts"] },
+                        { id: "stickers", label: qsTr("Stickers"), kinds: ["stickers"] },
+                        { id: "whisper-model", label: qsTr("AI tools"),
+                          kinds: ["whisper-model", "denoise-model", "sam2-model", "face-model"] },
+                        { id: "onnxruntime", label: qsTr("AI engine"),
+                          kinds: ["onnxruntime", "onnxruntime-ep"] }
+                    ]
+
+                    ThemedChip {
+                        text: modelData.label
+                        selected: root.kindFilter === modelData.id
+                        onClicked: {
+                            root.kindFilter = modelData.id
+                            root.kindFilterKinds = modelData.kinds
+                        }
                     }
                 }
             }

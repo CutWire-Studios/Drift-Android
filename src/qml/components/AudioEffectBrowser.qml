@@ -77,9 +77,11 @@ Column {
             bottomPadding: 4
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
-            text: EditorState.selectedClip >= 0
-                  ? qsTr("Drag a preset onto a clip, or click to apply to the selection")
-                  : qsTr("Drag a preset onto a clip in the timeline")
+            text: Theme.touchUi
+                  ? qsTr("Touch and hold a preset, then drag it onto a clip")
+                  : (EditorState.selectedClip >= 0
+                     ? qsTr("Drag a preset onto a clip, or click to apply to the selection")
+                     : qsTr("Drag a preset onto a clip in the timeline"))
             color: Theme.mutedForeground
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontSizeXs
@@ -213,14 +215,27 @@ Column {
                             }
 
                             TapHandler {
-                                enabled: !presetDrag.active
+                                enabled: !Theme.touchUi && !presetDrag.active
                                 onTapped: root.applyPreset(presetCard.modelData.id)
                             }
 
                             DragHandler {
                                 id: presetDrag
                                 target: null
+                                // Touch lifts through TouchDrag instead: a platform
+                                // drag has no touch gesture and cannot leave the sheet.
+                                enabled: !Theme.touchUi
                                 acceptedButtons: Qt.LeftButton
+                            }
+
+                            // Hold to carry the preset onto a clip. The + badge is
+                            // still the route for the already-selected clip.
+                            TouchLiftArea {
+                                dragKind: "audioEffect"
+                                payload: presetCard.modelData.id
+                                label: presetCard.modelData.label
+                                thumbnail: presetCard.thumb
+                                glyph: presetCard.iconGlyph
                             }
 
                             AssetFavoriteButton {

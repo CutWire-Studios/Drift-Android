@@ -8,6 +8,10 @@ import ".."
 Item {
     id: root
 
+    // A clip landed on the timeline. The phone shell closes the sheet on this —
+    // the thing you came for is behind it.
+    signal added()
+
     readonly property var presets: EditorState.textPresets()
 
     Flickable {
@@ -67,7 +71,10 @@ Item {
                             TapHandler {
                                 id: packPress
                                 gesturePolicy: TapHandler.ReleaseWithinBounds
-                                onTapped: EditorState.addTextClip("", -1, packCard.modelData.id)
+                                onTapped: {
+                                    EditorState.addTextClip("", -1, packCard.modelData.id)
+                                    root.added()
+                                }
                             }
                         }
 

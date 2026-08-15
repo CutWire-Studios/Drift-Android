@@ -78,9 +78,11 @@ Column {
             bottomPadding: 4
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
-            text: EditorState.selectedClip >= 0
-                  ? qsTr("Click a template to apply music-synced effects to the selection")
-                  : qsTr("Select a clip, then click a template to apply")
+            text: Theme.touchUi
+                  ? qsTr("Touch and hold a template, then drag it onto a clip")
+                  : (EditorState.selectedClip >= 0
+                     ? qsTr("Click a template to apply music-synced effects to the selection")
+                     : qsTr("Select a clip, then click a template to apply"))
             color: Theme.mutedForeground
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontSizeXs
@@ -283,7 +285,19 @@ Column {
                     }
 
                     TapHandler {
+                        enabled: !Theme.touchUi
                         onTapped: root.applyTemplate(templateCard.modelData.id)
+                    }
+
+                    // Hold to carry the template onto a clip. The + badge is still
+                    // the route for the already-selected clip.
+                    TouchLiftArea {
+                        dragKind: "template"
+                        payload: templateCard.modelData.id
+                        label: templateCard.modelData.label
+                        thumbnail: templateCard.effectThumbs.length > 0
+                                   ? templateCard.effectThumbs[0] : ""
+                        glyph: Theme.icons.layers
                     }
 
                     Rectangle {

@@ -8,6 +8,11 @@ import ".."
 Item {
     id: root
 
+    // A clip landed on the timeline. The phone shell closes the sheet on this —
+    // the thing you came for is behind it. Auto-caption deliberately does not
+    // emit it: its progress and cancel button live in this sheet.
+    signal added()
+
     Flickable {
         anchors.fill: parent
         contentWidth: width
@@ -37,7 +42,10 @@ Item {
                 text: qsTr("Add subtitle clip")
                 variant: "primary"
                 glyph: Theme.icons.captions
-                onClicked: EditorState.addSubtitleClip(-1)
+                onClicked: {
+                    EditorState.addSubtitleClip(-1)
+                    root.added()
+                }
             }
 
             ThemedButton {
@@ -49,8 +57,10 @@ Item {
                     const url = FileDialogs.openFile(
                         qsTr("Import Subtitles"),
                         [qsTr("SubRip subtitles (*.srt)"), qsTr("All files (*)")])
-                    if (url != "")
+                    if (url != "") {
                         EditorState.importSubtitleFile(url, -1)
+                        root.added()
+                    }
                 }
             }
 

@@ -9,6 +9,9 @@ Popup {
     id: root
 
     signal addonManagerRequested()
+    // A clip landed on the timeline. The phone shell closes the sheet this picker
+    // hangs off on this.
+    signal added()
 
     // Rebuilt on install rather than at load: the catalog is empty until the sticker pack, which
     // carries the emoji font, is there.
@@ -200,6 +203,7 @@ Popup {
                     onTapped: {
                         EditorState.addEmojiClip(cell.modelData.emoji, cell.modelData.name, -1)
                         root.close()
+                        root.added()
                     }
                 }
             }

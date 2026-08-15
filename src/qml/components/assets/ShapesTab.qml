@@ -9,6 +9,10 @@ import "."
 Item {
     id: root
 
+    // A clip landed on the timeline. The phone shell closes the sheet on this —
+    // the thing you came for is behind it.
+    signal added()
+
     readonly property string favoritesId: "__favorites__"
     readonly property var categories: EditorState.builtinShapeCategories()
     readonly property var allShapes: EditorState.builtinShapes()
@@ -158,11 +162,18 @@ Item {
                             }
 
                             TapHandler {
-                                onTapped: EditorState.addShapeClip(shapeCard.modelData.id, -1)
+                                onTapped: {
+                                    EditorState.addShapeClip(shapeCard.modelData.id, -1)
+                                    root.added()
+                                }
                             }
                             DragHandler {
                                 id: shapeDrag
                                 target: null
+                                // Touch adds at the playhead and closes the sheet; a
+                                // platform drag has no gesture there and only competes
+                                // with the tap for the grab.
+                                enabled: !Theme.touchUi
                                 acceptedButtons: Qt.LeftButton
                             }
 
