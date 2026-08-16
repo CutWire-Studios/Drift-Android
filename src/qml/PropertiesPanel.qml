@@ -240,97 +240,142 @@ PanelFrame {
         anchors.fill: parent
         visible: root.hasSelection
 
-        // === tab rail + tab content, similar UX to AssetsPanel =========================
-        Row {
-            id: tabsRow
-            anchors.fill: parent
-            spacing: 0
+        // === Phone: a labelled tab strip across the top ===============================
+        // The desktop rail below is a column of thirteen unlabelled icons. Inside a
+        // bottom sheet it has to scroll on its own axis, stands a second scrollbar
+        // next to the content's, and spends a fifth of an already narrow sheet
+        // saying nothing that can be read at a glance.
+        Item {
+            id: tabStripHost
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            visible: root.sheetMode
+            // Icon over label: the label alone identifies a tab, but the icon is
+            // what the eye finds again after the first time.
+            readonly property real tabChipHeight: 58
+            height: visible ? tabChipHeight + Theme.spacingLg * 2 : 0
 
-            // Up/Down move between tabs once the rail has focus.
-            // Flickable so short panel heights can still reach lower icons.
+            // Keeps the selected tab on screen when it is picked from off the end,
+            // and when the visible set changes with the clip kind.
+            function ensureTabVisible() {
+                const item = tabStripRepeater.itemAt(root.activeTab)
+                if (!item || !item.visible)
+                    return
+                const left = tabStripRow.x + item.x
+                const right = left + item.width
+                const maxX = Math.max(0, tabStrip.contentWidth - tabStrip.width)
+                if (left - Theme.pagePadding < tabStrip.contentX)
+                    tabStrip.contentX = Math.max(0, left - Theme.pagePadding)
+                else if (right + Theme.pagePadding > tabStrip.contentX + tabStrip.width)
+                    tabStrip.contentX = Math.min(maxX, right + Theme.pagePadding - tabStrip.width)
+            }
+
+            Connections {
+                target: root
+                // callLater: a tab change can also change which tabs exist, and the
+                // Row has not repositioned yet when the signal arrives.
+                function onActiveTabChanged() { Qt.callLater(tabStripHost.ensureTabVisible) }
+                function onClipKindChanged() { Qt.callLater(tabStripHost.ensureTabVisible) }
+            }
+
             Flickable {
-                id: propertiesTabRail
-                width: Theme.tabRailWidth
-                height: parent.height
-                contentWidth: width
-                contentHeight: propertiesTabRailColumn.height
-                clip: true
+                id: tabStrip
+                anchors.fill: parent
+                contentWidth: tabStripRow.width + Theme.pagePadding * 2
+                contentHeight: height
+                flickableDirection: Flickable.HorizontalFlick
                 boundsBehavior: Flickable.StopAtBounds
-                interactive: contentHeight > height
-                ScrollBar.vertical: AppScrollBar {
-                    policy: propertiesTabRail.contentHeight > propertiesTabRail.height
-                            ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
-                }
+                clip: true
 
-                Accessible.role: Accessible.PageTabList
-
-                Keys.onUpPressed: function(event) {
-                    let next = root.activeTab
-                    for (let step = 0; step < tabsModel.count; ++step) {
-                        next = (next - 1 + tabsModel.count) % tabsModel.count
-                        if (root.tabVisible(tabsModel.get(next).tabId)) {
-                            root.activeTab = next
-                            break
-                        }
-                    }
-                    event.accepted = true
-                }
-                Keys.onDownPressed: function(event) {
-                    let next = root.activeTab
-                    for (let step = 0; step < tabsModel.count; ++step) {
-                        next = (next + 1) % tabsModel.count
-                        if (root.tabVisible(tabsModel.get(next).tabId)) {
-                            root.activeTab = next
-                            break
-                        }
-                    }
-                    event.accepted = true
-                }
-
-                Column {
-                    id: propertiesTabRailColumn
-                    width: parent.width
-                    topPadding: Theme.spacingSm
-                    spacing: Theme.spacingXs
+                Row {
+                    id: tabStripRow
+                    x: Theme.pagePadding
+                    height: tabStrip.height
+                    spacing: Theme.spacingSm
 
                     Repeater {
+                        id: tabStripRepeater
                         model: tabsModel
-                        delegate: Column {
+                        // Not a ThemedChip: that one's contentItem is a single Text,
+                        // and stacking a glyph over the label needs two rows.
+                        delegate: AbstractButton {
+                            id: tabChip
                             required property int index
                             required property var model
 
-                            width: parent.width
-                            spacing: 0
-                            // Collapse so hidden contextual tabs leave no rail gap.
-                            visible: root.tabVisible(model.tabId)
-                            height: visible ? implicitHeight : 0
+                            readonly property bool current: root.activeTab === tabChip.index
 
-                            IconButton {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                glyph: root.tabIcons[model.icon]
-                                variant: "ghost"
-                                tooltip: model.label
-                                active: root.activeTab === index
-                                onClicked: root.activeTab = index
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: root.tabVisible(tabChip.model.tabId)
+                            height: tabStripHost.tabChipHeight
+                            implicitWidth: Math.max(Theme.controlHeight + Theme.spacing2xl,
+                                                    tabChipLabel.implicitWidth + Theme.spacingXl * 2)
+                            hoverEnabled: true
+                            focusPolicy: Qt.StrongFocus
 
-                                Accessible.role: Accessible.PageTab
-                                Accessible.name: model.label
-                                Accessible.checked: root.activeTab === index
+                            Accessible.role: Accessible.PageTab
+                            Accessible.name: tabChip.model.label
+                            Accessible.checked: tabChip.current
+
+                            scale: tabChip.down ? Theme.pressScale : 1.0
+
+                            Behavior on scale {
+                                NumberAnimation { duration: Theme.durationPress; easing.type: Theme.easing }
                             }
 
-                            Item {
-                                visible: root.showSeparatorAfter(index)
-                                width: parent.width
-                                height: visible ? Theme.spacingLg + Theme.borderWidth : 0
+                            onClicked: root.activeTab = tabChip.index
+
+                            background: Rectangle {
+                                radius: Theme.radiusMd
+                                color: tabChip.current
+                                       ? Theme.primary
+                                       : (tabChip.down ? Theme.panelMuted : Theme.panelAccent)
+                                border.width: Theme.borderWidth
+                                border.color: tabChip.current ? Theme.primary : Theme.panelBorder
+
+                                Behavior on color {
+                                    ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                                }
+                                Behavior on border.color {
+                                    ColorAnimation { duration: Theme.durationFast; easing.type: Theme.easing }
+                                }
 
                                 Rectangle {
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: Theme.iconSizeSm
-                                    height: Theme.borderWidth
-                                    radius: height / 2
-                                    color: Theme.panelBorder
-                                    opacity: 0.85
+                                    anchors.fill: parent
+                                    radius: parent.radius
+                                    color: "transparent"
+                                    border.width: Theme.borderWidthFocus
+                                    border.color: Theme.focusRing
+                                    visible: tabChip.visualFocus
+                                }
+                            }
+
+                            // Wrapped in an Item so the two rows sit centred in the
+                            // pill; a bare Column would stack them against its top.
+                            contentItem: Item {
+                                Column {
+                                    anchors.centerIn: parent
+                                    spacing: Theme.spacingSm
+
+                                    IconGlyph {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        glyph: root.tabIcons[tabChip.model.icon]
+                                        iconSize: Theme.iconSizeLg
+                                        iconColor: tabChip.current ? Theme.primaryForeground
+                                                                   : Theme.panelForeground
+                                    }
+
+                                    Text {
+                                        id: tabChipLabel
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: tabChip.model.label
+                                        color: tabChip.current ? Theme.primaryForeground
+                                                               : Theme.panelForeground
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontSizeXs
+                                        font.weight: tabChip.current ? Font.Medium : Font.Normal
+                                    }
                                 }
                             }
                         }
@@ -339,140 +384,256 @@ PanelFrame {
             }
 
             Rectangle {
-                width: Theme.borderWidth
-                height: parent.height
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: Theme.borderWidth
                 color: Theme.panelBorder
             }
+        }
 
-            Flickable {
-                id: tabFlick
-                width: parent.width - Theme.tabRailWidth - Theme.borderWidth
-                height: parent.height
-                visible: root.currentTabId !== "subtitles"
-                contentWidth: width
-                // Include topPadding so the last controls stay reachable (SettingsTab pattern).
-                contentHeight: tabColumn.height + Theme.spacing3xl
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                interactive: contentHeight > height
-                ScrollBar.vertical: AppScrollBar {
-                    policy: tabFlick.contentHeight > tabFlick.height
-                            ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
-                }
+        // === Desktop: vertical icon rail + tab content ================================
+        // Up/Down move between tabs once the rail has focus.
+        // Flickable so short panel heights can still reach lower icons.
+        Flickable {
+            id: propertiesTabRail
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            width: root.sheetMode ? 0 : Theme.tabRailWidth
+            visible: !root.sheetMode
+            contentWidth: width
+            contentHeight: propertiesTabRailColumn.height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+            ScrollBar.vertical: AppScrollBar {
+                policy: propertiesTabRail.contentHeight > propertiesTabRail.height
+                        ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
+            }
 
-                // Tall tabs (Audio/Effects) leave contentY deep; reset when switching.
-                Connections {
-                    target: root
-                    function onActiveTabChanged() {
-                        tabFlick.contentY = 0
-                        tabColumn.opacity = 0
-                        tabFadeIn.restart()
+            Accessible.role: Accessible.PageTabList
+
+            Keys.onUpPressed: function(event) {
+                let next = root.activeTab
+                for (let step = 0; step < tabsModel.count; ++step) {
+                    next = (next - 1 + tabsModel.count) % tabsModel.count
+                    if (root.tabVisible(tabsModel.get(next).tabId)) {
+                        root.activeTab = next
+                        break
                     }
                 }
-
-                // Fade the new tab in rather than hard-cutting to it. Fade-in only,
-                // not a crossfade: the inspectors share a Column, which excludes
-                // invisible items from layout, so overlapping two of them would
-                // double-count height and jump the panel mid-transition.
-                NumberAnimation {
-                    id: tabFadeIn
-                    target: tabColumn
-                    property: "opacity"
-                    from: 0.0
-                    to: 1.0
-                    duration: Theme.durationBase
-                    easing.type: Theme.easing
+                event.accepted = true
+            }
+            Keys.onDownPressed: function(event) {
+                let next = root.activeTab
+                for (let step = 0; step < tabsModel.count; ++step) {
+                    next = (next + 1) % tabsModel.count
+                    if (root.tabVisible(tabsModel.get(next).tabId)) {
+                        root.activeTab = next
+                        break
+                    }
                 }
+                event.accepted = true
+            }
 
-                Column {
-                    id: tabColumn
-                    x: Theme.pagePadding
-                    width: parent.width - Theme.pagePadding * 2
-                    spacing: Theme.spacingXl
-                    topPadding: Theme.pagePadding
+            Column {
+                id: propertiesTabRailColumn
+                width: parent.width
+                topPadding: Theme.spacingSm
+                spacing: Theme.spacingXs
 
-                    Text {
-                        text: tabsModel.get(root.activeTab).label
-                        color: Theme.mutedForeground
-                        font.family: Theme.fontFamily
-                        font.pixelSize: Theme.fontSizeXs
-                        font.weight: Font.Medium
-                    }
+                Repeater {
+                    model: tabsModel
+                    delegate: Column {
+                        required property int index
+                        required property var model
 
-                    GeneralInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "general"
-                    }
+                        width: parent.width
+                        spacing: 0
+                        // Collapse so hidden contextual tabs leave no rail gap.
+                        visible: root.tabVisible(model.tabId)
+                        height: visible ? implicitHeight : 0
 
-                    TextInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "text"
-                    }
+                        IconButton {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            glyph: root.tabIcons[model.icon]
+                            variant: "ghost"
+                            tooltip: model.label
+                            active: root.activeTab === index
+                            onClicked: root.activeTab = index
 
-                    TransformInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "transform"
-                    }
+                            Accessible.role: Accessible.PageTab
+                            Accessible.name: model.label
+                            Accessible.checked: root.activeTab === index
+                        }
 
-                    AnimationInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "animation"
-                    }
+                        Item {
+                            visible: root.showSeparatorAfter(index)
+                            width: parent.width
+                            height: visible ? Theme.spacingLg + Theme.borderWidth : 0
 
-                    AudioInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "audio"
-                    }
-
-                    SpeedFadeInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "speed"
-                    }
-
-                    TransitionInspector {
-                        id: transitionInspector
-                        width: tabColumn.width
-                        visible: root.currentTabId === "transition"
-                    }
-
-                    BlendingInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "blending"
-                    }
-
-                    ShapeInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "shape"
-                    }
-
-                    MasksInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "masks"
-                    }
-
-                    EffectsInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "effects"
-                        onBrowseEffectsRequested: root.browseEffectsRequested()
-                    }
-
-                    AudioEffectsInspector {
-                        width: tabColumn.width
-                        visible: root.currentTabId === "audioEffects"
-                        onBrowseAudioEffectsRequested: root.browseAudioEffectsRequested()
+                            Rectangle {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: Theme.iconSizeSm
+                                height: Theme.borderWidth
+                                radius: height / 2
+                                color: Theme.panelBorder
+                                opacity: 0.85
+                            }
+                        }
                     }
                 }
             }
+        }
 
-            // Full-height editor with its own internal cue list scrolling, so it
-            // sits beside the tab Flickable rather than inside it.
-            SubtitleEditor {
-                width: parent.width - Theme.tabRailWidth - Theme.borderWidth
-                height: Math.max(0, parent.height)
-                visible: root.currentTabId === "subtitles"
-                clip: root.hasSelection ? root.clipData : null
-                formatSeconds: root.formatSeconds
+        Rectangle {
+            id: railDivider
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.left: propertiesTabRail.right
+            width: root.sheetMode ? 0 : Theme.borderWidth
+            visible: !root.sheetMode
+            color: Theme.panelBorder
+        }
+
+        Flickable {
+            id: tabFlick
+            anchors.top: tabStripHost.bottom
+            anchors.left: railDivider.right
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            visible: root.currentTabId !== "subtitles"
+            contentWidth: width
+            // Include topPadding so the last controls stay reachable (SettingsTab pattern).
+            contentHeight: tabColumn.height + Theme.spacing3xl
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            interactive: contentHeight > height
+            ScrollBar.vertical: AppScrollBar {
+                policy: tabFlick.contentHeight > tabFlick.height
+                        ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
             }
+
+            // Tall tabs (Audio/Effects) leave contentY deep; reset when switching.
+            Connections {
+                target: root
+                function onActiveTabChanged() {
+                    tabFlick.contentY = 0
+                    tabColumn.opacity = 0
+                    tabFadeIn.restart()
+                }
+            }
+
+            // Fade the new tab in rather than hard-cutting to it. Fade-in only,
+            // not a crossfade: the inspectors share a Column, which excludes
+            // invisible items from layout, so overlapping two of them would
+            // double-count height and jump the panel mid-transition.
+            NumberAnimation {
+                id: tabFadeIn
+                target: tabColumn
+                property: "opacity"
+                from: 0.0
+                to: 1.0
+                duration: Theme.durationBase
+                easing.type: Theme.easing
+            }
+
+            Column {
+                id: tabColumn
+                x: Theme.pagePadding
+                width: parent.width - Theme.pagePadding * 2
+                // Sections need to read apart on a phone, where the whole pane is
+                // about two of them tall.
+                spacing: root.sheetMode ? Theme.spacing2xl : Theme.spacingXl
+                topPadding: root.sheetMode ? Theme.spacing2xl : Theme.pagePadding
+
+                Text {
+                    // The strip above already names the tab, in a size you can read.
+                    visible: !root.sheetMode
+                    text: tabsModel.get(root.activeTab).label
+                    color: Theme.mutedForeground
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSizeXs
+                    font.weight: Font.Medium
+                }
+
+                GeneralInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "general"
+                }
+
+                TextInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "text"
+                }
+
+                TransformInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "transform"
+                }
+
+                AnimationInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "animation"
+                }
+
+                AudioInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "audio"
+                }
+
+                SpeedFadeInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "speed"
+                }
+
+                TransitionInspector {
+                    id: transitionInspector
+                    width: tabColumn.width
+                    visible: root.currentTabId === "transition"
+                }
+
+                BlendingInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "blending"
+                }
+
+                ShapeInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "shape"
+                }
+
+                MasksInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "masks"
+                }
+
+                EffectsInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "effects"
+                    onBrowseEffectsRequested: root.browseEffectsRequested()
+                }
+
+                AudioEffectsInspector {
+                    width: tabColumn.width
+                    visible: root.currentTabId === "audioEffects"
+                    onBrowseAudioEffectsRequested: root.browseAudioEffectsRequested()
+                }
+            }
+        }
+
+        // Full-height editor with its own internal cue list scrolling, so it
+        // sits beside the tab Flickable rather than inside it.
+        SubtitleEditor {
+            anchors.top: tabStripHost.bottom
+            anchors.left: railDivider.right
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            visible: root.currentTabId === "subtitles"
+            clip: root.hasSelection ? root.clipData : null
+            formatSeconds: root.formatSeconds
         }
     }
 }

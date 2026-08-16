@@ -378,6 +378,7 @@ Item {
     AndroidBottomSheet {
         id: propertiesSheet
         title: qsTr("Edit")
+        sheetHeightFraction: Theme.androidEditSheetHeightFraction
         onClosed: {
             if (sheetKind === "properties") {
                 sheetKind = ""

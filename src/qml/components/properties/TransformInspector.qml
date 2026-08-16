@@ -57,16 +57,22 @@ Item {
 
         Column {
             width: root.width
-            spacing: 10
+            // Ten pixels between a slider and the next section heading is a desktop
+            // measure; on a phone the two run together.
+            spacing: Theme.touchUi ? Theme.spacingXl : 10
             visible: root.clipKind !== "audio"
 
             Text {
                 width: parent.width
                 wrapMode: Text.WordWrap
-                text: qsTr("Move to a time, set a value, then click the diamond to add a keyframe. With Auto keyframes on, dragging a slider or the preview also creates them.")
+                // Three lines of instructions is a fifth of the sheet. The short form
+                // says the one thing that is not discoverable from the controls.
+                text: Theme.touchUi
+                      ? qsTr("Tap a property's diamond button to keyframe it at the playhead.")
+                      : qsTr("Move to a time, set a value, then click the diamond to add a keyframe. With Auto keyframes on, dragging a slider or the preview also creates them.")
                 color: Theme.mutedForeground
                 font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontSizeXs
+                font.pixelSize: Theme.touchUi ? Theme.fontSizeSm : Theme.fontSizeXs
             }
 
             ThemedChip {

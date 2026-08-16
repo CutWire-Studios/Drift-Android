@@ -35,7 +35,14 @@ Column {
     }
     readonly property color graphColor: Theme.keyframeCurveColor(propDef.key)
 
-    spacing: 4
+    // The desktop row packs the label and three 18px easing chips onto one 12px-tall
+    // line. At a fingertip's resolution those chips are neither hittable nor legible
+    // — they rendered as "S…", "Ease", "Ju…" — so on touch they drop out of the
+    // header and reappear full size below the slider, and only for a property that
+    // actually has a key at the playhead to ease.
+    readonly property bool touch: Theme.touchUi
+
+    spacing: touch ? Theme.spacingMd : 4
 
     // Bumped whenever external state that affects the displayed value changes.
     // TextField/Slider bindings are fragile once the user interacts; this forces
@@ -170,8 +177,8 @@ Column {
                 id: labelZone
                 anchors.verticalCenter: parent.verticalCenter
                 height: labelText.implicitHeight
-                width: Math.max(24, parent.width - diamond.width - linChip.width - easeChip.width
-                                      - holdChip.width - parent.spacing * 4)
+                width: Math.max(24, parent.width - diamond.width - easingChips.width
+                                      - parent.spacing * 2)
 
                 Text {
                     id: labelText
@@ -179,7 +186,7 @@ Column {
                     color: root.animated && root.keyframesEnabled ? Theme.panelForeground
                                                                   : Theme.mutedForeground
                     font.family: Theme.fontFamily
-                    font.pixelSize: Theme.fontSizeXs
+                    font.pixelSize: root.touch ? Theme.fontSizeSm : Theme.fontSizeXs
                     font.weight: root.animated && root.keyframesEnabled ? Font.Medium : Font.Normal
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
@@ -188,43 +195,45 @@ Column {
                 }
             }
 
-            ThemedChip {
-                id: linChip
-                text: qsTr("Straight")
-                tooltip: qsTr("Straight — changes at a steady rate between keyframes")
-                selected: root.interpolationMode === "linear"
-                enabled: root.activeKey !== null
-                chipHeight: 18
-                horizontalPadding: Theme.spacingSm
-                width: 28
+            Row {
+                id: easingChips
+                visible: !root.touch
+                width: visible ? implicitWidth : 0
+                spacing: 6
                 anchors.verticalCenter: parent.verticalCenter
-                onClicked: root.setInterpolation("linear")
-            }
 
-            ThemedChip {
-                id: easeChip
-                text: qsTr("Ease")
-                tooltip: qsTr("Ease — accelerates out and decelerates in")
-                selected: root.interpolationMode === "ease"
-                enabled: root.activeKey !== null
-                chipHeight: 18
-                horizontalPadding: Theme.spacingSm
-                width: 36
-                anchors.verticalCenter: parent.verticalCenter
-                onClicked: root.setInterpolation("ease")
-            }
+                ThemedChip {
+                    text: qsTr("Straight")
+                    tooltip: qsTr("Straight — changes at a steady rate between keyframes")
+                    selected: root.interpolationMode === "linear"
+                    enabled: root.activeKey !== null
+                    chipHeight: 18
+                    horizontalPadding: Theme.spacingSm
+                    width: 28
+                    onClicked: root.setInterpolation("linear")
+                }
 
-            ThemedChip {
-                id: holdChip
-                text: qsTr("Jump")
-                tooltip: qsTr("Jump — holds the value until the next keyframe")
-                selected: root.interpolationMode === "hold"
-                enabled: root.activeKey !== null
-                chipHeight: 18
-                horizontalPadding: Theme.spacingSm
-                width: 34
-                anchors.verticalCenter: parent.verticalCenter
-                onClicked: root.setInterpolation("hold")
+                ThemedChip {
+                    text: qsTr("Ease")
+                    tooltip: qsTr("Ease — accelerates out and decelerates in")
+                    selected: root.interpolationMode === "ease"
+                    enabled: root.activeKey !== null
+                    chipHeight: 18
+                    horizontalPadding: Theme.spacingSm
+                    width: 36
+                    onClicked: root.setInterpolation("ease")
+                }
+
+                ThemedChip {
+                    text: qsTr("Jump")
+                    tooltip: qsTr("Jump — holds the value until the next keyframe")
+                    selected: root.interpolationMode === "hold"
+                    enabled: root.activeKey !== null
+                    chipHeight: 18
+                    horizontalPadding: Theme.spacingSm
+                    width: 34
+                    onClicked: root.setInterpolation("hold")
+                }
             }
         }
     }
@@ -240,8 +249,8 @@ Column {
         IconButton {
             id: keyButton
             anchors.verticalCenter: parent.verticalCenter
-            buttonSize: 24
-            iconSize: 16
+            buttonSize: root.touch ? Theme.iconButtonSize : 24
+            iconSize: root.touch ? Theme.iconSizeLg : 16
             glyph: root.activeKey ? Theme.icons.diamondMinus : Theme.icons.diamondPlus
             tooltip: root.activeKey
                      ? qsTr("Remove %1's keyframe at the playhead").arg(root.propDef.label)
@@ -516,6 +525,40 @@ Column {
                     }
                 }
             }
+        }
+    }
+
+    // Touch easing row. Only up when the playhead is actually sitting on one of
+    // this property's keys — on desktop these three chips are always on the header
+    // line and merely greyed, which on a phone would be three dead targets per
+    // property in a pane that shows about three properties at a time.
+    Row {
+        id: touchEasingRow
+        visible: root.touch && root.activeKey !== null
+        width: root.width
+        spacing: Theme.spacingSm
+        leftPadding: keyButton.width + valueRow.spacing
+
+        readonly property real chipWidth: Math.max(
+            0, (root.width - leftPadding - spacing * 2) / 3)
+
+        ThemedChip {
+            text: qsTr("Straight")
+            width: touchEasingRow.chipWidth
+            selected: root.interpolationMode === "linear"
+            onClicked: root.setInterpolation("linear")
+        }
+        ThemedChip {
+            text: qsTr("Ease")
+            width: touchEasingRow.chipWidth
+            selected: root.interpolationMode === "ease"
+            onClicked: root.setInterpolation("ease")
+        }
+        ThemedChip {
+            text: qsTr("Jump")
+            width: touchEasingRow.chipWidth
+            selected: root.interpolationMode === "hold"
+            onClicked: root.setInterpolation("hold")
         }
     }
 }

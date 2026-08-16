@@ -348,6 +348,10 @@ QtObject {
     readonly property real androidEditActionsHeight: 56
     readonly property real androidSplitterHeight: 32
     readonly property real androidSheetHeightFraction: 0.55
+    // The Edit sheet carries a tab strip the browsers do not, and its content is
+    // rows of label-plus-slider rather than a scrollable grid — at 55% it opened on
+    // barely two properties.
+    readonly property real androidEditSheetHeightFraction: 0.64
     readonly property real androidSheetExpandedFraction: 0.92
     // Full drag chrome: handle pill + title row.
     readonly property real androidSheetHeaderHeight: 56
