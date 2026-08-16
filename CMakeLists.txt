@@ -91,7 +91,10 @@ if(ANDROID)
         "${DRIFT_PREBUILT}/lib/libswresample.a"
         "${DRIFT_PREBUILT}/lib/libavutil.a"
         "${DRIFT_PREBUILT}/lib/libx264.a"
-        m z)
+        # mediandk resolves the AMediaCodec_*/AMediaFormat_* the --enable-mediacodec decoders call.
+        # A prebuilt made before that flag went in links without it, which is why this was not
+        # needed until third_party/prebuilt was rebuilt from scratch.
+        m z mediandk)
 
     add_library(drift_zstd INTERFACE IMPORTED)
     target_include_directories(drift_zstd INTERFACE "${DRIFT_PREBUILT}/include")
