@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ninja-build nasm patchelf pkg-config ccache \
+            ninja-build nasm pkg-config ccache \
             libgl1 libegl1 libxkbcommon0 libfontconfig1
 
       - name: Install Android NDK ${{ env.NDK_VERSION }} and SDK platform 36
@@ -83,6 +83,12 @@ jobs:
             -m qtmultimedia qtshadertools -O "$HOME/Qt"
           aqt install-qt all_os android "$QT_VERSION" "${{ matrix.qt_arch }}" \
             -m qtmultimedia qtshadertools -O "$HOME/Qt"
+          # Qt builds each Android kit on whichever host it happens to use — the ARMv7 one comes
+          # from a Windows machine, and that 7z carries no POSIX permission bits, so every script
+          # in the kit extracts non-executable and scripts/build.sh finds no runnable qt-cmake.
+          # (The arm64 kit is built on macOS and keeps its +x, which is why only ARMv7 failed.)
+          KIT="$HOME/Qt/$QT_VERSION/${{ matrix.qt_arch }}"
+          find "$KIT/bin" "$KIT/libexec" -maxdepth 1 -type f ! -name '*.bat' -exec chmod +x {} +
 
       # FFmpeg, x264, zstd, OpenSSL and SoundTouch cross-built for Android: ~45 min,
       # and they only change when the script that pins their tags does.

@@ -132,27 +132,62 @@ cmake --build "$SRC/zstd/build-$ABI" --target install
 
 # --- OpenSSL -----------------------------------------------------------------
 # Static libcrypto.a: Ed25519 verification of .driftpkg signatures (AddonPackage.cpp).
-# Shared libcrypto_3.so / libssl_3.so: Qt Network's qopensslbackend dlopens these at runtime.
-# Android rejects versioned sonames (libssl.so.3), so we ship the unversioned _3 names Qt expects
-# (same layout as KDAB/android_openssl). Requires patchelf to rewrite SONAME after the build.
+# Shared libcrypto_3.so / libssl_3.so: Qt Network's qopensslbackend dlopens these at runtime. It
+# builds the file name as "lib" + crypto/ssl + ANDROID_OPENSSL_SUFFIX, which defaults to _3, and
+# Android rejects versioned sonames (libssl.so.3) — so _3 has to be the library's real name, not a
+# copy of one named something else.
+#
+# OpenSSL is therefore told to build them that way, with the two hunks KDAB's android_openssl
+# carries as ssl_3.patch: shlib_variant puts the _3 suffix in the file names and in the SONAME the
+# linker records, and mkdef.pl keeps the symbol version nodes named OPENSSL_3.0.0 instead of
+# inheriting the variant into them. Renaming a finished .so with patchelf is what this replaced,
+# and it produced a library whose runtime string table disagreed with its section headers; the
+# Android linker rejected it at launch with
+#   dlopen failed: cannot find "io" from verneed[0] in DT_NEEDED list for libcrypto_3.so
+# while readelf still showed the file as well-formed.
 clone https://github.com/openssl/openssl.git "$OPENSSL_TAG" openssl
 ( cd "$SRC/openssl" && make clean >/dev/null 2>&1 || true
+  # Idempotent: the clone is reused across runs, so reset before patching.
+  git checkout -- Configurations/15-android.conf util/mkdef.pl
+  patch -p0 <<'OPENSSL_SO_VARIANT_PATCH'
+--- Configurations/15-android.conf
++++ Configurations/15-android.conf
+@@ -192,6 +192,7 @@
+         bin_lflags       => "-pie",
+         enable           => [ ],
+         shared_extension => ".so",
++        shlib_variant => "_3",
+     },
+     "android-arm" => {
+         ################################################################
+--- util/mkdef.pl
++++ util/mkdef.pl
+@@ -258,14 +258,14 @@
+             print <<"_____";
+ }${prevversion_s};
+ _____
+-            $prevversion_s = " OPENSSL${SO_VARIANT}_$thisversion";
++            $prevversion_s = " OPENSSL_$thisversion";
+             $thisversion = '';  # Trigger start of next section
+         }
+         unless ($thisversion) {
+             $indent = 0;
+             $thisversion = $_->version();
+             $currversion_s = '';
+-            $currversion_s = "OPENSSL${SO_VARIANT}_$thisversion "
++            $currversion_s = "OPENSSL_$thisversion "
+                 if $thisversion ne '*';
+             print <<"_____";
+ ${currversion_s}{
+OPENSSL_SO_VARIANT_PATCH
   ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" ./Configure "$OSSL_TARGET" \
       -D__ANDROID_API__="$API" --prefix="$OUT" --openssldir="$OUT/ssl" \
       shared no-tests no-apps no-engine
+  make depend
   make -j"$JOBS" SHLIB_VERSION_NUMBER= build_libs
   cp libcrypto.a "$OUT/lib/"
-  cp -r include/openssl "$OUT/include/"
-  if command -v patchelf >/dev/null 2>&1; then
-    cp libcrypto.so "$OUT/lib/libcrypto_3.so"
-    cp libssl.so "$OUT/lib/libssl_3.so"
-    patchelf --set-soname libcrypto_3.so "$OUT/lib/libcrypto_3.so"
-    patchelf --set-soname libssl_3.so "$OUT/lib/libssl_3.so"
-    patchelf --replace-needed libcrypto.so libcrypto_3.so "$OUT/lib/libssl_3.so"
-  else
-    echo "warning: patchelf not found — leaving existing libcrypto_3.so/libssl_3.so in place" >&2
-    echo "         (install patchelf, or copy ssl_3/$ABI/*.so from KDAB/android_openssl)" >&2
-  fi )
+  cp libcrypto_3.so libssl_3.so "$OUT/lib/"
+  cp -r include/openssl "$OUT/include/" )
 
 # --- SoundTouch --------------------------------------------------------------
 # Pitch shifting behind the voice effects. Sources include <soundtouch/SoundTouch.h>, so the
