@@ -39,6 +39,13 @@ esac
 # The kit ships its own matching host Qt, which beats guessing at a distro layout.
 : "${QT_HOST_PATH:=$HOME/Qt/$QT_VERSION/gcc_64}"
 
+# Package identity. The defaults are the release app; CI overrides them so its APKs install
+# alongside a release build rather than being refused for a signature mismatch. See the
+# DRIFT_ANDROID_* block in the root CMakeLists.
+: "${DRIFT_ANDROID_PACKAGE_NAME:=org.cutwire.drift}"
+: "${DRIFT_ANDROID_APP_NAME:=Drift}"
+: "${DRIFT_ANDROID_VERSION_CODE:=1}"
+
 [ -d "$ANDROID_NDK_ROOT" ] || { echo "no NDK at $ANDROID_NDK_ROOT" >&2; exit 1; }
 export ANDROID_NDK_ROOT ANDROID_SDK_ROOT
 
@@ -73,7 +80,10 @@ fi
     -DANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
     -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
     -DQT_ANDROID_ABIS="$ABI" \
-    -DDRIFT_BUNDLE_ONNXRUNTIME=OFF
+    -DDRIFT_BUNDLE_ONNXRUNTIME=OFF \
+    -DDRIFT_ANDROID_PACKAGE_NAME="$DRIFT_ANDROID_PACKAGE_NAME" \
+    -DDRIFT_ANDROID_APP_NAME="$DRIFT_ANDROID_APP_NAME" \
+    -DDRIFT_ANDROID_VERSION_CODE="$DRIFT_ANDROID_VERSION_CODE"
 
 cmake --build "$BUILD" --parallel
 cmake --build "$BUILD" --target apk

@@ -748,15 +748,30 @@ if(ANDROID)
             "ssl_3/${ANDROID_ABI}/*.so files from https://github.com/KDAB/android_openssl.")
     endif()
 
+    # Overridable so a CI build installs *beside* a release install instead of colliding with it:
+    # Android keys an installed app on its application id, and refuses to replace one whose
+    # signature differs. Only the application id moves — the Java package stays org.cutwire.drift,
+    # which is what the manifest's fully qualified service name and the JNI class strings in
+    # Exporter.cpp / PlaybackEngine.cpp resolve against. The FileProvider authority is written as
+    # ${applicationId}.qtprovider, so it follows the id and the two installs do not clash there
+    # either. Defaults are what a release ships; .github/workflows/android.yml overrides all three.
+    set(DRIFT_ANDROID_PACKAGE_NAME "org.cutwire.drift" CACHE STRING
+        "Android application id")
+    set(DRIFT_ANDROID_APP_NAME "Drift" CACHE STRING
+        "Launcher label")
+    # The platform only treats a build as an upgrade over another if this number grew.
+    set(DRIFT_ANDROID_VERSION_CODE "1" CACHE STRING
+        "Android versionCode")
+
     set_target_properties(drift PROPERTIES
         QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_SOURCE_DIR}/android"
-        QT_ANDROID_PACKAGE_NAME "org.cutwire.drift"
-        QT_ANDROID_APP_NAME "Drift"
+        QT_ANDROID_PACKAGE_NAME "${DRIFT_ANDROID_PACKAGE_NAME}"
+        QT_ANDROID_APP_NAME "${DRIFT_ANDROID_APP_NAME}"
         QT_ANDROID_APP_ICON "@mipmap/ic_launcher"
         QT_ANDROID_MIN_SDK_VERSION 28
         QT_ANDROID_TARGET_SDK_VERSION 36
         QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
-        QT_ANDROID_VERSION_CODE 1
+        QT_ANDROID_VERSION_CODE "${DRIFT_ANDROID_VERSION_CODE}"
         QT_ANDROID_EXTRA_LIBS "${_drift_android_ssl_crypto};${_drift_android_ssl_ssl}"
     )
 endif()

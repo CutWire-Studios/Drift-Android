@@ -1,0 +1,168 @@
+name: Android
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_VERSION: 6.11.1
+  ABI: arm64-v8a
+  # The version every module manifest in the Qt kit names — see scripts/build.sh.
+  NDK_VERSION: 27.2.12479018
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Qt kit, the NDK, a JUCE clone, the FFmpeg/OpenSSL source trees and an
+      # unstripped ~280 MB libdrift.so do not fit alongside the image's preinstalled
+      # toolchains on a 14 GB runner.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/node_modules \
+                      /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/powershell
+          sudo rm -rf "$ANDROID_SDK_ROOT"/ndk
+          df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The `env` context does not carry the runner image's own variables, so the SDK
+      # and NDK paths are published into it once here for every step below.
+      - name: Resolve SDK and NDK paths
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build nasm patchelf pkg-config ccache \
+            libgl1 libegl1 libxkbcommon0 libfontconfig1
+
+      - name: Install Android NDK ${{ env.NDK_VERSION }} and SDK platform 36
+        run: |
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          "$SDKMANAGER" --install "ndk;$NDK_VERSION" "platforms;android-36" "build-tools;36.0.0"
+
+      # aqt rather than an action: since Qt 6.8 the Android kits are published under the
+      # `all_os` host, which the wrapper actions address inconsistently.
+      - name: Install Qt ${{ env.QT_VERSION }} (host + Android)
+        run: |
+          pipx install aqtinstall
+          export PATH="$HOME/.local/bin:$PATH"
+          aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 \
+            -m qtmultimedia qtshadertools -O "$HOME/Qt"
+          aqt install-qt all_os android "$QT_VERSION" "android_${ABI//-/_}" \
+            -m qtmultimedia qtshadertools -O "$HOME/Qt"
+
+      # FFmpeg, x264, zstd, OpenSSL and SoundTouch cross-built for Android: ~45 min,
+      # and they only change when the script that pins their tags does.
+      - name: Restore prebuilt native dependencies
+        id: deps-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/prebuilt
+          key: android-deps-${{ env.ABI }}-${{ env.NDK_VERSION }}-${{ hashFiles('third_party/build-android.sh') }}
+
+      - name: Build native dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: ./third_party/build-android.sh "$ABI"
+
+      # Saved before the app build so a compile failure does not throw away 45 minutes
+      # of dependency work.
+      - name: Save prebuilt native dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/prebuilt
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+
+      - name: Drop native dependency sources
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: rm -rf third_party/src
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        id: ccache
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ env.ABI }}-${{ github.sha }}
+          restore-keys: ccache-${{ env.ABI }}-
+
+      - name: Build release APK
+        env:
+          # A separate application id so a CI APK installs beside a release install instead of
+          # being refused over its signature, and a version code that grows with every run so
+          # one CI build can replace another.
+          DRIFT_ANDROID_PACKAGE_NAME: org.cutwire.drift.ci
+          DRIFT_ANDROID_APP_NAME: Drift CI
+          DRIFT_ANDROID_VERSION_CODE: ${{ github.run_number }}
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          export QT_ANDROID_ROOT="$HOME/Qt/$QT_VERSION/android_${ABI//-/_}"
+          export QT_HOST_PATH="$HOME/Qt/$QT_VERSION/gcc_64"
+          ./scripts/build.sh "$ABI" Release
+          ccache -s
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ env.ABI }}-${{ github.sha }}
+
+      # androiddeployqt hands back an unsigned release APK; it will not install until it
+      # carries a signature.
+      - name: Sign release APK
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          BUILD="build/android-$ABI"
+          # Prefer gradle's own output directory over the unaligned copies under intermediates/.
+          UNSIGNED="$(find "$BUILD/android-build/build/outputs/apk/release" -name '*.apk' -print -quit 2>/dev/null || true)"
+          [ -n "$UNSIGNED" ] || UNSIGNED="$(find "$BUILD/android-build" -name '*release*.apk' -print -quit)"
+          [ -n "$UNSIGNED" ] || { echo "no release APK under $BUILD/android-build" >&2; exit 1; }
+          echo "packaged: $UNSIGNED"
+
+          BT="$(ls -d "$ANDROID_SDK_ROOT"/build-tools/* | sort -V | tail -1)"
+          KS="$RUNNER_TEMP/release.jks"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$KS"
+
+          OUT="$RUNNER_TEMP/drift-$ABI-release.apk"
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$KS" --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEYSTORE_PASSWORD \
+            --ks-key-alias "$KEY_ALIAS" \
+            --out "$OUT" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --print-certs "$OUT"
+          echo "APK=$OUT" >> "$GITHUB_ENV"
+
+      - name: Shred keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drift-${{ env.ABI }}-release-${{ github.sha }}
+          path: ${{ env.APK }}
+          retention-days: 30
+          if-no-files-found: error
