@@ -2,7 +2,7 @@
   <img src="Drift_icon.png" alt="Drift icon" width="128" height="128">
 </p>
 
-<h1 align="center">Drift</h1>
+<h1 align="center">Drift Android</h1>
 
 <p align="center">
   <strong>Create polished videos fast — free, open, and yours.</strong>
@@ -25,9 +25,24 @@ This tree is the Android port of [desktop Drift](https://github.com/CutWire-Stud
 
 ## Download
 
-Release APKs are **coming soon**. Until then, [build from source](#build) and install with the deploy script below.
+Stable release APKs are **coming soon**.
 
-Track progress on [GitHub](https://github.com/CutWire-Studios/Drift-Android). For the desktop builds (Linux, Windows, macOS), see [CutWire-Studios/Drift](https://github.com/CutWire-Studios/Drift).
+<details>
+<summary>Pre-release CI builds (developers &amp; testers only)</summary>
+
+Unstable APKs from the [Android workflow](https://github.com/CutWire-Studios/Drift-Android/actions/workflows/android.yml) — for contributors and testers, not general use. Expect rough edges.
+
+1. Open the [Android workflow](https://github.com/CutWire-Studios/Drift-Android/actions/workflows/android.yml) on GitHub Actions.
+2. Pick a successful run on `main` (or your branch) where the **release** job finished (all ABIs built and signed).
+3. Download the **signed** artifact — names look like `drift-arm64-v8a-release-<sha>` (use `arm64-v8a` on most phones).
+4. **Do not** download artifacts named `unsigned-*`. Those will not install on a device.
+5. Install the APK (you may need to allow installs from unknown sources).
+
+You can also [build from source](#build) and install with the deploy script below.
+
+</details>
+
+For the desktop builds (Linux, Windows, macOS), see [CutWire-Studios/Drift](https://github.com/CutWire-Studios/Drift).
 
 ## Screenshots
 
