@@ -3,7 +3,7 @@
 # on first run, and the native prebuilt dependencies if they are not there yet.
 #
 #   scripts/build.sh [abi] [build-type]
-#     abi         arm64-v8a (default) or x86_64
+#     abi         arm64-v8a (default), armeabi-v7a or x86_64
 #     build-type  RelWithDebInfo (default), Debug, Release
 #
 # Environment:
@@ -24,9 +24,11 @@ BUILD="$ROOT/build/android-$ABI"
 
 QT_VERSION="6.11.1"
 case "$ABI" in
-  arm64-v8a) QT_ABI_DIR="android_arm64_v8a" ;;
-  x86_64)    QT_ABI_DIR="android_x86_64" ;;
-  *) echo "unsupported ABI: $ABI (expected arm64-v8a or x86_64)" >&2; exit 1 ;;
+  arm64-v8a)   QT_ABI_DIR="android_arm64_v8a" ;;
+  # Qt names the 32-bit ARM kit after the architecture, not after the Android ABI.
+  armeabi-v7a) QT_ABI_DIR="android_armv7" ;;
+  x86_64)      QT_ABI_DIR="android_x86_64" ;;
+  *) echo "unsupported ABI: $ABI (expected arm64-v8a, armeabi-v7a or x86_64)" >&2; exit 1 ;;
 esac
 
 : "${QT_ANDROID_ROOT:=$HOME/Qt/$QT_VERSION/$QT_ABI_DIR}"

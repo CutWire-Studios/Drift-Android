@@ -1,7 +1,7 @@
 # CutWire Drift (Android)
 
 Mobile video editor built with Qt 6 Quick. This tree targets Android
-(`arm64-v8a` / `x86_64`).
+(`arm64-v8a` / `armeabi-v7a` / `x86_64`).
 
 ## Requirements
 
@@ -35,6 +35,7 @@ export ANDROID_NDK_ROOT=~/Android/Sdk/ndk/27.2.12479018
 
 ./scripts/build.sh              # arm64-v8a, RelWithDebInfo
 ./scripts/build.sh arm64-v8a Release
+./scripts/build.sh armeabi-v7a
 ./scripts/build.sh x86_64
 ```
 

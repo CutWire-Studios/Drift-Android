@@ -12,7 +12,7 @@
 # for signing, plus libcrypto_3.so/libssl_3.so listed in QT_ANDROID_EXTRA_LIBS for Qt Network TLS.
 #
 # Usage: third_party/build-android.sh [abi] [api]
-#   abi  arm64-v8a (default) or x86_64
+#   abi  arm64-v8a (default), armeabi-v7a or x86_64
 #   api  minimum API level, default 28 — must match minSdk in the root CMakeLists
 set -euo pipefail
 
@@ -34,11 +34,24 @@ SOUNDTOUCH_TAG="2.4.1"
 
 : "${ANDROID_NDK_ROOT:?set ANDROID_NDK_ROOT to the NDK version Qt for Android was built against}"
 
+# TRIPLE names the clang driver; CONFIG_TRIPLE is what autoconf-style configure scripts are told,
+# and on 32-bit ARM the two differ: the compiler is armv7a-linux-androideabi-clang, while x264's
+# configure wants the canonical arm-linux-androideabi to resolve its CPU and OS.
+#
+# ARM_CFLAGS is the armeabi-v7a instruction-set contract. The NDK clang driver leaves armv7a on
+# vfpv3-d16, but the NDK CMake toolchain the app itself is built with sets ANDROID_ARM_NEON on by
+# default — so without this, FFmpeg and x264 are compiled for a weaker CPU than the code calling
+# them, and every hand-written NEON path in libswscale/libswresample is compiled out.
+ARM_CFLAGS=""
 case "$ABI" in
-  arm64-v8a) FF_ARCH=aarch64; TRIPLE=aarch64-linux-android;  OSSL_TARGET=android-arm64 ;;
-  x86_64)    FF_ARCH=x86_64;  TRIPLE=x86_64-linux-android;   OSSL_TARGET=android-x86_64 ;;
-  *) echo "unsupported ABI: $ABI (expected arm64-v8a or x86_64)" >&2; exit 1 ;;
+  arm64-v8a)   FF_ARCH=aarch64; TRIPLE=aarch64-linux-android;    OSSL_TARGET=android-arm64 ;;
+  armeabi-v7a) FF_ARCH=arm;     TRIPLE=armv7a-linux-androideabi; OSSL_TARGET=android-arm
+               CONFIG_TRIPLE=arm-linux-androideabi
+               ARM_CFLAGS="-march=armv7-a -mfloat-abi=softfp -mfpu=neon" ;;
+  x86_64)      FF_ARCH=x86_64;  TRIPLE=x86_64-linux-android;     OSSL_TARGET=android-x86_64 ;;
+  *) echo "unsupported ABI: $ABI (expected arm64-v8a, armeabi-v7a or x86_64)" >&2; exit 1 ;;
 esac
+: "${CONFIG_TRIPLE:=$TRIPLE}"
 
 TC="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
 export CC="$TC/bin/${TRIPLE}${API}-clang"
@@ -65,8 +78,9 @@ echo "==> building for $ABI (API $API) into $OUT"
 # not strictly required — without it the codec list simply comes up short.
 clone https://code.videolan.org/videolan/x264.git "$X264_TAG" x264
 ( cd "$SRC/x264" && make distclean >/dev/null 2>&1 || true
-  ./configure --prefix="$OUT" --host="$TRIPLE" --enable-static --enable-pic \
-      --disable-cli --disable-opencl --sysroot="$TC/sysroot"
+  ./configure --prefix="$OUT" --host="$CONFIG_TRIPLE" --enable-static --enable-pic \
+      --disable-cli --disable-opencl --sysroot="$TC/sysroot" \
+      --extra-cflags="$ARM_CFLAGS"
   make -j"$JOBS" && make install )
 
 # --- FFmpeg ------------------------------------------------------------------
@@ -94,7 +108,7 @@ clone https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_TAG" ffmpeg
     --cc="$CC" --cxx="$CXX" --ar="$AR" --nm="$NM" --ranlib="$RANLIB" --strip="$STRIP" \
     --enable-static --disable-shared --enable-pic \
     --enable-gpl --enable-version3 --enable-libx264 \
-    --extra-cflags="-I$OUT/include -fvisibility=hidden" --extra-ldflags="-L$OUT/lib" \
+    --extra-cflags="-I$OUT/include -fvisibility=hidden $ARM_CFLAGS" --extra-ldflags="-L$OUT/lib" \
     --disable-programs --disable-doc --disable-avdevice \
     --disable-vaapi --disable-vdpau --disable-v4l2-m2m --disable-cuda-llvm \
     --disable-vulkan --disable-libdrm --disable-xlib \
