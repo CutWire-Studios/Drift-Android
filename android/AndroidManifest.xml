@@ -20,6 +20,14 @@
     <!-- The one injected permission worth keeping: QAudioSink (PlaybackEngine, ClipPreviewPlayer)
          is the app's only QtMultimedia user, and it is the output side of it. -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Timeline touch feedback. Haptics.java prefers View.performHapticFeedback, which needs no
+         permission at all; this covers the case that route cannot: the one-argument overload does
+         nothing and returns false when the system's touch-feedback setting is off, which several
+         OEM skins ship as the default, and since API 33 there is no flag that overrides it. Without
+         the fallback the feature is simply dead on those devices. Drift's own switch (Settings →
+         Feedback, off by one tap) is what gates the fallback — the C++ side never reaches the Java
+         at all when it is off. Normal permission: no runtime prompt, no install-time consent. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <!-- A video export runs for minutes in the app process; backgrounded, that process is frozen
          and then killed. ExportService holds it in the foreground for the length of the render,
          which costs the service permission plus its media-processing type (API 34+) and the

@@ -31,11 +31,11 @@ constexpr const char *kHapticsClass = "org/cutwire/drift/Haptics";
 
 bool deviceHasVibrator()
 {
-    QJniObject activity = QNativeInterface::QAndroidApplication::context();
-    if (!activity.isValid())
+    QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (!context.isValid())
         return false;
     const bool has = QJniObject::callStaticMethod<jboolean>(
-        kHapticsClass, "hasVibrator", "(Landroid/app/Activity;)Z", activity.object());
+        kHapticsClass, "hasVibrator", "(Landroid/content/Context;)Z", context.object());
     QJniEnvironment().checkAndClearExceptions();
     return has;
 }
@@ -57,7 +57,7 @@ bool Haptics::isSupported() const
 {
 #ifdef Q_OS_ANDROID
     // Queried once, on the first read: the answer cannot change for the life of the process, and
-    // the call reaches the activity, so it wants the QML engine to be up rather than the
+    // the call reaches the Android context, so it wants the QML engine to be up rather than the
     // constructor to be running.
     static const bool supported = deviceHasVibrator();
     return supported;
@@ -97,11 +97,12 @@ void Haptics::fire(Effect effect)
     // is called from Qt's GUI thread, which is not it. Posted, not blocked on: a tick that arrives
     // a frame late is still a tick, and a drag handler cannot afford to wait on another thread.
     QNativeInterface::QAndroidApplication::runOnAndroidMainThread([intent] {
-        QJniObject activity = QNativeInterface::QAndroidApplication::context();
-        if (!activity.isValid())
+        QJniObject context = QNativeInterface::QAndroidApplication::context();
+        if (!context.isValid())
             return;
         QJniObject::callStaticMethod<void>(kHapticsClass, "perform",
-                                           "(Landroid/app/Activity;I)V", activity.object(), intent);
+                                           "(Landroid/content/Context;I)V", context.object(),
+                                           intent);
         // Feedback is advisory. A device that refuses it still edits video.
         QJniEnvironment().checkAndClearExceptions();
     });

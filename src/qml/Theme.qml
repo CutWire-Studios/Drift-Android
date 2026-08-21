@@ -404,6 +404,10 @@ QtObject {
         linkTwo: "link-2",
         unlink: "unlink-2",
         foldHorizontal: "fold-horizontal",
+        // Row height, not time: the phone's tool strip zooms lanes vertically because pinch
+        // already owns the horizontal axis there.
+        foldVertical: "fold-vertical",
+        unfoldVertical: "unfold-vertical",
         zoomOut: "zoom-out",
         zoomIn: "zoom-in",
         zoomFit: "chevrons-left-right-ellipsis",

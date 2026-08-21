@@ -3,8 +3,8 @@ import Drift
 import "components"
 
 // CapCut-style tool strip above the timeline: mode tools and clip actions on the left,
-// zoom on the right. Everything here is one tap away because the phone has no toolbar,
-// no menu bar and no keyboard to reach any of it another way.
+// lane height and fit-to-view on the right. Everything here is one tap away because the
+// phone has no toolbar, no menu bar and no keyboard to reach any of it another way.
 Item {
     id: root
 
@@ -18,7 +18,7 @@ Item {
     readonly property string tool: panel ? panel.timelineTool : ""
 
     // The window is edge-to-edge and this strip runs the full width, so in landscape
-    // the system nav bar sat straight on top of the right-pinned zoom/fit buttons —
+    // the system nav bar sat straight on top of the right-pinned lane/fit buttons —
     // and fit is the one zoom a pinch cannot stand in for.
     readonly property real leftInset: SafeArea.margins.left
     readonly property real rightInset: SafeArea.margins.right
@@ -62,7 +62,7 @@ Item {
 
     Flickable {
         anchors.left: parent.left
-        anchors.right: zoomRow.left
+        anchors.right: viewRow.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.leftMargin: root.leftInset
@@ -228,29 +228,36 @@ Item {
     }
 
     Row {
-        id: zoomRow
+        id: viewRow
         anchors.right: parent.right
         anchors.rightMargin: Theme.spacingSm + root.rightInset
         anchors.verticalCenter: parent.verticalCenter
         spacing: Theme.spacingLg
 
+        // Vertical, not horizontal. These were a second way to do what the timeline's
+        // own pinch already does better — two fingers set the time scale continuously
+        // and land where you meant, where a button steps blind and re-centres on the
+        // playhead. Nothing reached the other axis at all: lane heights were behind a
+        // long-press on a track header, one lane at a time. So the pair moves the axis
+        // the gesture cannot, and pinch keeps the one it owns.
         ActionButton {
-            glyph: Theme.icons.zoomOut
-            tooltip: qsTr("Zoom out")
-            enabled: !!root.panel
-            onClicked: if (root.panel) root.panel.setZoom(root.panel.zoom / 1.5)
+            glyph: Theme.icons.foldVertical
+            tooltip: qsTr("Shorter layers")
+            enabled: EditorState.canShrinkTrackHeights
+            onClicked: EditorState.nudgeAllTrackHeightScales(-1)
         }
 
         ActionButton {
-            glyph: Theme.icons.zoomIn
-            tooltip: qsTr("Zoom in")
-            enabled: !!root.panel
-            onClicked: if (root.panel) root.panel.setZoom(root.panel.zoom * 1.5)
+            glyph: Theme.icons.unfoldVertical
+            tooltip: qsTr("Taller layers")
+            enabled: EditorState.canGrowTrackHeights
+            onClicked: EditorState.nudgeAllTrackHeightScales(1)
         }
 
-        // Replaces the zoom readout: a percentage is not something to act on, and
-        // "show me the whole project" is the one zoom request a phone cannot satisfy
-        // by pinching — the range is too wide for a single gesture.
+        // The one zoom request a phone cannot satisfy by pinching — the range is too
+        // wide for a single gesture — which is why this stays horizontal while the two
+        // above do not. It also replaces the desktop's zoom readout: a percentage is
+        // not something to act on.
         ActionButton {
             glyph: Theme.icons.zoomFit
             tooltip: qsTr("Fit timeline in view")

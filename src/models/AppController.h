@@ -41,6 +41,12 @@ class AppController : public QObject
     Q_PROPERTY(ClipListModel *clipListModel READ clipListModel CONSTANT)
     Q_PROPERTY(PlaybackEngine *playback READ playback CONSTANT)
     Q_PROPERTY(QVariantList tracks READ tracks NOTIFY tracksChanged)
+    // Whether a lane-height sweep would still move anything, for the phone tool strip's two
+    // buttons. Properties rather than invokables so QML gets real bindings: an invokable would
+    // have to be given a dependency to re-evaluate on, and the only one available is `tracks`,
+    // which rebuilds a QVariantList of every clip in the project each time it is read.
+    Q_PROPERTY(bool canGrowTrackHeights READ canGrowTrackHeights NOTIFY tracksChanged)
+    Q_PROPERTY(bool canShrinkTrackHeights READ canShrinkTrackHeights NOTIFY tracksChanged)
     Q_PROPERTY(double playheadSeconds READ playheadSeconds WRITE setPlayheadSeconds NOTIFY playheadSecondsChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds NOTIFY tracksChanged)
     Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged)
@@ -591,6 +597,14 @@ public:
     Q_INVOKABLE void setTrackHeightScale(int trackIndex, double scale);
     Q_INVOKABLE double trackHeightScale(int trackIndex) const;
     Q_INVOKABLE void nudgeTrackHeightScale(int trackIndex, int steps);
+    // Every lane at once. Desktop resizes one lane by wheeling over its header, which is a
+    // per-lane gesture because the pointer is already on the lane; a phone has neither a wheel nor
+    // room in the tool strip for a control per lane, so its buttons move the whole stack. One
+    // tracksChanged for the sweep rather than one per track — each emission relays the entire
+    // track list into QML.
+    Q_INVOKABLE void nudgeAllTrackHeightScales(int steps);
+    bool canGrowTrackHeights() const;
+    bool canShrinkTrackHeights() const;
     Q_INVOKABLE double trackHeightScaleMin() const { return 0.6; }
     Q_INVOKABLE double trackHeightScaleMax() const { return 4.0; }
     Q_INVOKABLE void moveTrack(int fromIndex, int toIndex);

@@ -9154,6 +9154,51 @@ void AppController::nudgeTrackHeightScale(int trackIndex, int steps)
                         trackHeightScale(trackIndex) * std::pow(1.18, steps));
 }
 
+void AppController::nudgeAllTrackHeightScales(int steps)
+{
+    if (steps == 0)
+        return;
+
+    // Multiplicative, and per lane rather than one shared multiplier, so lanes that already differ
+    // keep their proportions and a lane sitting on a limit simply stops while the others carry on.
+    // A bigger step than the per-lane nudge: this is a button pressed a couple of times to reframe
+    // the whole timeline, not a wheel rolled under a pointer.
+    const qreal factor = std::pow(1.35, steps);
+    bool changed = false;
+    for (drift::Track &track : m_project.tracks()) {
+        const qreal clamped = qBound(trackHeightScaleMin(), track.heightScale * factor,
+                                     trackHeightScaleMax());
+        if (qFuzzyCompare(track.heightScale, clamped))
+            continue;
+        track.heightScale = clamped;
+        changed = true;
+    }
+
+    // View-only preference, like setTrackHeightScale: no undo entry.
+    if (changed)
+        emit tracksChanged();
+}
+
+bool AppController::canGrowTrackHeights() const
+{
+    // One lane still off the ceiling is enough: the sweep clamps per lane, so it does something
+    // even when the tallest lane is already there.
+    for (const drift::Track &track : m_project.tracks()) {
+        if (!qFuzzyCompare(track.heightScale, trackHeightScaleMax()))
+            return true;
+    }
+    return false;
+}
+
+bool AppController::canShrinkTrackHeights() const
+{
+    for (const drift::Track &track : m_project.tracks()) {
+        if (!qFuzzyCompare(track.heightScale, trackHeightScaleMin()))
+            return true;
+    }
+    return false;
+}
+
 void AppController::moveTrack(int fromIndex, int toIndex)
 {
     const int trackCount = m_project.tracks().size();

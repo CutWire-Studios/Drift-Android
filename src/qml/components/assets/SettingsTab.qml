@@ -356,8 +356,14 @@ Item {
                 visible: Haptics.supported
                 checked: Haptics.enabled
                 text: qsTr("Vibrate on snap and trim")
-                tooltip: qsTr("A short tick when a clip takes a snap, when a trim runs out of source, and when a slider passes its default. Your device's own vibration setting still applies on top of this.")
-                onToggled: Haptics.enabled = checked
+                tooltip: qsTr("A short tick when a clip is picked up, when it takes a snap, when a trim runs out of source, and when a slider passes its default. This switch is the whole control: Drift still ticks when the system's own touch-feedback setting is off.")
+                onToggled: {
+                    Haptics.enabled = checked
+                    // A switch over a feeling has to let you feel it. Also the only way to tell,
+                    // on a device whose system touch feedback is off, that this is working at all.
+                    if (checked)
+                        Haptics.confirm()
+                }
             }
 
             Text {
