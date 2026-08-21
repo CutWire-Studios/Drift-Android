@@ -327,6 +327,9 @@ Column {
                 anchors.verticalCenter: parent.verticalCenter
                 from: root.sliderFrom
                 to: root.sliderTo
+                // Every property descriptor already names the value it resets to, which is the one
+                // worth feeling on the way past: 100% opacity, 100% volume, 0 rotation.
+                detentValue: root.propDef.def
                 // Keep the playhead/model binding off while pressed — same as
                 // PreviewPanel scrub — so preview ticks cannot fight the drag.
                 Binding on value {

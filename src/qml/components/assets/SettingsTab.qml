@@ -341,6 +341,25 @@ Item {
                 onToggled: Addons.remindUpdates = checked
             }
 
+            // Hidden where there is no actuator to drive — desktop, and the tablets and emulators
+            // that ship without one. A switch over a motor that does not exist explains nothing.
+            Text {
+                text: qsTr("Feedback")
+                color: Theme.mutedForeground
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSizeXs
+                topPadding: Theme.spacingMd
+                visible: Haptics.supported
+            }
+
+            ThemedSwitch {
+                visible: Haptics.supported
+                checked: Haptics.enabled
+                text: qsTr("Vibrate on snap and trim")
+                tooltip: qsTr("A short tick when a clip takes a snap, when a trim runs out of source, and when a slider passes its default. Your device's own vibration setting still applies on top of this.")
+                onToggled: Haptics.enabled = checked
+            }
+
             Text {
                 text: qsTr("Startup")
                 color: Theme.mutedForeground

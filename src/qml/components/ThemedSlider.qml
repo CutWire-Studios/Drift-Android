@@ -18,6 +18,37 @@ Slider {
     // Callers should set it; the formatter is a fallback, not a substitute.
     property string label: ""
 
+    // A value worth feeling on the way past: the one the control resets to, and the one people aim
+    // for without being able to land on it precisely — 1.0x speed, 100% volume, 0 rotation. NaN,
+    // the default, means this slider has no such value and stays quiet between its ends.
+    property real detentValue: NaN
+
+    // Feedback is for the drag only. A value arriving from a preset chip, a reset button or the
+    // playhead is not a finger reaching anywhere, and the Behaviors above animate the handle across
+    // the range on those — which would tick on frames nobody touched.
+    // NaN, not `value`: initialising it from value would make this a binding on value, so by the
+    // time the handler ran "previous" would already have been updated to "current" and nothing
+    // could ever read as a crossing. NaN also stands in for "no previous value yet", which every
+    // comparison below is false against.
+    property real _lastValue: NaN
+    onValueChanged: {
+        const previous = _lastValue
+        _lastValue = value
+        if (!pressed || isNaN(previous))
+            return
+        const detent = detentValue
+        if (!isNaN(detent)
+                && ((previous - detent) * (value - detent) < 0
+                    || (value === detent && previous !== detent))) {
+            Haptics.detent()
+            return
+        }
+        // Reaching an end stops the handle while the finger keeps going — the same "it did not
+        // move" a trim runs into at the end of its source, so it gets the same answer.
+        if ((value === from && previous !== from) || (value === to && previous !== to))
+            Haptics.boundary()
+    }
+
     from: 0
     to: 1
     live: true

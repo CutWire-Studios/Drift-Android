@@ -320,7 +320,15 @@ Item {
     readonly property var tracks: EditorState.tracks
 
     property real snapGuideSeconds: -1
+    // The guide is where the panel already records that a drag is held by a snap target, and it
+    // carries which target — exactly the identity the latch needs. Every drag that snaps sets it:
+    // the library drop, and the clip move through showLandingPreview. One handler covers both.
+    onSnapGuideSecondsChanged: Haptics.snap(snapGuideSeconds)
+
     property int dropTrackIndex: -1
+    // A clip crossing into another track is a discrete choice changing under the finger, and at
+    // phone track heights the landing outline jumping one row is easy to miss.
+    onDropTrackIndexChanged: Haptics.lane(dropTrackIndex)
     property real dropStartSeconds: 0
     property real dropDurationSeconds: 0
     property bool dropCreatesNewTrack: false
@@ -394,6 +402,18 @@ Item {
     function clearLandingPreview() {
         clearLandingOutline()
         dropCreatesNewTrack = false
+    }
+
+    // Feedback for a seek that is being dragged rather than dropped. snapTime counts the playhead
+    // among its own targets, so a scrub within snapping distance of where it started snaps to
+    // itself; without the second test that reads as a snap and every scrub would tick once against
+    // its own starting position before it had passed anything.
+    function reportSeekSnap(rawSeconds, previousSeconds) {
+        const snapped = EditorState.snapTime(rawSeconds)
+        const took = Math.abs(snapped - rawSeconds) > 0.0005
+                     && Math.abs(snapped - previousSeconds) > 0.0005
+        Haptics.snap(took ? snapped : -1)
+        return snapped
     }
 
     function snapClipStart(desiredStart, duration) {
@@ -1031,8 +1051,13 @@ Item {
                     property real startZoom: 1
                     property real startContentX: 0
                     property real centroidViewportX: 0
+                    // Latched, not just rate limited: fingers held spread past the end of the range
+                    // keep delivering scale events, and a limiter alone would turn the end of the
+                    // zoom into a continuous buzz instead of the single bump it should be.
+                    property bool atZoomLimit: false
 
                     onActiveChanged: {
+                        atZoomLimit = false
                         if (active) {
                             startZoom = root.zoom
                             startContentX = flick.contentX
@@ -1058,8 +1083,14 @@ Item {
                         // accumulating across gestures, so the second pinch started from
                         // the first one's total and multiplied the zoom twice over.
                         const factor = activeScale
-                        const next = Math.max(root.minZoom,
-                                              Math.min(root.maxZoom, startZoom * factor))
+                        const wanted = startZoom * factor
+                        const next = Math.max(root.minZoom, Math.min(root.maxZoom, wanted))
+                        // The pinch continuing while the timeline has stopped scaling is the only
+                        // sign the range has run out; the content simply holds still.
+                        const limited = Math.abs(next - wanted) > 1e-4
+                        if (limited && !pinch.atZoomLimit)
+                            Haptics.boundary()
+                        pinch.atZoomLimit = limited
                         if (next === root.zoom)
                             return
                         const t = (startContentX + centroidViewportX)
@@ -1102,14 +1133,22 @@ Item {
                             z: 1
 
                             function scrubTo(x) {
+                                const raw = Math.max(0, x) / root.pxPerSecond
                                 EditorState.playheadSeconds =
-                                    EditorState.snapTime(Math.max(0, x) / root.pxPerSecond)
+                                    root.reportSeekSnap(raw, EditorState.playheadSeconds)
                             }
-                            onPressed: (mouse) => scrubTo(mouse.x)
+                            onPressed: (mouse) => {
+                                // A previous gesture that ended on a snap would otherwise leave the
+                                // latch engaged and swallow this one's first tick.
+                                Haptics.reset()
+                                scrubTo(mouse.x)
+                            }
                             onPositionChanged: (mouse) => {
                                 if (pressed)
                                     scrubTo(mouse.x)
                             }
+                            onReleased: Haptics.reset()
+                            onCanceled: Haptics.reset()
                         }
 
                         Item {
@@ -1633,13 +1672,20 @@ Item {
                         }
 
                         onXChanged: {
-                            if (playheadDragArea.drag.active || playheadLineDrag.drag.active)
-                                EditorState.playheadSeconds = playhead.x / root.pxPerSecond
+                            if (!playheadDragArea.drag.active && !playheadLineDrag.drag.active)
+                                return
+                            const raw = playhead.x / root.pxPerSecond
+                            // The drag deliberately does not snap the position — finishSeek does
+                            // that on release — but the targets it passes are still worth feeling,
+                            // and this is where the finger covers the edges it is passing over.
+                            root.reportSeekSnap(raw, EditorState.playheadSeconds)
+                            EditorState.playheadSeconds = raw
                         }
 
                         function finishSeek() {
                             EditorState.playheadSeconds =
                                 EditorState.snapTime(playhead.x / root.pxPerSecond)
+                            Haptics.reset()
                         }
 
                         Rectangle {
@@ -1808,6 +1854,9 @@ Item {
                                     EditorState.splitClipRightAt(trackIdx, clipIdx, atSeconds)
                                 else
                                     EditorState.splitClipAt(trackIdx, clipIdx, atSeconds)
+                                // One of the few taps here that changes the project rather than the
+                                // view, and on a phone the cut lands under the finger that made it.
+                                Haptics.confirm()
                             }
                         }
 

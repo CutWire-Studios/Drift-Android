@@ -121,6 +121,68 @@ Item {
                                              ? Theme.androidTrimHotspotExtra
                                              : 10
 
+    // --- Trim strips vs. scrolling the layers ---------------------------------------------
+    // On touch each trim strip is ~38dp wide and runs the full height of the clip, at both
+    // edges, and it holds the grab: MouseArea copies preventStealing into stealMouse once, in
+    // mousePressEvent, so nothing that starts on a strip can ever be handed back to the
+    // Flickable. It has to hold it, or the Flickable would steal a horizontal trim mid-drag.
+    //
+    // The cost is that those two bands cover the clip you are working on, which is exactly
+    // where a finger lands when it goes to scroll to another layer — and with the timeline
+    // pane only a couple of rows tall, scrolling is not a rare thing to want. So the strips
+    // arbitrate instead of refusing: the first movement past the drag threshold decides
+    // whether the gesture is a trim or a scroll, and a scroll drives the timeline for the rest
+    // of the gesture. Whichever it picks, it keeps for the whole press, so a trim cannot turn
+    // into a scroll halfway through a frame-accurate drag.
+    //
+    // Scene coordinates throughout. Scrolling moves this item under a finger that has not
+    // moved, so in local coordinates the pointer would appear to travel and feed the scroll
+    // back into itself.
+    property int edgeAxis: 0 // 0 undecided, 1 trimming, 2 scrolling
+    property real edgePressSceneX: 0
+    property real edgePressSceneY: 0
+    property real edgeLastSceneY: 0
+
+    function beginEdgeGesture(area, mouse) {
+        const p = area.mapToItem(null, mouse.x, mouse.y)
+        // Desktop has a pointer and a scroll wheel and never needed this; starting it already
+        // decided keeps every branch below dead there.
+        edgeAxis = touchMode ? 0 : 1
+        edgePressSceneX = p.x
+        edgePressSceneY = p.y
+        edgeLastSceneY = p.y
+    }
+
+    // True when this move belongs to the timeline rather than to the strip, in which case it
+    // has already been applied and the caller must not also trim.
+    function edgeGestureScrolled(area, mouse) {
+        if (edgeAxis === 1)
+            return false
+        const p = area.mapToItem(null, mouse.x, mouse.y)
+        if (edgeAxis === 0) {
+            const dx = Math.abs(p.x - edgePressSceneX)
+            const dy = Math.abs(p.y - edgePressSceneY)
+            const slop = Qt.styleHints.startDragDistance
+            // Vertical has to both clear the threshold and beat horizontal: a trim is the
+            // reason these strips exist, so anything ambiguous stays a trim.
+            if (dy > slop && dy > dx)
+                edgeAxis = 2
+            else if (dx > slop)
+                edgeAxis = 1
+            if (edgeAxis !== 2)
+                return false
+            // Re-anchored at the moment it arms, so the view does not jump by the threshold
+            // that was spent deciding.
+            edgeLastSceneY = p.y
+        }
+        // Shares the drag autoscroll's mover, which already clamps to the content bounds --
+        // writing contentY directly goes around boundsBehavior. Android-only, like it.
+        if (typeof panel.dragEdgeScroll === "function")
+            panel.dragEdgeScroll(0, edgeLastSceneY - p.y)
+        edgeLastSceneY = p.y
+        return true
+    }
+
     // Fade dots. On touch they used to be switched off outright: at the clip corners
     // they landed inside the trim strips, which own the full height of both edges.
     // Instead they are sized to a fingertip and inset past those strips, and — like the
@@ -623,6 +685,12 @@ Item {
         property real grabY: 0
 
         onPressed: (mouse) => {
+            // Read before anything selects: `selected` comes back through the model, so testing it
+            // after the call would report the state this press is about to create.
+            const wasSelected = clipItem.selected
+            // A previous gesture that ended while snapped would otherwise leave the latch engaged
+            // and swallow this one's first tick.
+            Haptics.reset()
             originTrack = clipItem.trackIndex
             originClip = clipItem.clipIndex
             moveOriginX = clipItem.clipData.start * panel.pxPerSecond
@@ -648,6 +716,11 @@ Item {
                 EditorState.addToSelection(clipItem.trackIndex, clipItem.clipIndex)
             else
                 EditorState.selectClip(clipItem.trackIndex, clipItem.clipIndex)
+            // Only when the press changed the selection. Tapping a clip that is already selected
+            // does nothing, and onClicked is about to run this same branch again — ticking on both
+            // would double up on any tap slow enough to outlast the rate limiter.
+            if (!wasSelected)
+                Haptics.select()
         }
         // Hold, then move to drag; hold and let go to get the menu. One gesture serves
         // both, which is what leaves the plain drag free for the Flickable to pan with.
@@ -657,6 +730,10 @@ Item {
             if (didDrag || drag.active || panel.multiSelectActive === true)
                 return
             moveArmed = true
+            // The moment the clip becomes draggable, and the only one in the gesture that nothing
+            // on screen can announce ahead of the user's own movement: the lift animation plays
+            // because of this, not before it.
+            Haptics.pickUp()
             if (!clipItem.selected)
                 EditorState.selectClip(clipItem.trackIndex, clipItem.clipIndex)
         }
@@ -664,7 +741,10 @@ Item {
             if (mouse.button === Qt.RightButton || didDrag)
                 return
             if (panel.multiSelectActive === true) {
+                // The press deliberately does nothing in this mode so a pan can still reach the
+                // Flickable, which leaves the tick to the tap that lands here.
                 panel.toggleInSelection(clipItem.trackIndex, clipItem.clipIndex)
+                Haptics.select()
                 return
             }
             if ((mouse.modifiers & Qt.ShiftModifier) !== 0)
@@ -772,6 +852,9 @@ Item {
                 EditorState.moveClipToTrack(originTrack, originClip, targetTrack, newStart)
             else
                 EditorState.moveClip(originTrack, originClip, newStart)
+            // Closes the gesture pickUp opened, and clears the snap and lane latches the drag left
+            // engaged.
+            Haptics.drop()
         }
         onPositionChanged: {
             if (pressed && drag.active) {
@@ -789,6 +872,8 @@ Item {
             moveArmed = false
             panel.clearMoveFollow()
             panel.clearLandingPreview()
+            // No drop tick: the clip went back where it came from. The latches still have to go.
+            Haptics.reset()
         }
     }
 
@@ -1030,12 +1115,21 @@ Item {
             preventStealing: true
             hoverEnabled: true
             cursorShape: Qt.BlankCursor
-            onPressed: {
+            onPressed: (mouse) => {
+                const wasSelected = clipItem.selected
+                Haptics.reset()
+                clipItem.beginEdgeGesture(leftTrimMouse, mouse)
                 if (!clipItem.selected)
                     EditorState.selectClip(clipItem.trackIndex, clipItem.clipIndex)
+                if (!wasSelected)
+                    Haptics.select()
             }
             onPositionChanged: (mouse) => {
                 if (!pressed)
+                    return
+                // A vertical drag on this strip is someone reaching for another layer, not for
+                // this clip's in point.
+                if (clipItem.edgeGestureScrolled(leftTrimMouse, mouse))
                     return
                 const end = (clipItem.clipData.start || 0)
                             + (clipItem.clipData.duration || 0)
@@ -1043,9 +1137,15 @@ Item {
                 // Floor duration so the clip stays at least
                 // clipMinWidth; handles remain draggable to extend.
                 const newStart = Math.min(raw, end - clipItem.minDurationSeconds)
-                EditorState.trimClipLeft(clipItem.trackIndex, clipItem.clipIndex,
-                                       Math.max(0, newStart))
+                // The trim reports what it did rather than the caller guessing from the geometry:
+                // snapping and every limit that can stop this edge live inside it, and the one the
+                // user needs told — the source running out — has no cue on screen at all.
+                Haptics.trimStep(
+                    EditorState.trimClipLeft(clipItem.trackIndex, clipItem.clipIndex,
+                                             Math.max(0, newStart)))
             }
+            onReleased: Haptics.reset()
+            onCanceled: Haptics.reset()
         }
     }
 
@@ -1102,19 +1202,28 @@ Item {
             preventStealing: true
             hoverEnabled: true
             cursorShape: Qt.BlankCursor
-            onPressed: {
+            onPressed: (mouse) => {
+                const wasSelected = clipItem.selected
+                Haptics.reset()
+                clipItem.beginEdgeGesture(rightTrimMouse, mouse)
                 if (!clipItem.selected)
                     EditorState.selectClip(clipItem.trackIndex, clipItem.clipIndex)
+                if (!wasSelected)
+                    Haptics.select()
             }
             onPositionChanged: (mouse) => {
                 if (!pressed)
                     return
+                if (clipItem.edgeGestureScrolled(rightTrimMouse, mouse))
+                    return
                 const start = clipItem.clipData.start || 0
                 const raw = mapToItem(trackRow, mouse.x, mouse.y).x / panel.pxPerSecond
                 const newEnd = Math.max(raw, start + clipItem.minDurationSeconds)
-                EditorState.trimClipRight(clipItem.trackIndex, clipItem.clipIndex,
-                                         newEnd)
+                Haptics.trimStep(
+                    EditorState.trimClipRight(clipItem.trackIndex, clipItem.clipIndex, newEnd))
             }
+            onReleased: Haptics.reset()
+            onCanceled: Haptics.reset()
         }
     }
 }

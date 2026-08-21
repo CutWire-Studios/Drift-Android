@@ -3054,38 +3054,48 @@ void AppController::splitClipRightAt(int trackIndex, int clipIndex, double secon
     selectClip(trackIndex, clipIndex);
 }
 
-void AppController::trimClipLeft(int trackIndex, int clipIndex, double newStart)
+AppController::TrimOutcome AppController::trimClipLeft(int trackIndex, int clipIndex, double newStart)
 {
     if (trackIndex < 0 || trackIndex >= m_project.tracks().size())
-        return;
+        return TrimNone;
 
     drift::Track &track = m_project.tracks()[trackIndex];
     if (clipIndex < 0 || clipIndex >= track.clips.size())
-        return;
+        return TrimNone;
 
     drift::Clip &clip = track.clips[clipIndex];
-    drift::TimeUs snappedStart = drift::snapTime(m_project, drift::secondsToUs(newStart), m_snapEnabled,
+    const drift::TimeUs requestedStart = drift::secondsToUs(newStart);
+    drift::TimeUs snappedStart = drift::snapTime(m_project, requestedStart, m_snapEnabled,
                                                  m_playheadUs, extraSnapTargets());
+    const bool snapped = snappedStart != requestedStart;
     // Extending left can create a new overlap; clamp against neighbors when overlap is off.
+    bool clamped = false;
     if (!m_allowClipOverlap && snappedStart < clip.timelineStart) {
         const QSet<QString> exclude{clip.id};
-        snappedStart = drift::clampClipStartAgainstLeftNeighbors(track, exclude, clip.timelineStart,
-                                                                 snappedStart);
+        const drift::TimeUs limited =
+            drift::clampClipStartAgainstLeftNeighbors(track, exclude, clip.timelineStart,
+                                                      snappedStart);
+        clamped = limited != snappedStart;
+        snappedStart = limited;
     }
     const drift::TimeUs delta = snappedStart - clip.timelineStart;
+    // Standing still because a snap is holding the edge is not the same as standing still because
+    // a neighbour is in the way, and only the second one is a limit worth reporting.
     if (delta == 0)
-        return;
+        return clamped ? TrimBlocked : TrimNone;
 
+    // Every bare exit below is a limit refusing the trim: the minimum duration, or the source
+    // having no more frames on that side. The edge stays put and the finger does not.
     if (isSyntheticTimelineClip(clip.type)) {
         if (delta > 0) {
             if (clip.timelineDuration - delta < drift::kMinClipDurationUs)
-                return;
+                return TrimBlocked;
             clip.timelineStart += delta;
             clip.timelineDuration -= delta;
         } else {
             const drift::TimeUs extendBy = -delta;
             if (clip.timelineDuration + extendBy > syntheticClipMaxDurationUs())
-                return;
+                return TrimBlocked;
             clip.timelineStart = snappedStart;
             clip.timelineDuration += extendBy;
         }
@@ -3100,20 +3110,20 @@ void AppController::trimClipLeft(int trackIndex, int clipIndex, double newStart)
         syncLinkedPartnersFrom(m_project, clip);
         syncOverlapTransitions(m_project);
         emit tracksChanged();
-        return;
+        return snapped ? TrimSnapped : TrimMoved;
     }
 
     if (delta > 0) {
         if (clip.timelineDuration - delta < drift::kMinClipDurationUs)
-            return;
+            return TrimBlocked;
         const drift::TimeUs sourceDelta = trimSourceDelta(clip, delta, false, false);
         if (sourceDelta <= 0)
-            return;
+            return TrimBlocked;
         if (clip.reverse) {
             if (clip.srcOut <= clip.srcIn + sourceDelta + drift::kMinClipDurationUs)
-                return;
+                return TrimBlocked;
         } else if (clip.srcIn + sourceDelta > clip.srcOut - drift::kMinClipDurationUs) {
-            return;
+            return TrimBlocked;
         }
 
         clip.timelineStart += delta;
@@ -3128,13 +3138,13 @@ void AppController::trimClipLeft(int trackIndex, int clipIndex, double newStart)
         if (clip.reverse) {
             const drift::TimeUs maxSource = sourceDurationForClip(clip);
             if (clip.srcOut + sourceExtend > maxSource)
-                return;
+                return TrimBlocked;
             clip.timelineStart = snappedStart;
             clip.srcOut += sourceExtend;
             clip.timelineDuration += extendBy;
         } else {
             if (sourceExtend > clip.srcIn)
-                return;
+                return TrimBlocked;
 
             clip.timelineStart = snappedStart;
             clip.srcIn -= sourceExtend;
@@ -3146,23 +3156,32 @@ void AppController::trimClipLeft(int trackIndex, int clipIndex, double newStart)
     syncLinkedPartnersFrom(m_project, clip);
     syncOverlapTransitions(m_project);
     emit tracksChanged();
+    return snapped ? TrimSnapped : TrimMoved;
 }
 
-void AppController::trimClipRight(int trackIndex, int clipIndex, double newEnd)
+AppController::TrimOutcome AppController::trimClipRight(int trackIndex, int clipIndex, double newEnd)
 {
     if (trackIndex < 0 || trackIndex >= m_project.tracks().size())
-        return;
+        return TrimNone;
 
     drift::Track &track = m_project.tracks()[trackIndex];
     if (clipIndex < 0 || clipIndex >= track.clips.size())
-        return;
+        return TrimNone;
 
     drift::Clip &clip = track.clips[clipIndex];
-    drift::TimeUs snappedEnd = drift::snapTime(m_project, drift::secondsToUs(newEnd), m_snapEnabled,
+    const drift::TimeUs requestedEnd = drift::secondsToUs(newEnd);
+    drift::TimeUs snappedEnd = drift::snapTime(m_project, requestedEnd, m_snapEnabled,
                                                m_playheadUs, extraSnapTargets());
+    const bool snapped = snappedEnd != requestedEnd;
+    // Unlike the left edge, this one clamps rather than bailing, so "a limit decided this" has to
+    // be collected as it goes instead of read off an early return.
+    bool clamped = false;
     if (!m_allowClipOverlap && snappedEnd > clip.timelineEnd()) {
         const QSet<QString> exclude{clip.id};
-        snappedEnd = drift::clampClipEndNoOverlap(track, exclude, clip.timelineEnd(), snappedEnd);
+        const drift::TimeUs limited =
+            drift::clampClipEndNoOverlap(track, exclude, clip.timelineEnd(), snappedEnd);
+        clamped = limited != snappedEnd;
+        snappedEnd = limited;
     }
     drift::TimeUs newDuration = snappedEnd - clip.timelineStart;
 
@@ -3176,8 +3195,13 @@ void AppController::trimClipRight(int trackIndex, int clipIndex, double newEnd)
             : maxSourceSpan;
     const drift::TimeUs maxDuration =
         syntheticVisual ? drift::secondsToUs(300.0) : mediaMaxDuration;
+    const drift::TimeUs wantedDuration = newDuration;
     newDuration = qBound(drift::kMinClipDurationUs, newDuration, maxDuration);
+    // The minimum duration and the end of the source, which are the two the user meets most.
+    if (newDuration != wantedDuration)
+        clamped = true;
 
+    const drift::TimeUs previousDuration = clip.timelineDuration;
     clip.timelineDuration = newDuration;
     const drift::TimeUs span =
         clip.hasSpeedCurve() ? trimSourceDelta(clip, newDuration, false, true) : clip.sourceSpanUs();
@@ -3191,6 +3215,11 @@ void AppController::trimClipRight(int trackIndex, int clipIndex, double newEnd)
     syncLinkedPartnersFrom(m_project, clip);
     syncOverlapTransitions(m_project);
     emit tracksChanged();
+
+    // Read after syncDurationFromSpeedCurve, which is free to move the edge again on a ramped clip.
+    if (clip.timelineDuration == previousDuration)
+        return clamped ? TrimBlocked : TrimNone;
+    return snapped ? TrimSnapped : TrimMoved;
 }
 
 void AppController::setClipTrim(int trackIndex, int clipIndex, double inPoint, double outPoint)

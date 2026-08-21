@@ -512,6 +512,8 @@ qt_add_executable(drift
     src/models/EditorState.h
     src/models/FileDialogs.h
     src/models/FileDialogs.cpp
+    src/models/Haptics.h
+    src/models/Haptics.cpp
     src/models/AssetLibrary.h
     src/models/AssetLibrary.cpp
     src/models/TimelineModel.h

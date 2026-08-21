@@ -111,6 +111,9 @@ Item {
             from: 0.25
             to: 4.0
             stepSize: 0.05
+            // Normal speed, which the preset chips above also aim at and which a 0.05 step can
+            // otherwise slide straight past.
+            detentValue: 1.0
             Binding on value {
                 when: !speedSlider.pressed
                 value: root.clipData.speed || 1.0

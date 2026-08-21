@@ -441,8 +441,20 @@ public:
     Q_INVOKABLE void splitClipAt(int trackIndex, int clipIndex, double seconds);
     Q_INVOKABLE void splitClipLeftAt(int trackIndex, int clipIndex, double seconds);
     Q_INVOKABLE void splitClipRightAt(int trackIndex, int clipIndex, double seconds);
-    Q_INVOKABLE void trimClipLeft(int trackIndex, int clipIndex, double newStart);
-    Q_INVOKABLE void trimClipRight(int trackIndex, int clipIndex, double newEnd);
+    // What a trim drag actually did, so a caller can tell "the edge moved" from "the edge refused
+    // to move". The second is a limit — the source running out of frames, the minimum duration, a
+    // neighbouring clip — and it is the one state a trim has no visual cue for: the handle simply
+    // stops under a finger that is still going.
+    enum TrimOutcome {
+        TrimNone,    // nothing to do, or the edge is already where it was asked to go
+        TrimMoved,   // the edge went where it was asked
+        TrimSnapped, // the edge moved, and snapping chose where it landed
+        TrimBlocked, // a limit refused the move
+    };
+    Q_ENUM(TrimOutcome)
+
+    Q_INVOKABLE TrimOutcome trimClipLeft(int trackIndex, int clipIndex, double newStart);
+    Q_INVOKABLE TrimOutcome trimClipRight(int trackIndex, int clipIndex, double newEnd);
     Q_INVOKABLE void setClipTrim(int trackIndex, int clipIndex, double inPoint, double outPoint);
     Q_INVOKABLE void setClipStart(int trackIndex, int clipIndex, double start);
     Q_INVOKABLE void setClipDuration(int trackIndex, int clipIndex, double duration);
